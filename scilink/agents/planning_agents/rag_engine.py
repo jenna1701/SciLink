@@ -12,26 +12,7 @@ from .instruct import (
     HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK,
     TEA_INSTRUCTIONS_FALLBACK
 )
-
-
-def _parse_json_from_response(resp) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Helper to extract JSON from LLM response objects."""
-    if hasattr(resp, 'text'): 
-        json_text = resp.text.strip()
-    elif hasattr(resp, 'parts') and resp.parts: 
-        json_text = resp.parts[0].text.strip()
-    else: 
-        return None, f"LLM response format unexpected: {resp}"
-    
-    if json_text.startswith("```json"): 
-        json_text = json_text[len("```json"):].strip()
-    if json_text.endswith("```"): 
-        json_text = json_text[:-len("```")].strip()
-        
-    try: 
-        return json.loads(json_text), None
-    except json.JSONDecodeError as e: 
-        return None, f"Failed to decode JSON: {str(e)}"
+from .parser_utils import parse_json_from_response
 
 
 def verify_plan_relevance(objective: str, 
@@ -122,7 +103,7 @@ def verify_plan_relevance(objective: str,
     # 4. Execute Verification
     try:
         response = model.generate_content([eval_prompt], generation_config=generation_config)
-        eval_result, _ = _parse_json_from_response(response)
+        eval_result, _ = parse_json_from_response(response)
         
         if eval_result and not eval_result.get("is_relevant"):
             reason = eval_result.get('reason', 'Unknown irrelevance.')
@@ -215,7 +196,7 @@ def perform_science_rag(objective: str,
     try:
         # Attempt 1: Strict RAG Generation
         response = model.generate_content(prompt_parts, generation_config=generation_config)
-        result, error_msg = _parse_json_from_response(response)
+        result, error_msg = parse_json_from_response(response)
         
         if error_msg: 
             return {"error": f"JSON Parsing Error: {error_msg}"}
@@ -242,7 +223,7 @@ def perform_science_rag(objective: str,
             prompt_parts[0] = fallback_inst
             
             fallback_response = model.generate_content(prompt_parts, generation_config=generation_config)
-            result, error_msg_fb = _parse_json_from_response(fallback_response)
+            result, error_msg_fb = parse_json_from_response(fallback_response)
             
             if error_msg_fb:
                 return {"error": f"Fallback JSON Parsing Error: {error_msg_fb}"}
@@ -313,7 +294,7 @@ def perform_code_rag(result: Dict[str, Any],
         
         try:
             resp = model.generate_content([prompt], generation_config=generation_config)
-            code_res, _ = _parse_json_from_response(resp)
+            code_res, _ = parse_json_from_response(resp)
             
             if code_res and "implementation_code" in code_res:
                 exp["implementation_code"] = code_res["implementation_code"]
@@ -360,7 +341,7 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
 
     try:
         response = model.generate_content([refinement_prompt], generation_config=generation_config)
-        refined_result, error_msg = _parse_json_from_response(response)
+        refined_result, error_msg = parse_json_from_response(response)
         
         if error_msg:
             print(f"    - ⚠️ Could not parse refined plan: {error_msg}. Reverting.")
