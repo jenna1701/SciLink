@@ -6,13 +6,13 @@ from typing import List, Dict, Any, Optional, Tuple
 import PIL.Image as PIL_Image
 
 from .excel_parser import parse_adaptive_excel
+from .parser_utils import parse_json_from_response
 from .instruct import (
     HYPOTHESIS_GENERATION_INSTRUCTIONS,
     TEA_INSTRUCTIONS,
     HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK,
     TEA_INSTRUCTIONS_FALLBACK
 )
-from .parser_utils import parse_json_from_response
 
 
 def verify_plan_relevance(objective: str, 
@@ -312,11 +312,22 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
                               feedback: str, 
                               objective: str,
                               model: Any,
-                              generation_config: Any) -> Dict[str, Any]:
+                              generation_config: Any,
+                              new_context: Optional[str] = None) -> Dict[str, Any]:
     """
-    Refines the experimental plan based on user input.
+    Refines the experimental plan based on user input or experimental results.
+    Now supports injecting fresh RAG context relevant to the feedback/results.
     """
     
+    # Construct the context block if available
+    context_block = ""
+    if new_context:
+        context_block = (
+            f"\n**📚 RELEVANT LITERATURE FOR OBSERVED RESULTS:**\n"
+            f"{new_context}\n"
+            f"(Use this literature to interpret the results and adjust the plan accordingly.)\n"
+        )
+
     refinement_prompt = f"""
     You are an expert Research Strategist acting as an editor.
     
@@ -325,10 +336,13 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
     **Current Plan (JSON):**
     {json.dumps(original_result, indent=2)}
     
-    **User Feedback/Correction:** "{feedback}"
+    **Experimental Results / Feedback:** "{feedback}"
+    {context_block}
     
     **Task:**
-    Update the "Current Plan" to strictly address the "User Feedback".
+    Update the "Current Plan" to strictly address the Feedback and Results.
+    - If the results indicate failure, use the Literature Context to propose a fix.
+    - If the results indicate success, move to the next logical step.
     
     **Constraints:**
     - You MUST return the exact same JSON structure (keys: "proposed_experiments", etc.).
@@ -356,3 +370,72 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
     except Exception as e:
         print(f"    - ⚠️ Error during refinement: {e}")
         return original_result
+    
+
+def refine_code_with_feedback(result: Dict[str, Any], 
+                              feedback: str, 
+                              model: Any, 
+                              generation_config: Any) -> Dict[str, Any]:
+    """
+    Refines the implementation code based on user feedback.
+    """
+    experiments = result.get("proposed_experiments", [])
+    if not experiments:
+        return result
+
+    # Context construction: We dump the current code so the LLM knows what to fix
+    current_code_state = ""
+    for i, exp in enumerate(experiments):
+        name = exp.get('experiment_name', f'Experiment {i+1}')
+        code = exp.get("implementation_code", "# No code generated")
+        current_code_state += f"--- CODE FOR: {name} ---\n{code}\n\n"
+
+    prompt = f"""
+    You are a Senior Research Software Engineer.
+    
+    **TASK:** Refine the Python implementation code based on User Feedback.
+    
+    **CURRENT CODE STATE:**
+    {current_code_state}
+    
+    **USER FEEDBACK / ERROR REPORT:**
+    "{feedback}"
+    
+    **INSTRUCTIONS:**
+    1. Apply the user's fixes to the relevant code blocks.
+    2. If the user refers to a specific experiment, only update that one.
+    3. You must return a JSON object with a list of "updated_codes". 
+       Each item in the list must match the order of the experiments above.
+    4. Provide the FULL updated code for each script, not just the diffs.
+    
+    **OUTPUT FORMAT:**
+    {{
+        "updated_codes": [
+            "FULL_PYTHON_SCRIPT_1...",
+            "FULL_PYTHON_SCRIPT_2..."
+        ]
+    }}
+    """
+    
+    print(f"    - ↻ Refine Code RAG: Generating updates based on feedback...")
+    try:
+        response = model.generate_content([prompt], generation_config=generation_config)
+        updates, error = parse_json_from_response(response)
+        
+        if updates and "updated_codes" in updates:
+            new_codes = updates["updated_codes"]
+            # Map back to the result structure
+            if len(new_codes) == len(experiments):
+                for i, code in enumerate(new_codes):
+                    experiments[i]["implementation_code"] = code
+                print("    - ✅ Code successfully refined.")
+            else:
+                print("    - ⚠️ Warning: LLM returned wrong number of code blocks. Skipping update.")
+        elif error:
+            print(f"    - ⚠️ JSON Error during refinement: {error}")
+        
+        return result
+        
+    except Exception as e:
+        print(f"    - ❌ Error during code refinement: {e}")
+        return result
