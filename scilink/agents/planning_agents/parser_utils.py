@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
+import logging
 
 import json
 import pandas as pd
@@ -145,3 +146,65 @@ def append_experiment_result(file_path: str, parameters: Dict[str, float], resul
     else:
         df.to_csv(path, index=False)
     print(f"✅ Appended result to {path.name}. New size: {len(df)}")
+
+
+def write_experiments_to_disk(result_json: Dict[str, Any], target_dir: str) -> List[str]:
+    """
+    Parses the result JSON and writes 'implementation_code' to .py files in the target directory.
+    Returns a list of filenames that were successfully saved.
+    """
+    path = Path(target_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    
+    experiments = result_json.get("proposed_experiments", [])
+    saved_files = []
+    
+    if not experiments:
+        logging.warning(f"No experiments found to save in {target_dir}")
+        return []
+    
+    for i, exp in enumerate(experiments):
+        code_content = exp.get("implementation_code")
+        exp_name = exp.get("experiment_name", f"Experiment_{i+1}")
+        
+        # 1. Clean filename
+        # Replace spaces with underscores and remove non-alphanumeric chars (except _ and .)
+        safe_name = "".join(c for c in exp_name if c.isalnum() or c in (' ', '_', '.')).rstrip()
+        safe_name = safe_name.replace(' ', '_')
+        
+        # Fallback if name becomes empty after cleaning
+        if not safe_name: 
+            safe_name = f"experiment_code_{i+1}"
+            
+        filename = f"{safe_name}.py"
+        file_path = path / filename
+
+        # 2. Extract and Write
+        if code_content and "No relevant code found" not in code_content:
+            try:
+                # Strip markdown code blocks (```python ... ```)
+                code_lines = code_content.splitlines()
+                
+                # Logic to find the content between the backticks
+                start_index = next((j for j, line in enumerate(code_lines) if line.strip().startswith('```')), -1)
+                end_index = next((j for j, line in enumerate(code_lines[start_index+1:]) if line.strip().endswith('```')), -1)
+                
+                if start_index != -1 and end_index != -1:
+                    # Adjust end_index because we sliced the list
+                    actual_end = start_index + 1 + end_index
+                    extracted_code = "\n".join(code_lines[start_index + 1 : actual_end]).strip()
+                else:
+                    # Fallback: assume the whole string is code if no backticks found
+                    extracted_code = code_content.strip()
+
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(extracted_code)
+                
+                saved_files.append(filename)
+                
+            except Exception as e:
+                logging.error(f"Failed to write {filename}: {e}")
+        else:
+            logging.info(f"Experiment {i+1} ('{exp_name}') has no executable code.")
+
+    return saved_files
