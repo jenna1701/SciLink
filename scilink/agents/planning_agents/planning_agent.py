@@ -498,6 +498,30 @@ class PlanningAgent:
             Dict[str, Any]: The updated internal state dictionary, containing the new `current_plan`, 
             appended `experimental_results`, and updated `plan_history`.
         """
+
+        # --- 0. STATE HYDRATION ---
+        if current_plan is not None:
+            print(f"  - 🔄 Stateless Update Mode: Hydrating agent with provided plan.")
+            
+            # Objective is critical for the RAG engine to know "Success" vs "Failure".
+            # If not provided, we try to keep existing, or warn the user.
+            if objective is None:
+                objective = self.state.get("objective", "")
+                if not objective:
+                    logging.warning("⚠️  Updating plan without an 'objective'. Agent may lack context for success criteria.")
+
+            # We merge the passed arguments into the internal state.
+            self.state.update({
+                "objective": objective,
+                "current_plan": current_plan,
+                # Ensure lists exist so .append() doesn't crash later
+                "experimental_results": self.state.get("experimental_results", []),
+                "plan_history": self.state.get("plan_history", [current_plan]),
+                "human_feedback_history": self.state.get("human_feedback_history", []),
+                # If this is a fresh load, start iteration count at 1
+                "iteration_index": self.state.get("iteration_index", 1)
+            })
+
         if not self.state or not self.state.get("current_plan"):
             logging.error("No active plan state found. Run 'propose_experiments' first.")
             return {"error": "No active state"}
