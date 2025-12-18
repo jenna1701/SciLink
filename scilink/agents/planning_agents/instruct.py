@@ -236,3 +236,25 @@ Analyze the 4-panel diagnostic dashboard.
   "suggested_adjustments": { "kernel": "matern_1.5" } (Only if fail)
 }
 """
+
+
+BO_VISUAL_INSPECTION_MOO_PROMPT = """
+You are a Principal Investigator analyzing the trade-offs in a Multi-Objective experiment.
+Analyze the diagnostic image, which contains one or more 2D scatter plots.
+
+**Key:**
+- **Red Points:** Pareto Efficient solutions (The Frontier).
+- **Gray Points:** Sub-optimal (Dominated) solutions.
+
+**Checklist:**
+1. **Trade-offs (Curves):** In any plot, do the red points form a convex curve (an "L" shape or arc)? This confirms a conflict between those two objectives.
+2. **Correlations (Lines):** In any plot, do red points form a diagonal line going UP? This means the objectives are compatible (improving one improves the other).
+3. **Spread:** Do the red points cover a wide range, or are they clustered in one spot? (We want a wide spread).
+
+**OUTPUT JSON:**
+{
+  "status": "pass" | "fail",
+  "reason": "The plot shows a clear convex trade-off curve between Yield and Purity. The red points are well-spread, indicating a successful approximation of the Pareto Frontier.",
+  "suggested_adjustments": { "acquisition_strategy": "max_variance" } (Only if points are clustered/stuck)
+}
+"""

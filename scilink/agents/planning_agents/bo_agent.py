@@ -13,7 +13,8 @@ from ...tools.bo_tools import get_optimizer
 from .instruct import (
     BO_CONFIG_SOO_PROMPT,
     BO_CONFIG_MOO_PROMPT,
-    BO_VISUAL_INSPECTION_PROMPT
+    BO_VISUAL_INSPECTION_PROMPT,
+    BO_VISUAL_INSPECTION_MOO_PROMPT
 )
 
 class BOAgent:
@@ -172,9 +173,10 @@ class BOAgent:
 
         # 6. Inspection
         print("  - 👀 BO Agent: Inspecting visuals...")
+        visual_prompt = BO_VISUAL_INSPECTION_MOO_PROMPT if is_moo else BO_VISUAL_INSPECTION_PROMPT
         try:
             img = PIL_Image.open(plot_path)
-            insp_resp = self.model.generate_content([BO_VISUAL_INSPECTION_PROMPT, img], generation_config=self.generation_config)
+            insp_resp = self.model.generate_content([visual_prompt, img], generation_config=self.generation_config)
             inspection, _ = parse_json_from_response(insp_resp)
         except Exception as e:
             inspection = {"status": "skipped", "reason": str(e)}

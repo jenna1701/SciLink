@@ -306,24 +306,74 @@ class MultiObjectiveOptimizer:
         return candidates.detach().cpu().numpy()
 
     def generate_diagnostics(self, save_path: str):
-        """Generates Pareto Frontier plot (only works for 2 objectives)."""
-        if self.output_dim != 2: return 
+        """
+        Generates Pairwise Pareto Scatter Plots for ANY N >= 2.
+        - N=2: Generates 1 plot.
+        - N=3: Generates 3 plots.
+        - N=4: Generates 6 plots.
+        """
+        import itertools
+        import math
         
         y_np = self.y_train.cpu().numpy()
-        plt.figure(figsize=(8, 6))
         
-        # Simple non-dominated sort for visualization
+        # 1. Non-dominated sort (Identify Pareto Efficient points)
         is_efficient = np.ones(y_np.shape[0], dtype=bool)
         for i, c in enumerate(y_np):
             if is_efficient[i]:
                 is_efficient[is_efficient] = np.any(y_np[is_efficient] > c, axis=1) | (y_np[is_efficient] == c).all(axis=1)
 
-        plt.scatter(y_np[~is_efficient][:,0], y_np[~is_efficient][:,1], c='gray', alpha=0.5, label='Dominated')
-        plt.scatter(y_np[is_efficient][:,0], y_np[is_efficient][:,1], c='red', label='Pareto Frontier')
+        # 2. Dynamic Plotting Logic
+        # Create all unique pairs: (0,1), (0,2), (1,2)...
+        pairs = list(itertools.combinations(range(self.output_dim), 2))
+        n_plots = len(pairs)
         
-        plt.title("Objective Space")
-        plt.xlabel("Obj 1"); plt.ylabel("Obj 2")
-        plt.legend()
+        # Determine Grid Dimensions
+        if n_plots == 1:
+            rows, cols = 1, 1
+            figsize = (8, 6)
+        else:
+            cols = min(3, n_plots)
+            rows = math.ceil(n_plots / cols)
+            figsize = (5 * cols, 4 * rows)
+        
+        fig, axes = plt.subplots(rows, cols, figsize=figsize)
+        
+        # Standardize axes object to always be iterable
+        if n_plots == 1:
+            axes_list = [axes]
+        else:
+            axes_list = axes.flatten()
+        
+        # 3. Plot Loop
+        for idx, (dim_x, dim_y) in enumerate(pairs):
+            ax = axes_list[idx]
+            
+            # Plot Dominated (Gray)
+            ax.scatter(y_np[~is_efficient][:, dim_x], y_np[~is_efficient][:, dim_y], 
+                       c='gray', alpha=0.3, label='Dominated' if idx == 0 else "")
+            
+            # Plot Efficient (Red)
+            ax.scatter(y_np[is_efficient][:, dim_x], y_np[is_efficient][:, dim_y], 
+                       c='red', edgecolors='darkred', s=40, label='Pareto' if idx == 0 else "")
+            
+            # Labels: Use column names if available, else generic "Obj 1"
+            name_x = self.feature_names[dim_x] if self.feature_names and dim_x < len(self.feature_names) else f"Obj {dim_x+1}"
+            name_y = self.feature_names[dim_y] if self.feature_names and dim_y < len(self.feature_names) else f"Obj {dim_y+1}"
+            
+            ax.set_xlabel(name_x)
+            ax.set_ylabel(name_y)
+            ax.set_title(f"{name_x} vs {name_y}")
+            ax.grid(True, linestyle='--', alpha=0.5)
+
+            if idx == 0: ax.legend()
+
+        # Hide empty subplots in the grid
+        for i in range(n_plots, len(axes_list)):
+            axes_list[i].axis('off')
+
+        plt.suptitle(f"Multi-Objective Diagnostics ({self.output_dim} Objectives)", fontsize=16)
+        plt.tight_layout()
         plt.savefig(save_path)
         plt.close()
 
