@@ -25,6 +25,7 @@ from .instruct import (
 
 from ...auth import get_api_key, APIKeyNotFoundError
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ..lit_agents.literature_agent import LiteratureSearchAgent
 
 from .rag_engine import (
     perform_science_rag, 
@@ -47,7 +48,8 @@ class PlanningAgent:
     4. Feedback history (both Scientific and Implementation)
     """
     def __init__(self, google_api_key: str = None,
-                 model_name: str = "gemini-2.5-pro-preview-06-05",
+                 futurehouse_api_key: str = None,
+                 model_name: str = "gemini-3-pro-preview",
                  local_model: str = None,
                  embedding_model: str = "gemini-embedding-001",
                  kb_base_path: str = "./kb_storage/default_kb",
@@ -69,6 +71,8 @@ class PlanningAgent:
             self.model = genai.GenerativeModel(model_name)
             self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
 
+        self.lit_agent = LiteratureSearchAgent(futurehouse_api_key, max_wait_time=1000)
+        
         self.code_chunk_size = code_chunk_size
 
         # --- Dual KnowledgeBase Initialization ---
@@ -318,6 +322,14 @@ class PlanningAgent:
             for header, content in additional_context.items():
                 ctx_string += f"## {header}\n{content}\n\n"
         ctx_string = ctx_string.strip() if ctx_string else None
+
+        lit_context = ""
+        if self.lit_agent:
+            print(f"  - 🌍 Querying literature for hypothesis context...")
+            res = self.lit_agent.search_for_hypothesis_context(objective)
+            
+            if res['status'] == 'success':
+                lit_context = res['content']
         
         res = perform_science_rag(
             objective=objective,
@@ -329,7 +341,8 @@ class PlanningAgent:
             primary_data_set=primary_data_set,
             image_paths=image_paths,
             image_descriptions=image_descriptions,
-            additional_context=ctx_string
+            additional_context=ctx_string,
+            external_context=lit_context
         )
 
         # Update State
@@ -761,6 +774,14 @@ class PlanningAgent:
         
         if not self._ensure_kb_is_ready(science_paths, code_paths, structured_data_sets):
             return {"error": "KB Init Failed"}
+        
+        lit_context = ""
+        if self.lit_agent:
+            print(f"  - 🌍 Querying literature for TEA context...")
+            res = self.lit_agent.search_for_economic_data(objective)
+            
+            if res['status'] == 'success':
+                lit_context = res['content']
 
         res = perform_science_rag(
             objective=objective, 
@@ -771,7 +792,8 @@ class PlanningAgent:
             generation_config=self.generation_config,
             primary_data_set=primary_data_set, 
             image_paths=image_paths, 
-            image_descriptions=image_descriptions
+            image_descriptions=image_descriptions,
+            external_context=lit_context
         )
 
         if output_json_path: self._save_results_to_json(res, output_json_path)

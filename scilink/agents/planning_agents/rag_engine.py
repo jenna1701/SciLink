@@ -128,7 +128,8 @@ def perform_science_rag(objective: str,
                         primary_data_set: Optional[Dict[str, str]] = None,
                         image_paths: Optional[List[str]] = None,
                         image_descriptions: Optional[List[str]] = None,
-                        additional_context: Optional[str] = None) -> Dict[str, Any]:
+                        additional_context: Optional[str] = None,
+                        external_context: Optional[str] = None) -> Dict[str, Any]:
     """
     Executes the Scientific/TEA RAG loop using the Docs KnowledgeBase.
     Includes logic for handling Primary Data (Excel) and Fallback generation.
@@ -154,7 +155,7 @@ def perform_science_rag(objective: str,
     
     unique_chunks = {c['text']: c for c in doc_chunks}.values()
     
-    if not unique_chunks and not primary_data_str:
+    if not unique_chunks and not primary_data_str and not external_context:
         retrieved_context_str = "No specific documents found in Knowledge Base."
     else:
         rag_str = "\n\n---\n\n".join(
@@ -162,8 +163,18 @@ def perform_science_rag(objective: str,
             for c in unique_chunks
         )
         retrieved_context_str = ""
-        if primary_data_str: retrieved_context_str += f"## Primary Data Summary\n{primary_data_str}\n\n"
-        if rag_str: retrieved_context_str += f"## Retrieved Scientific Literature\n{rag_str}"
+
+        # Primary Data
+        if primary_data_str: 
+            retrieved_context_str += f"## 📊 Primary Lab Data Summary\n{primary_data_str}\n\n"
+        
+        # B. External Literature
+        if external_context:
+            retrieved_context_str += f"## 🌍 External Scientific Literature\n{external_context}\n\n"
+
+        # C. Local Documents
+        if rag_str: 
+            retrieved_context_str += f"## 📂 Retrieved Local Documents\n{rag_str}"
 
     # --- 3. Construct Multimodal Prompt ---
     loaded_images = []
