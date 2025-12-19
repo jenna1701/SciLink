@@ -336,14 +336,14 @@ class PlanningAgent:
         lit_context = ""
         if self.lit_agent:
             print(f"  - 🌍 Querying literature for hypothesis context...")
-            res = self.lit_agent.search_for_hypothesis_context(
+            lit_res = self.lit_agent.search_for_hypothesis_context(
                 optimize_search_query(
                     objective=objective,
                     model=self.model)
             )
             
-            if res['status'] == 'success':
-                lit_context = res['content']
+            if lit_res['status'] == 'success':
+                lit_context = lit_res['content']
         
         res = perform_science_rag(
             objective=objective,
@@ -358,6 +358,9 @@ class PlanningAgent:
             additional_context=ctx_string,
             external_context=lit_context
         )
+
+        if lit_context:
+            res["literature_search"] = lit_context
 
         # Update State
         self.state["current_plan"] = res
@@ -792,14 +795,14 @@ class PlanningAgent:
         lit_context = ""
         if self.lit_agent:
             print(f"  - 🌍 Querying literature for TEA context...")
-            res = self.lit_agent.search_for_economic_data(
+            lit_res = self.lit_agent.search_for_economic_data(
                 optimize_search_query(
                     objective=objective,
                     model=self.model)
             )
             
-            if res['status'] == 'success':
-                lit_context = res['content']
+            if lit_res['status'] == 'success':
+                lit_context = lit_res['content']
 
         res = perform_science_rag(
             objective=objective, 
@@ -814,5 +817,9 @@ class PlanningAgent:
             external_context=lit_context
         )
 
-        if output_json_path: self._save_results_to_json(res, output_json_path)
+        if lit_context:
+            res["literature_search"] = lit_context
+
+        if output_json_path:
+            self._save_results_to_json(res, output_json_path)
         return res
