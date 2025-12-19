@@ -324,7 +324,9 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
                               objective: str,
                               model: Any,
                               generation_config: Any,
-                              new_context: Optional[str] = None) -> Dict[str, Any]:
+                              new_context: Optional[str] = None,
+                              result_images: Optional[List[Any]] = None
+                              ) -> Dict[str, Any]:
     """
     Refines the experimental plan based on user input or experimental results.
     Now supports injecting fresh RAG context relevant to the feedback/results.
@@ -364,14 +366,22 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
     A single valid JSON object containing the updated plan.
     """
 
+    prompt_parts = [refinement_prompt]
+    
+    if result_images:
+        print(f"    + 📎 Attaching {len(result_images)} images to refinement prompt.")
+        prompt_parts.extend(result_images)
+
     try:
-        response = model.generate_content([refinement_prompt], generation_config=generation_config)
+        # 4. Generate Content (Sending List of Text + Images)
+        response = model.generate_content(prompt_parts, generation_config=generation_config)
         refined_result, error_msg = parse_json_from_response(response)
         
         if error_msg:
             print(f"    - ⚠️ Could not parse refined plan: {error_msg}. Reverting.")
             return original_result
         
+        # Structure Validation
         if "proposed_experiments" not in refined_result:
             print("    - ⚠️ Refined plan invalid structure. Reverting.")
             return original_result

@@ -598,8 +598,9 @@ class PlanningAgent:
                 elif suffix in ['.png', '.jpg', '.jpeg', '.tiff', '.bmp']:
                     print(f"  - 🖼️  Loading result image: {path.name}")
                     try:
-                        img = PIL_Image.open(path)
-                        loaded_images.append(img)
+                        with PIL_Image.open(path) as img:
+                            img.load()  
+                            loaded_images.append(img.copy())
                         text_output = f"[Attached Image: {path.name}]"
                     except Exception as e:
                         text_output = f"[Error loading image {path.name}: {e}]"
@@ -693,7 +694,7 @@ class PlanningAgent:
             model=self.model,
             generation_config=self.generation_config,
             new_context=new_literature_context,
-            result_images=loaded_images # <--- Images passed here
+            result_images=loaded_images
         )
         
         # =====================================================
