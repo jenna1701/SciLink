@@ -228,7 +228,7 @@ class PlanningAgent:
             print(f"Processing {len(structured_data_sets)} Structured Data Sets...")
             for data_set in structured_data_sets:
                 try:
-                    if Path(data_set['file_path']).suffix.lower() in ['.xlsx', '.xls']:
+                    if Path(data_set['file_path']).suffix.lower() in ['.xlsx', '.xls', '.csv']:
                         excel_chunks = parse_adaptive_excel(data_set['file_path'], data_set['metadata_path'])
                         if excel_chunks: doc_chunks.extend(excel_chunks)
                 except Exception as e: print(f"  - ❌ Error processing Excel: {e}")
