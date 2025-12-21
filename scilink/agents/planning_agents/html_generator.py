@@ -144,6 +144,7 @@ class HTMLReportGenerator:
         return "\n".join(html_output)
 
     def _render_experiment(self, exp: Dict[str, Any], index: int) -> str:
+
         code_html = ""
         if "implementation_code" in exp:
             code_html = f"""
@@ -153,18 +154,51 @@ class HTMLReportGenerator:
             </div>
             """
         
-        # We parse the hypothesis and steps through the markdown converter
-        # Steps are usually a list of strings, so we handle them specifically
         steps_html = ""
         raw_steps = exp.get('experimental_steps', [])
+        
         if raw_steps:
-             # Check if any step contains a table (unlikely in a list, but possible if it's a long string)
-             # Usually tables appear in 'hypothesis' or 'justification' or raw text blocks.
-             # But sometimes the 'steps' is just one big string.
              if isinstance(raw_steps, list):
-                 steps_content = "".join(f"<li>{self._markdown_to_html(s)}</li>" for s in raw_steps)
+                 merged_steps = []
+                 table_buffer = []
+                 
+                 # Regex matches lines that have at least one internal pipe (e.g., "A | B")
+                 # ^\s* : Start of string, optional whitespace
+                 # \|?      : Optional starting pipe
+                 # .*\|.* : Content containing at least one pipe in the middle
+                 # \|?      : Optional ending pipe
+                 # \s*$     : Optional whitespace, end of string
+                 table_row_pattern = re.compile(r"^\s*\|?.*\|.*\|?\s*$")
+
+                 for step in raw_steps:
+                     s_str = str(step).strip()
+                     
+                     # Check if it looks like a table row
+                     # We strictly require at least one pipe '|' to avoid merging normal text sentences
+                     is_table_row = ('|' in s_str) and table_row_pattern.match(s_str)
+                     
+                     if is_table_row:
+                         table_buffer.append(s_str)
+                     else:
+                         # If we hit a non-table line, flush the buffer first
+                         if table_buffer:
+                             merged_steps.append("\n".join(table_buffer))
+                             table_buffer = []
+                         merged_steps.append(s_str)
+                 
+                 # Flush any remaining table at the very end
+                 if table_buffer:
+                     merged_steps.append("\n".join(table_buffer))
+                 
+                 # Render the processed steps
+                 steps_content = ""
+                 for s in merged_steps:
+                     rendered = self._markdown_to_html(s)
+                     steps_content += f"<li>{rendered}</li>"
+                 
                  steps_html = f"<ul>{steps_content}</ul>"
              else:
+                 # Handle case where steps are just a single string block
                  steps_html = self._markdown_to_html(str(raw_steps))
 
         return f"""
