@@ -24,10 +24,9 @@ You MUST respond with a single JSON object containing a key "proposed_experiment
 - "hypothesis": (String) A clear, single-sentence, testable hypothesis.
 - "experiment_name": (String) A short, descriptive name for the experiment.
 - "experimental_steps": (List of Strings) A numbered or bulleted list of concrete steps to perform the experiment.
-    - **IMPORTANT:** You must explicitly state all experimental parameters (volumes, concentrations, timepoints, coordinates, etc.)
-    - **NO PLACEHOLDERS:** Do not use ambiguities like "appropriate amount" or "standard settings". You must explicitly define all configurations and parameters (e.g., specify exact input values, gradients, sequences, or spatial layouts instead of generic descriptions).
-    - **TABULAR DATA:** If the experiment involves a grid or a gradient, you MUST include a Markdown table defining the exact layout    
-    - **SELF-CONTAINED:** Must be fully understandable by a human WITHOUT referencing external code or files or other sections of the JSON file.
+    - Avoid using placeholders like "appropriate amount" or "standard settings".
+    - If the experiment involves a grid or a gradient, include a Markdown table defining the exact layout.   
+    - Must be fully understandable by a human WITHOUT referencing external code or files or other sections of the JSON file.
 - "required_equipment": (List of Strings) A list of key instruments or techniques mentioned in the context that are required for this experiment.
 - "optimization_params": (Optional List) If the experiment requires numerical optimization, provide:
     - "parameter_name": (String) e.g., "Temperature"
@@ -94,8 +93,13 @@ Propose one or more specific, actionable experiments. You may use your general s
 You MUST respond with a single JSON object containing a key "proposed_experiments", which is a list of experiment plans. Each plan must have the keys:
 - "hypothesis": (String) A clear, single-sentence, testable hypothesis.
 - "experiment_name": (String) A short, descriptive name for the experiment.
-- "experimental_steps": (List of Strings) A numbered or bulleted list of concrete steps.
+- "experimental_steps": (List of Strings) A numbered or bulleted list of concrete steps to perform the experiment. Must be self-contained, i.e. fully understandable by a human WITHOUT referencing external code or files or other sections of the JSON file.
 - "required_equipment": (List of Strings) A list of common lab equipment.
+- "optimization_params": (Optional List) If the experiment requires numerical optimization, provide:
+    - "parameter_name": (String) e.g., "Temperature"
+    - "min_value": (Float) e.g., 20.0
+    - "max_value": (Float) e.g., 100.0
+    - "rationale": (String) e.g., "Literature suggests instability above 100C."
 - "expected_outcome": (String) A description of what results would support the hypothesis.
 - "justification": (String) **MUST be 'Warning: This proposal is based on general scientific knowledge as the provided documents lacked specific context.'**
 - "source_documents": (List ofStrings) An empty list `[]`.
