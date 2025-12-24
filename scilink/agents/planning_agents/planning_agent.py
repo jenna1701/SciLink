@@ -217,7 +217,7 @@ class PlanningAgent:
             
             # Inputs
             "inputs": {
-                "science_paths": kwargs.get("science_paths", []),
+                "knowledge_paths": kwargs.get("knowledge_paths", []),
                 "code_paths": kwargs.get("code_paths", []),
                 "additional_context": kwargs.get("additional_context"),
                 "primary_data_set": kwargs.get("primary_data_set"),
@@ -253,14 +253,14 @@ class PlanningAgent:
             with p.open('w', encoding='utf-8') as f: json.dump(self.state, f, indent=2)
         except Exception as e: logging.error(f"    - ❌ Failed to save state: {e}")
 
-    def _build_and_save_kb(self, science_paths: Optional[List[str]] = None, code_paths: Optional[List[str]] = None) -> bool:
+    def _build_and_save_kb(self, knowledge_paths: Optional[List[str]] = None, code_paths: Optional[List[str]] = None) -> bool:
         print("\n--- Rebuilding Knowledge Bases ---")
         
         # 1. Science KB
         doc_chunks = []
-        if science_paths:
-            print(f"Processing {len(science_paths)} Scientific Paths...")
-            doc_chunks.extend(ingest_files(science_paths, is_code_mode=False))
+        if knowledge_paths:
+            print(f"Processing {len(knowledge_paths)} Scientific Paths...")
+            doc_chunks.extend(ingest_files(knowledge_paths, is_code_mode=False))
 
         if doc_chunks:
             print(f"  - Building Scientific KB with {len(doc_chunks)} chunks...")
@@ -293,8 +293,8 @@ class PlanningAgent:
         self._kb_is_built = True
         return True
 
-    def _ensure_kb_is_ready(self, science_paths: Optional[List[str]] = None, code_paths: Optional[List[str]] = None) -> bool:
-        new_science = self.kb_docs.source_difference(science_paths)
+    def _ensure_kb_is_ready(self, knowledge_paths: Optional[List[str]] = None, code_paths: Optional[List[str]] = None) -> bool:
+        new_science = self.kb_docs.source_difference(knowledge_paths)
         new_code = self.kb_code.source_difference(code_paths)
         
         if new_science or new_code:
@@ -305,9 +305,8 @@ class PlanningAgent:
         return True
 
     def propose_experiments(self, objective: str, 
-                            science_paths: Optional[List[str]] = None, 
+                            knowledge_paths: Optional[List[str]] = None, 
                             code_paths: Optional[List[str]] = None,
-                            structured_data_sets: Optional[List[Dict[str, str]]] = None,
                             additional_context: Optional[Dict[str, str]] = None,
                             primary_data_set: Optional[Dict[str, str]] = None,
                             image_paths: Optional[List[str]] = None,
@@ -333,7 +332,7 @@ class PlanningAgent:
                     - "Screen 96 conditions to selectively precipitate magnesium"
                     - "Develop a high-throughput assay for enzyme activity"
             
-            science_paths (Optional[List[str]]): Paths to scientific documents/data.
+            knowledge_paths (Optional[List[str]]): Paths to scientific documents/data.
                 Supported formats: PDFs, .txt, .md, .xlsx, .csv, directories.
                 You can pass Excel/CSV files directly here. If a .json file 
                 with the same name exists next to the data file, it is automatically 
@@ -348,9 +347,6 @@ class PlanningAgent:
                     - ["./opentrons_api/"]  # Local repo
                     - ["https://github.com/org/automation-lib.git"]  # Git URL
             
-            structured_data_sets (Optional[List[Dict[str, str]]]): Legacy argument for explicit data definition. 
-                Prefer passing files directly to 'science_paths' for simplicity.
-            
             additional_context (Optional[Dict[str, str]]): Additional text context
                 to inject into the prompt. Keys become section headers.
                 Example: {
@@ -359,8 +355,7 @@ class PlanningAgent:
                 }
             
             primary_data_set (Optional[Dict[str, str]]): Main dataset to analyze.
-                Similar format to structured_data_sets, but gets priority placement
-                in the prompt. Use for the dataset that drives the research objective.
+                Use for the dataset that drives the research objective.
                 Example: {"file_path": "./screening_results.xlsx"}
             
             image_paths (Optional[List[str]]): Paths to images (plots, diagrams, photos).
@@ -414,7 +409,7 @@ class PlanningAgent:
         if reset_state or not self.state:
             self.state = self._initialize_state(
                 objective=objective,
-                science_paths=science_paths,
+                knowledge_paths=knowledge_paths,
                 code_paths=effective_code_paths,
                 additional_context=additional_context,
                 primary_data_set=primary_data_set,
@@ -434,7 +429,7 @@ class PlanningAgent:
         
 
         # 3. Init KB
-        if not self._ensure_kb_is_ready(science_paths, effective_code_paths):
+        if not self._ensure_kb_is_ready(knowledge_paths, effective_code_paths):
             self.state["status"] = "failed"
             self.state["last_error"] = "KB Init Failed"
             return self.state
@@ -978,7 +973,7 @@ class PlanningAgent:
             print(f"⚠️ Failed to generate HTML report: {e}")
 
     def perform_technoeconomic_analysis(self, objective: str,
-                                        science_paths: Optional[List[str]] = None,
+                                        knowledge_paths: Optional[List[str]] = None,
                                         primary_data_set: Optional[Dict[str, str]] = None,
                                         image_paths: Optional[List[str]] = None,
                                         image_descriptions: Optional[List[str]] = None,
@@ -1001,13 +996,13 @@ class PlanningAgent:
             >>> # Perform TEA first
             >>> tea_results = agent.perform_technoeconomic_analysis(
             ...     objective="Recover lithium from brine",
-            ...     science_paths=["./market_data/", "./reports/"],
+            ...     knowledge_paths=["./market_data/", "./reports/"],
             ... )
             >>> 
             >>> # Use TEA insights in experimental planning
             >>> plan = agent.propose_experiments(
             ...             objective="Develop lithium extraction process",
-            ...             science_paths=["./extraction_methods/"],
+            ...             knowledge_paths=["./extraction_methods/"],
             ...             additional_context=tea_results,
             ...             primary_data_set={
             ...                "file_path": "./brine_composition.xlsx",
@@ -1021,13 +1016,13 @@ class PlanningAgent:
                 - "Evaluate magnesium extraction from produced water"
                 - "Assess economic viability of direct air capture"
         
-        science_paths (Optional[List[str]]): Paths to documents for TEA context.
+        knowledge_paths (Optional[List[str]]): Paths to documents for TEA context.
             Should include market data, pricing reports, criticality assessments,
             existing TEA studies, and process descriptions. Supports both PDF/TXT and Excel/CSV.
             Examples: ["./market_reports/", "./critical_materials_report.pdf", "./public_data.xlsx", "./public_data.json"]
         
         primary_data_set (Optional[Dict[str, str]]): Main dataset for analysis.
-            Typically contains composition, concentration, or yield data.
+            Can contain composition, concentration, or yield data.
             Example: {"file_path": "./feedstock_composition.xlsx"}
         
         image_paths (Optional[List[str]]): Images to support TEA analysis.
@@ -1048,7 +1043,7 @@ class PlanningAgent:
         >>> agent = PlanningAgent()
         >>> state = agent.propose_experiments(
         ...     objective="Optimize enzyme kinetics",
-        ...     science_paths=["./enzyme_papers/"],
+        ...     knowledge_paths=["./enzyme_papers/"],
         ...     code_paths=["./plate_reader_api/"],
         ...     output_json_path="./plan.json"
         ... )
@@ -1058,7 +1053,7 @@ class PlanningAgent:
     Example - Advanced with Data:
         >>> state = agent.propose_experiments(
         ...     objective="Identify optimal precipitation conditions",
-        ...     science_paths=["./papers/", "./protocols.pdf"],
+        ...     knowledge_paths=["./papers/", "./protocols.pdf"],
         ...     code_paths=["https://github.com/opentrons/opentrons"],
         ...     primary_data_set={
         ...         "file_path": "./icpms_results.xlsx",
@@ -1079,7 +1074,7 @@ class PlanningAgent:
         if not self.state:
             self.state = self._initialize_state(
                 objective=objective,
-                science_paths=science_paths,
+                knowledge_paths=knowledge_paths,
                 code_paths=None,
                 primary_data_set=primary_data_set,
                 image_paths=image_paths,
@@ -1090,7 +1085,7 @@ class PlanningAgent:
         self.state["iteration_index"] = 0
 
         # 2. Build KB if needed
-        if not self._ensure_kb_is_ready(science_paths, code_paths=None):
+        if not self._ensure_kb_is_ready(knowledge_paths, code_paths=None):
             return {"error": "KB Init Failed"}
         
         # 3. Literature Search
