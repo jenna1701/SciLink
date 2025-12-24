@@ -95,3 +95,18 @@ def get_user_feedback() -> Optional[str]:
         return None # User accepted the plan
         
     return feedback
+
+
+def get_dataset_description(filename: str) -> str:
+    """
+    Interactive prompt when metadata is missing.
+    """
+    print("\n" + "!"*60)
+    print(f"⚠️  MISSING METADATA FOR: {filename}")
+    print("!"*60)
+    print("The agent needs context to understand columns/units in this file.")
+    print("• Option 1: Press [ENTER] to skip (Agent will guess based on headers).")
+    print("• Option 2: Type a brief description (e.g., 'Yield results from Suzuki coupling').")
+    
+    desc = input("\n> Context: ").strip()
+    return desc

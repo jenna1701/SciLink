@@ -1,7 +1,7 @@
 import os
 from typing import List, Dict, Any
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Union
 import logging
 
 import json
@@ -209,3 +209,69 @@ def write_experiments_to_disk(result_json: Dict[str, Any], target_dir: str) -> L
             logging.info(f"Experiment {i+1} ('{exp_name}') has no executable code.")
 
     return saved_files
+
+
+def resolve_primary_data_path(data_input: Union[str, Dict[str, str], None]) -> Optional[Dict[str, str]]:
+    """
+    Normalizes input into a standard Dict format for primary data.
+    
+    Capabilities:
+    1. Normalizes String path ("data.xlsx") -> Dict
+    2. Auto-Discovers metadata: Checks for 'data.json' or 'data.user_desc.json'
+    3. Interactive Fallback: Prompts user if no metadata is found (and saves the result).
+    """
+    if not data_input:
+        return None
+
+    # 1. Normalize String input to Dict
+    if isinstance(data_input, str):
+        data_input = {"file_path": data_input}
+
+    path = Path(data_input["file_path"])
+    if not path.exists():
+        print(f"❌ Primary data file not found: {path}")
+        return None
+
+    # 2. Check if metadata path is already explicitly provided
+    if "metadata_path" in data_input and data_input["metadata_path"]:
+        return data_input 
+
+    # 3. Auto-Discovery Logic
+    # Priority A: Check for existing matching JSON (e.g., data.json)
+    candidate_json = path.with_suffix('.json')
+    if candidate_json.exists():
+        print(f"  - 🔍 Auto-discovered metadata: {candidate_json.name}")
+        return {"file_path": str(path), "metadata_path": str(candidate_json)}
+
+    # Priority B: Check for previously saved user description (e.g., data.user_desc.json)
+    saved_desc_file = path.with_suffix('.user_desc.json')
+    if saved_desc_file.exists():
+        print(f"  - 🔍 Found saved user description: {saved_desc_file.name}")
+        return {"file_path": str(path), "metadata_path": str(saved_desc_file)}
+
+    # 4. Interactive Fallback
+    from .user_interface import get_dataset_description
+    
+    user_desc = get_dataset_description(path.name)
+    
+    if user_desc:
+        try:
+            # We create a minimal valid JSON structure for the excel_parser
+            # We map 'description' to 'objective' so it gets picked up by excel_parser logic
+            meta_content = {
+                "title": path.stem,
+                "objective": user_desc, 
+                "generated_by": "user_interactive_prompt"
+            }
+            
+            with open(saved_desc_file, 'w', encoding='utf-8') as f:
+                json.dump(meta_content, f, indent=2)
+            
+            print(f"  - 💾 Saved description to: {saved_desc_file.name}")
+            return {"file_path": str(path), "metadata_path": str(saved_desc_file)}
+        except Exception as e:
+            print(f"  - ⚠️ Could not save description file: {e}")
+            return {"file_path": str(path), "metadata_path": None}
+    
+    # User chose to skip
+    return {"file_path": str(path), "metadata_path": None}

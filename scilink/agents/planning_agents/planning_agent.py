@@ -5,7 +5,7 @@ import json
 import logging
 import shutil
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from pathlib import Path
 from datetime import datetime
 import PIL.Image as PIL_Image
@@ -14,7 +14,8 @@ from .knowledge_base import KnowledgeBase
 from .excel_parser import parse_adaptive_excel
 from .parser_utils import (
     generate_repo_map, 
-    write_experiments_to_disk
+    write_experiments_to_disk,
+    resolve_primary_data_path
 )
 from .repo_loader import clone_git_repository
 
@@ -306,7 +307,7 @@ class PlanningAgent:
                             knowledge_paths: Optional[List[str]] = None, 
                             code_paths: Optional[List[str]] = None,
                             additional_context: Optional[Dict[str, str]] = None,
-                            primary_data_set: Optional[Dict[str, str]] = None,
+                            primary_data_set: Optional[Union[str, Dict[str, str]]] = None,
                             image_paths: Optional[List[str]] = None,
                             image_descriptions: Optional[List[str]] = None,
                             output_json_path: Optional[str] = None,
@@ -387,7 +388,9 @@ class PlanningAgent:
                 - iteration_index: Current iteration number (1 for initial plan)
                 - current_plan: The active experimental plan, structure
         """
-        
+        # 0. Resolve Primary Data
+        primary_data_set = resolve_primary_data_path(primary_data_set)
+
         # 1. Resolve Code Paths
         effective_code_paths = []
         if code_paths:
@@ -972,7 +975,7 @@ class PlanningAgent:
 
     def perform_technoeconomic_analysis(self, objective: str,
                                         knowledge_paths: Optional[List[str]] = None,
-                                        primary_data_set: Optional[Dict[str, str]] = None,
+                                        primary_data_set: Optional[Union[str, Dict[str, str]]] = None,
                                         image_paths: Optional[List[str]] = None,
                                         image_descriptions: Optional[List[str]] = None,
                                         output_json_path: Optional[str] = None) -> Dict[str, Any]:
@@ -1068,6 +1071,9 @@ class PlanningAgent:
         ... )
     """
         
+        # 0. Resolve Primary Data
+        primary_data_set = resolve_primary_data_path(primary_data_set)
+
         # 1. State Initialization (if starting fresh with TEA)
         if not self.state:
             self.state = self._initialize_state(
