@@ -187,10 +187,16 @@ class PlanningAgent:
     def _load_knowledge_bases(self):
         """Attempts to load both KBs from disk."""
         print(f"  - Docs KB: Loading from {self.kb_docs_prefix}...")
-        docs_loaded = self.kb_docs.load(self.kb_docs_index, self.kb_docs_chunks)
+        docs_loaded = self.kb_docs.load(
+            self.kb_docs_index, self.kb_docs_chunks,
+            sources_path=self.kb_docs_sources_path
+        )
         
         print(f"  - Code KB: Loading from {self.kb_code_prefix}...")
-        code_loaded = self.kb_code.load(self.kb_code_index, self.kb_code_chunks, self.kb_code_map_path)
+        code_loaded = self.kb_code.load(
+            self.kb_code_index, self.kb_code_chunks, self.kb_code_map_path,
+            sources_path=self.kb_code_sources_path
+        )
 
         self._kb_is_built = docs_loaded or code_loaded
         

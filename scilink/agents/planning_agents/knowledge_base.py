@@ -60,8 +60,8 @@ class KnowledgeBase:
             print("⚠️  KnowledgeBase build skipped: No chunks provided.")
             return
 
-        self.chunks = chunks
-        texts_to_embed = [chunk['text'] for chunk in self.chunks]
+        self.chunks.extend(chunks)
+        texts_to_embed = [chunk['text'] for chunk in chunks]
         all_embeddings = []
         
         print(f"  - Generating embeddings for {len(texts_to_embed)} chunks using '{self.embedding_model_name}'...")
@@ -239,18 +239,35 @@ class KnowledgeBase:
        
     def source_difference(self, new_sources: List[str | Dict[str, str]]) -> List[str | Dict[str, str]]:
         """Returns the subset of new sources which are not present in the existing sources."""
+        
+        if not new_sources:
+            return []
+
+        # Check if the new sources are dictionaries
         contains_dict = any(isinstance(item, dict) for item in new_sources)
         
         if contains_dict:
-            # handles list of dict sources from Excel/CSV structured data
-            new_sources_tuple = {tuple(d.items()) for d in new_sources}
-            old_sources_tuple = {tuple(d.items()) for d in self.sources}
+            # 1. Convert new sources to tuples for set comparison
+            new_sources_tuple = {tuple(sorted(d.items())) for d in new_sources if isinstance(d, dict)}
+            
+            # 2. Filter existing sources to ONLY check dictionaries
+            old_sources_tuple = {
+                tuple(sorted(d.items())) 
+                for d in self.sources 
+                if isinstance(d, dict)
+            }
+            
+            # 3. Calculate difference and convert back to dicts
             difference_tuples = new_sources_tuple - old_sources_tuple
             source_difference = [dict(t) for t in difference_tuples]
+            
         else:
-            # handles lists of string sources
-            source_difference = list(set(new_sources) - set(self.sources))
+            # 1. Filter existing sources to only check strings
+            existing_strings = {s for s in self.sources if isinstance(s, str)}
+            
+            # 2. Calculate difference
+            source_difference = list(set(new_sources) - existing_strings)
         
-        # udpate sources
+        # Update history
         self.sources.extend(source_difference)
         return source_difference
