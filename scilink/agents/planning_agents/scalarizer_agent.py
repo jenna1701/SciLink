@@ -18,6 +18,20 @@ class ScalarizerAgent:
     """
     Agent for converting raw experimental data into scalar descriptors
     suitable for Bayesian Optimization.
+
+    Example:
+        >>> agent = ScalarizerAgent()
+        >>> context = {
+        ...     "hypothesis": "Product peak expected at 5.5 min",
+        ...     "expected_outcome": "High yield > 80%"
+        ... }
+        >>> result = agent.scalarize(
+        ...     data_path="data/hplc_run_01.csv",
+        ...     objective_query="Integrate peak at 5.5 min. Calculate Purity %.",
+        ...     experiment_context=context
+        ... )
+        >>> print(result["metrics"])
+        {'purity': 98.5, 'peak_area': 12504.2}
     """
     def __init__(self, 
                  google_api_key: str = None, 
@@ -133,6 +147,33 @@ class ScalarizerAgent:
         """
         Main entry point. Converts raw data -> Scalar Metrics.
         Auto-discovers metadata JSON if not provided.
+
+        Example:
+            >>> agent = ScalarizerAgent()
+            >>> context = {
+            ...     "hypothesis": "Product peak expected at 5.5 min",
+            ...     "expected_outcome": "High yield > 80%"
+            ... }
+            >>> result = agent.scalarize(
+            ...     data_path="data/hplc_run_01.csv",
+            ...     objective_query="Integrate peak at 5.5 min. Calculate Purity %.",
+            ...     experiment_context=context
+            ... )
+            >>> print(result["metrics"])
+            {'purity': 98.5, 'peak_area': 12504.2}
+
+        Args:
+            data_path: Path to raw data (csv, xlsx, txt).
+            objective_query: Natural language instruction (e.g. "Calculate yield").
+            experiment_context: Dict of high-level plan info (Hypothesis, etc).
+            metadata_path: Path to sidecar JSON describing the data file (Units, Columns).
+            enable_human_review: Pause for human check of the plot/logic.
+
+        Returns:
+            Dict containing:
+            - 'status': 'success' or 'failure'
+            - 'metrics': Dict of extracted scalars
+            - 'source_script': Path to the generated Python script
         """
         path_obj = Path(data_path)
         file_context = self._read_file_head(data_path)
