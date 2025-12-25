@@ -73,6 +73,22 @@ class ScalarizerAgent:
             return "".join(head)
         except Exception as e:
             return f"Error reading file head: {str(e)}"
+        
+    def _read_metadata(self, metadata_path: str) -> str:
+        """Safely reads a sidecar JSON file."""
+        if not metadata_path: 
+            return "None"
+        
+        path = Path(metadata_path)
+        if not path.exists():
+            return f"Error: Metadata file not found at {path}"
+            
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return json.dumps(data, indent=2)
+        except Exception as e:
+            return f"Error reading metadata: {str(e)}"
 
     def _execute_script(self, script_path: Path) -> Dict[str, Any]:
         """Runs the generated python script in a subprocess."""
