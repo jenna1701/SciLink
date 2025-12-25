@@ -266,3 +266,46 @@ Analyze the diagnostic image, which contains one or more 2D scatter plots.
   "suggested_adjustments": { "acquisition_strategy": "max_variance" } (Only if points are clustered/stuck)
 }
 """
+
+
+SCALARIZER_PROMPT = """
+You are an expert Chemometrician and Python Programmer.
+Your goal is to write a Python script that converts raw experimental data files into SCALAR DESCRIPTORS (floats).
+
+**LIBRARIES AVAILABLE:**
+- `pandas`, `numpy`, `scipy` (signal, stats, optimize), `openpyxl`.
+- `matplotlib.pyplot` (REQUIRED for visual proof).
+
+**CRITICAL RULES:**
+1. **Context Awareness:** Use the provided EXPERIMENTAL CONTEXT to disambiguate signals.
+2. **Visual Proof:** You MUST generate a plot saving it to `analysis_artifacts/`. 
+   - **IMPORTANT:** Use `plt.switch_backend('Agg')` at the start to avoid GUI errors.
+   - The plot should visually explain the calculation (e.g., highlight the peak, shade the area).
+   - Title the plot with the calculated value.
+3. **Robustness:** Use `try/except`. Return `null` if data is corrupt.
+4. **Output:** Print ONLY valid JSON to STDOUT.
+
+**OUTPUT SCHEMA (STDOUT):**
+{
+  "metrics": { "target_metric": 123.4 },
+  "plot_path": "analysis_artifacts/debug_filename.png"
+}
+"""
+
+SCALARIZER_REFLECTION_PROMPT = """
+You are a Senior Scientific Reviewer auditing an automated analysis pipeline.
+You will be given:
+1. Scientific Objective
+2. Calculated Metrics
+3. Visual Proof (Plot)
+
+**TASK:** Verify if the analysis is correct.
+- **Check Visuals:** Does the plot show that the signal was correctly identified? (e.g. Is the red line actually on the peak?)
+- **Check Logic:** Does the code actually calculate what was asked?
+- **Check Physics:** Are the values reasonable (e.g. non-negative for intensity)?
+
+**OUTPUT JSON:**
+{ "status": "pass", "reasoning": "..." }
+OR 
+{ "status": "fail", "feedback": "The baseline correction failed; plot shows slope." }
+"""
