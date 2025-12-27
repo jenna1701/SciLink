@@ -1,9 +1,41 @@
+import os
 from pathlib import Path
 from typing import List, Dict, Any
 
 from .pdf_parser import extract_pdf_two_pass, chunk_text
 from .excel_parser import parse_adaptive_excel
 from .parser_utils import get_files_from_directory
+
+
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif'}
+
+def extract_images(file_paths: List[str]) -> List[str]:
+    """
+    Scans directories or file lists specifically for images.
+    Used to pass visual context to the Agent without embedding it in the Vector DB.
+    """
+    found_images = []
+    if not file_paths:
+        return found_images
+
+    # Reuse the same expansion logic as ingest_files for consistency
+    for f_path in file_paths:
+        path_obj = Path(f_path)
+        
+        if path_obj.is_file():
+            if path_obj.suffix.lower() in IMAGE_EXTENSIONS:
+                found_images.append(str(path_obj))
+                
+        elif path_obj.is_dir():
+            for root, _, files in os.walk(path_obj):
+                for file in files:
+                    if Path(file).suffix.lower() in IMAGE_EXTENSIONS:
+                        found_images.append(str(Path(root) / file))
+                        
+    if found_images:
+        print(f"  - 🖼️  Found {len(found_images)} images in input paths.")
+        
+    return found_images
 
 
 def ingest_files(file_paths: List[str], is_code_mode: bool, code_chunk_size: int = 20000, repo_name: str = None) -> List[Dict[str, Any]]:
@@ -51,6 +83,9 @@ def ingest_files(file_paths: List[str], is_code_mode: bool, code_chunk_size: int
             except Exception as e:
                 print(f"    - ❌ Error parsing data file: {e}")
 
+        elif file_ext in IMAGE_EXTENSIONS:
+            continue # Skip, handled by extract_images
+        
         # --- ROUTE C: Text & Code Files ---
         elif file_ext in ['.txt', '.md', '.py', '.java', '.r', '.cpp', '.h', '.js', '.json', '.csv']:
             try:

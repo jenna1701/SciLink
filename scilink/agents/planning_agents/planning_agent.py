@@ -37,7 +37,7 @@ from .rag_engine import (
     verify_plan_relevance
 )
 
-from .ingestor import ingest_files
+from .ingestor import ingest_files, extract_images
 
 from .user_interface import display_plan_summary, get_user_feedback
 
@@ -390,6 +390,13 @@ class PlanningAgent:
         """
         # 0. Resolve Primary Data
         primary_data_set = resolve_primary_data_path(primary_data_set)
+        # 0b. Resolve all image paths
+        # Images explicitly specified by user undr image_paths (will be deprecated in the future)
+        manual_images = image_paths or []
+        # Find new images under the provided knowledge paths but exclude any that are already in manual_images
+        auto_images = [img for img in extract_images(knowledge_paths) if img not in manual_images]
+        # Append auto-images to the end so manual descriptions stay aligned with manual images
+        all_image_paths = manual_images + auto_images
 
         # 1. Resolve Code Paths
         effective_code_paths = []
@@ -414,7 +421,7 @@ class PlanningAgent:
                 code_paths=effective_code_paths,
                 additional_context=additional_context,
                 primary_data_set=primary_data_set,
-                image_paths=image_paths,
+                image_paths = all_image_paths,
                 image_descriptions=image_descriptions
             )
         else:
@@ -466,7 +473,7 @@ class PlanningAgent:
             model=self.model,                 
             generation_config=self.generation_config,
             primary_data_set=primary_data_set,
-            image_paths=image_paths,
+            image_paths=all_image_paths,
             image_descriptions=image_descriptions,
             additional_context=ctx_string,
             external_context=lit_context
@@ -1071,8 +1078,15 @@ class PlanningAgent:
         ... )
     """
         
-        # 0. Resolve Primary Data
+        # 0a. Resolve Primary Data
         primary_data_set = resolve_primary_data_path(primary_data_set)
+        # 0b. Resolve image paths
+        # Images explicitly specified by user undr image_paths (will be deprecated in the future)
+        manual_images = image_paths or []
+        # Find new images under the provided knowledge paths but exclude any that are already in manual_images
+        auto_images = [img for img in extract_images(knowledge_paths) if img not in manual_images]
+        # Append auto-images to the end so manual descriptions stay aligned with manual images
+        all_image_paths = manual_images + auto_images
 
         # 1. State Initialization (if starting fresh with TEA)
         if not self.state:
@@ -1081,7 +1095,7 @@ class PlanningAgent:
                 knowledge_paths=knowledge_paths,
                 code_paths=None,
                 primary_data_set=primary_data_set,
-                image_paths=image_paths,
+                image_paths=all_image_paths,
                 image_descriptions=image_descriptions
             )
 
@@ -1111,7 +1125,7 @@ class PlanningAgent:
             model=self.model,
             generation_config=self.generation_config,
             primary_data_set=primary_data_set, 
-            image_paths=image_paths, 
+            image_paths=all_image_paths, 
             image_descriptions=image_descriptions,
             external_context=lit_context
         )
