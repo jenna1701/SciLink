@@ -165,8 +165,9 @@ def perform_science_rag(objective: str,
         retrieved_context_str = ""
 
         # Primary Data
-        if primary_data_str: 
-            retrieved_context_str += f"## 📊 Primary Lab Data Summary\n{primary_data_str}\n\n"
+        # if primary_data_str: 
+        #     retrieved_context_str += f"## 📊 Primary Lab Data Summary\n{primary_data_str}\n\n"
+        
         
         # B. External Literature
         if external_context:
@@ -191,6 +192,9 @@ def perform_science_rag(objective: str,
         img_desc_str = json.dumps(image_descriptions, indent=2)
 
     prompt_parts = [instructions, f"## User Objective:\n{objective}"]
+
+    if primary_data_str:
+        prompt_parts.append(f"\n## 📊 Primary Experimental Data:\n{primary_data_str}")
     
     if loaded_images:
         prompt_parts.append("\n## Provided Images: (See attached)")
