@@ -56,6 +56,9 @@ You are the **Autonomous Research Agent**. Your goal is to coordinate a scientif
 **DATA TOOLS:**
 6. `list_workspace_files`: Use this to find what files (data or images) are available.
 7. `analyze_file`: Use this for RAW DATA files (CSV, XLSX, TXT) to calculate metrics via code.
+    - First use: Generates analysis script automatically
+    - Subsequent uses: Reuses script for consistency
+    - force_regenerate=True: Use when analysis needs change
 8. `reset_analysis_logic`: Use this if the analysis script is wrong.
 
 **OPTIMIZATION TOOLS:**

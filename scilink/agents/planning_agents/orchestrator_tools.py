@@ -516,8 +516,16 @@ class OrchestratorTools:
         )
         
         # 5. ANALYZE FILE
-        def analyze_file(file_path: str, extraction_goal: str = None):
-            """Analyzes a raw data file (CSV/XLSX) to extract metrics."""
+        def analyze_file(file_path: str, extraction_goal: str = None, force_regenerate: bool = False):
+            """
+            Analyzes a raw data file (CSV/XLSX) to extract metrics.
+            
+            Args:
+                file_path: Path to data file
+                extraction_goal: What to extract
+                force_regenerate: If True, regenerates analysis script even if one exists.
+                                Use when analysis requirements change (e.g., N=1 → N=12)
+            """
             print(f"  ⚡ Tool: Analyzing {file_path}...")
             
             if not Path(file_path).exists(): 
@@ -526,14 +534,19 @@ class OrchestratorTools:
                     "message": f"File {file_path} not found"
                 })
             
-            script_to_use = self.orch.active_scalarizer_script if (
-                self.orch.active_scalarizer_script and Path(self.orch.active_scalarizer_script).exists()
-            ) else None
-            
-            if script_to_use: 
-                print(f"    (Consistency Mode: Using cached script)")
-            else: 
-                print(f"    (Discovery Mode: Generating new script)")
+            # Determine script to use
+            if force_regenerate:
+                script_to_use = None
+                print(f"    🔄 Force regenerate: Creating new analysis script")
+            else:
+                script_to_use = self.orch.active_scalarizer_script if (
+                    self.orch.active_scalarizer_script and Path(self.orch.active_scalarizer_script).exists()
+                ) else None
+                
+                if script_to_use: 
+                    print(f"    (Consistency Mode: Using cached script)")
+                else: 
+                    print(f"    (Discovery Mode: Generating new script)")
             
             current_plan = self.orch.planner.state.get("current_plan", {})
             exp_context = current_plan.get("proposed_experiments", [{}])[0] if current_plan else None
@@ -551,33 +564,48 @@ class OrchestratorTools:
                     return json.dumps({
                         "status": "error",
                         "message": res.get('error', 'Analysis failed'),
-                        "hint": "Try reset_analysis_logic if the script is fundamentally wrong"
+                        "hint": "Try force_regenerate=True if requirements changed, or reset_analysis_logic to start fresh"
                     })
                 
-                if not self.orch.active_scalarizer_script:
+                # Update active script if regenerated
+                if not self.orch.active_scalarizer_script or force_regenerate:
                     self.orch.active_scalarizer_script = res["source_script"]
                     print(f"    ✅ Analysis Logic Locked: {Path(self.orch.active_scalarizer_script).name}")
                 
+                # Handle both single-row and multi-row results
                 metrics = res["metrics"]
-                df_new = pd.DataFrame([metrics])
+                
+                if isinstance(metrics, list):
+                    # Multi-row case (e.g., 96-well plate)
+                    df_new = pd.DataFrame(metrics)
+                    print(f"    📊 Processing {len(df_new)} data points from multi-well experiment")
+                elif isinstance(metrics, dict):
+                    # Single-row case
+                    df_new = pd.DataFrame([metrics])
+                else:
+                    return json.dumps({
+                        "status": "error",
+                        "message": f"Unexpected metrics format: {type(metrics)}"
+                    })
                 
                 # SCHEMA ENFORCEMENT
                 if self.orch.bo_data_path.exists():
                     df_existing = pd.read_csv(self.orch.bo_data_path)
                     
+                    # Check schema compatibility
                     if set(df_new.columns) != set(df_existing.columns):
                         return json.dumps({
                             "status": "error",
                             "message": "Schema mismatch detected",
                             "expected_columns": list(df_existing.columns),
                             "received_columns": list(df_new.columns),
-                            "hint": "All data files must have same structure. Use reset_analysis_logic to start fresh."
+                            "hint": "Schema changed. Use reset_analysis_logic to start fresh, then re-analyze with force_regenerate=True"
                         })
                     
                     df_new = df_new[df_existing.columns]
                     df_new.to_csv(self.orch.bo_data_path, mode='a', header=False, index=False)
-                    
                 else:
+                    # First analysis - establish schema
                     df_new.to_csv(self.orch.bo_data_path, mode='w', header=True, index=False)
                     
                     all_cols = list(df_new.columns)
@@ -593,8 +621,9 @@ class OrchestratorTools:
                 
                 return json.dumps({
                     "status": "success",
-                    "metrics": metrics,
+                    "metrics": metrics if isinstance(metrics, dict) else f"{len(metrics)} data points",
                     "data_points_collected": data_count,
+                    "rows_added": len(df_new),
                     "optimization_ready": data_count >= 3,
                     "schema": {
                         "inputs": self.orch.expected_input_columns,
@@ -603,7 +632,7 @@ class OrchestratorTools:
                 })
                 
             except Exception as e:
-                logging.error(f"Analyze file error: {e}")
+                logging.error(f"Analyze file error: {e}", exc_info=True)
                 return json.dumps({
                     "status": "error",
                     "message": str(e)
@@ -625,6 +654,14 @@ class OrchestratorTools:
                 "extraction_goal": {
                     "type": "string",
                     "description": "Natural language description of what to extract (e.g., 'Calculate peak area and retention time')"
+                },
+                "force_regenerate": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, generates new analysis script even if one exists. "
+                        "Use when analysis requirements change (e.g., switching from single-row to multi-row extraction, "
+                        "or changing which metrics to extract). Default: false"
+                    )
                 }
             },
             required=["file_path"]
