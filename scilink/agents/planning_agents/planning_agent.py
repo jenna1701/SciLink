@@ -1203,7 +1203,7 @@ class PlanningAgent:
             self.state["plan_history"].append(res.copy())
             
             # Update Active Pointer
-            self.state["current_plan"] = res
+            #self.state["current_plan"] = res
 
         # 6. Save & Generate Report
         if output_json_path:
