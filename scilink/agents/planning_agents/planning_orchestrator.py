@@ -130,6 +130,18 @@ class PlanningOrchestratorAgent:
         self.objective = objective
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
+
+        self.analyzed_files_path = self.base_dir / "analyzed_files.json"
+        self.analyzed_files = {}  # {file_path: row_count}
+        
+        if self.analyzed_files_path.exists():
+            try:
+                with open(self.analyzed_files_path, 'r') as f:
+                    self.analyzed_files = json.load(f)
+            except Exception as e:
+                logging.warning(f"Could not load analyzed_files.json: {e}")
+                self.analyzed_files = {}
+                
         self.bo_data_path = self.base_dir / "optimization_data.csv"
         self.history_path = self.base_dir / "chat_history.json"
         self.checkpoint_path = self.base_dir / "checkpoint.json"

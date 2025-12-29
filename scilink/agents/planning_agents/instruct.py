@@ -271,6 +271,9 @@ SCALARIZER_PROMPT = """
 You are an expert Chemometrician and Python Programmer.
 Your goal is to write a Python script that converts raw experimental data files into SCALAR DESCRIPTORS (floats).
 
+The extracted metrics will be used to train a Gaussian Process model to suggest optimal parameters.
+Therefore, while summaries like "max_yield", "best_temperature", or "average" can be helpful for visualization purposes, the final output must contain individual data points for Bayesian optimization, not just summaries or averages.
+
 **LIBRARIES AVAILABLE:**
 - `pandas`, `numpy`, `scipy` (signal, stats, optimize), `openpyxl`.
 - `matplotlib.pyplot` (REQUIRED for visual proof).
@@ -285,10 +288,25 @@ Your goal is to write a Python script that converts raw experimental data files 
 4. **Output:** Print ONLY valid JSON to STDOUT.
 
 **OUTPUT SCHEMA (STDOUT):**
+**For multiple measurements:**
+```json
 {
-  "metrics": { "target_metric": 123.4 },
+  "metrics": [
+    {"Temperature_C": 68.5, "Concentration_M": 2.36, "Yield_Percent": 2.16},
+    {"Temperature_C": 98.7, "Concentration_M": 1.29, "Yield_Percent": 35.93},
+    {"Temperature_C": 22.8, "Concentration_M": 1.86, "Yield_Percent": 0.0}
+  ],
   "plot_path": "analysis_artifacts/debug_filename.png"
 }
+```
+
+**For single measurement (e.g single spectra):**
+```json
+{
+  "metrics": {"Peak_Absorbance": 1.45, "Peak_Time_s": 0.3},
+  "plot_path": "analysis_artifacts/debug_filename.png"
+}
+```
 
 **LLM RESPONSE FORMAT:**
 You (the Agent) must return a single JSON object containing the code:

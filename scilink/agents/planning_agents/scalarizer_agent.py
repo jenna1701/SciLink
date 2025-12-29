@@ -267,8 +267,11 @@ class ScalarizerAgent:
                 continue
 
             # Save Script
-            script_path = self.output_dir / f"proc_{path_obj.stem}.py"
-            with open(script_path, "w", encoding="utf-8") as f: 
+            artifacts_dir = Path("analysis_artifacts")
+            artifacts_dir.mkdir(parents=True, exist_ok=True)  # ← CREATE FOLDER
+            sanitized_name = Path(data_path).stem.replace(" ", "_")
+            script_path = artifacts_dir / f"proc_{sanitized_name}.py"
+            with open(script_path, "w", encoding="utf-8") as f:
                 f.write(result["implementation_code"])
             
             # Execute Script

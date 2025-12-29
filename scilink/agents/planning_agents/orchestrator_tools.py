@@ -32,6 +32,7 @@ class OrchestratorTools:
         
         self._register_all_tools()
 
+
     def _parse_result_input(self, result_data: str):
         """
         Helper to parse result_data into appropriate format.
@@ -651,7 +652,6 @@ class OrchestratorTools:
             required=[]
         )
         
-        # 6. ANALYZE FILE
         def analyze_file(file_path: str, extraction_goal: str = None, force_regenerate: bool = False):
             """
             Analyzes a raw data file (CSV/XLSX) to extract metrics.
@@ -665,10 +665,10 @@ class OrchestratorTools:
             print(f"  ⚡ Tool: Analyzing {file_path}...")
             
             if not Path(file_path).exists(): 
-                return json.dumps({
-                    "status": "error",
-                    "message": f"File {file_path} not found"
-                })
+                return json.dumps({"status": "error", "message": f"File {file_path} not found"})
+            
+            # Resolve absolute path for tracking
+            file_path_abs = str(Path(file_path).resolve())
             
             # Determine script to use
             if force_regenerate:
@@ -700,10 +700,9 @@ class OrchestratorTools:
                     return json.dumps({
                         "status": "error",
                         "message": res.get('error', 'Analysis failed'),
-                        "hint": "Try force_regenerate=True if requirements changed, or reset_analysis_logic to start fresh"
+                        "hint": "Try force_regenerate=True if requirements changed"
                     })
                 
-                # Update active script if regenerated
                 if not self.orch.active_scalarizer_script or force_regenerate:
                     self.orch.active_scalarizer_script = res["source_script"]
                     print(f"    ✅ Analysis Logic Locked: {Path(self.orch.active_scalarizer_script).name}")
@@ -712,11 +711,9 @@ class OrchestratorTools:
                 metrics = res["metrics"]
                 
                 if isinstance(metrics, list):
-                    # Multi-row case (e.g., 96-well plate)
                     df_new = pd.DataFrame(metrics)
                     print(f"    📊 Processing {len(df_new)} data points from multi-well experiment")
                 elif isinstance(metrics, dict):
-                    # Single-row case
                     df_new = pd.DataFrame([metrics])
                 else:
                     return json.dumps({
@@ -724,33 +721,71 @@ class OrchestratorTools:
                         "message": f"Unexpected metrics format: {type(metrics)}"
                     })
                 
+                # DEDUPLICATION - Track processed rows                
+                # Get previous row count for this file
+                previous_row_count = self.orch.analyzed_files.get(file_path_abs, 0)
+                current_row_count = len(df_new)
+                
+                # Only process NEW rows
+                if current_row_count > previous_row_count:
+                    df_new_only = df_new.iloc[previous_row_count:]
+                    num_skipped = previous_row_count
+                    num_new = len(df_new_only)
+                    
+                    if num_skipped > 0:
+                        print(f"    🔍 Skipped {num_skipped} previously analyzed row(s)")
+                    print(f"    ✅ Adding {num_new} NEW row(s)")
+                    
+                    df_to_append = df_new_only
+                elif current_row_count == previous_row_count:
+                    # File unchanged
+                    print(f"    ℹ️  No new rows detected (file unchanged)")
+                    df_final = pd.read_csv(self.orch.bo_data_path) if self.orch.bo_data_path.exists() else pd.DataFrame()
+                    
+                    return json.dumps({
+                        "status": "success",
+                        "message": "No new data - file already analyzed",
+                        "data_points_collected": len(df_final),
+                        "rows_added": 0,
+                        "optimization_ready": len(df_final) >= 3
+                    })
+                else:
+                    # File has FEWER rows than before - something's wrong
+                    print(f"    ⚠️  Warning: File has fewer rows than last analysis ({current_row_count} < {previous_row_count})")
+                    print(f"    💡 Reprocessing entire file")
+                    df_to_append = df_new
+                    num_new = len(df_new)
+                
                 # SCHEMA ENFORCEMENT
                 if self.orch.bo_data_path.exists():
                     df_existing = pd.read_csv(self.orch.bo_data_path)
                     
-                    # Check schema compatibility
-                    if set(df_new.columns) != set(df_existing.columns):
+                    if set(df_to_append.columns) != set(df_existing.columns):
                         return json.dumps({
                             "status": "error",
                             "message": "Schema mismatch detected",
                             "expected_columns": list(df_existing.columns),
-                            "received_columns": list(df_new.columns),
-                            "hint": "Schema changed. Use reset_analysis_logic to start fresh, then re-analyze with force_regenerate=True"
+                            "received_columns": list(df_to_append.columns),
+                            "hint": "All data must have same structure. Use reset_analysis_logic to start fresh."
                         })
                     
-                    df_new = df_new[df_existing.columns]
-                    df_new.to_csv(self.orch.bo_data_path, mode='a', header=False, index=False)
+                    df_to_append = df_to_append[df_existing.columns]
+                    df_to_append.to_csv(self.orch.bo_data_path, mode='a', header=False, index=False)
                 else:
-                    # First analysis - establish schema
-                    df_new.to_csv(self.orch.bo_data_path, mode='w', header=True, index=False)
+                    df_to_append.to_csv(self.orch.bo_data_path, mode='w', header=True, index=False)
                     
-                    all_cols = list(df_new.columns)
+                    all_cols = list(df_to_append.columns)
                     self.orch.expected_target_column = all_cols[-1]
                     self.orch.expected_input_columns = all_cols[:-1]
                     
                     print(f"    📊 Schema Established:")
                     print(f"       Inputs: {self.orch.expected_input_columns}")
                     print(f"       Target: {self.orch.expected_target_column}")
+                
+                # Update tracking
+                self.orch.analyzed_files[file_path_abs] = current_row_count
+                with open(self.orch.analyzed_files_path, 'w') as f:
+                    json.dump(self.orch.analyzed_files, f, indent=2)
                 
                 df_final = pd.read_csv(self.orch.bo_data_path)
                 data_count = len(df_final)
@@ -759,7 +794,7 @@ class OrchestratorTools:
                     "status": "success",
                     "metrics": metrics if isinstance(metrics, dict) else f"{len(metrics)} data points",
                     "data_points_collected": data_count,
-                    "rows_added": len(df_new),
+                    "rows_added": num_new,
                     "optimization_ready": data_count >= 3,
                     "schema": {
                         "inputs": self.orch.expected_input_columns,
