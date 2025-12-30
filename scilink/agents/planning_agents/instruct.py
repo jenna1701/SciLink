@@ -281,6 +281,7 @@ Your script MUST accept the data file path as a command-line argument for reusab
 ```python
 import sys
 import pandas as pd
+from pathlib import Path
 # ... other imports ...
 
 # Accept file path as command-line argument
@@ -291,6 +292,19 @@ else:
 
 # Read data using the parameterized path
 df = pd.read_csv(data_path)  # or pd.read_excel(data_path)
+
+# YOUR ANALYSIS CODE HERE
+# ...
+
+# Use the exact path provided to save plot
+plot_path = Path("OUTPUT_DIR_PLACEHOLDER") / f"debug_{Path(data_path).stem}.png"
+# ... save plot ...
+
+# Output results as JSON
+result = {
+    "metrics": {...},
+    "plot_path": str(plot_path)
+}
 ```
 
 **LIBRARIES AVAILABLE:**
@@ -299,7 +313,7 @@ df = pd.read_csv(data_path)  # or pd.read_excel(data_path)
 
 **CRITICAL RULES:**
 1. **Context Awareness:** Use the provided EXPERIMENTAL CONTEXT to disambiguate signals.
-2. **Visual Proof:** You MUST generate a plot saving it to `analysis_artifacts/`. 
+2. **Visual Proof:** You MUST generate a plot saving it to the EXACT path provided in the prompt (OUTPUT_DIR_PLACEHOLDER will be replaced with actual path)
    - **IMPORTANT:** Use `plt.switch_backend('Agg')` at the start to avoid GUI errors.
    - The plot should visually explain the calculation (e.g., highlight the peak, shade the area).
    - Title the plot with the calculated value.
@@ -316,7 +330,7 @@ df = pd.read_csv(data_path)  # or pd.read_excel(data_path)
     {"Temperature_C": 98.7, "Concentration_M": 1.29, "Yield_Percent": 35.93},
     {"Temperature_C": 22.8, "Concentration_M": 1.86, "Yield_Percent": 0.0}
   ],
-  "plot_path": "analysis_artifacts/debug_filename.png"
+  "plot_path": "path/to/plot.png"
 }
 ```
 
@@ -324,7 +338,7 @@ df = pd.read_csv(data_path)  # or pd.read_excel(data_path)
 ```json
 {
   "metrics": {"Peak_Absorbance": 1.45, "Peak_Time_s": 0.3},
-  "plot_path": "analysis_artifacts/debug_filename.png"
+  "plot_path": "path/to/plot.png"
 }
 ```
 

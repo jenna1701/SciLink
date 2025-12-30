@@ -37,7 +37,8 @@ class ScalarizerAgent:
     def __init__(self, 
                  google_api_key: str = None, 
                  model_name: str = "gemini-3-pro-preview", 
-                 local_model: str = None):
+                 local_model: str = None,
+                 output_dir: str = "."):
         
         # Auth & Model Initialization
         if google_api_key is None:
@@ -61,7 +62,7 @@ class ScalarizerAgent:
             self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
 
         # Local Storage Setup
-        self.output_dir = Path("./analysis_artifacts")
+        self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True, parents=True)
 
     def _read_file_head(self, file_path: str, n_lines=25) -> str:
@@ -226,6 +227,7 @@ class ScalarizerAgent:
 
         # Format Contexts
         exp_context_str = json.dumps(experiment_context) if experiment_context else "None"
+        plot_output_dir = str(self.output_dir.resolve())
         
         base_prompt = f"""
         **INPUT DATA:** {data_path}
@@ -239,7 +241,10 @@ class ScalarizerAgent:
         
         **GOAL:** "{objective_query}"
         
-        **REQ:** Parse, Calculate, Plot (save to {self.output_dir}/debug_{path_obj.stem}.png), Print JSON.
+        **REQ:** Parse, Calculate, Plot (save to {plot_output_dir}/debug_{path_obj.stem}.png), Print JSON.
+
+        **CRITICAL:** In your code, replace OUTPUT_DIR_PLACEHOLDER with exactly: {plot_output_dir}
+        This is an absolute path - use it directly without modification.
         """
 
         current_prompt = base_prompt
@@ -267,10 +272,8 @@ class ScalarizerAgent:
                 continue
 
             # Save Script
-            artifacts_dir = Path("analysis_artifacts")
-            artifacts_dir.mkdir(parents=True, exist_ok=True)  # ← CREATE FOLDER
             sanitized_name = Path(data_path).stem.replace(" ", "_")
-            script_path = artifacts_dir / f"proc_{sanitized_name}.py"
+            script_path = self.output_dir / f"proc_{sanitized_name}.py"
             with open(script_path, "w", encoding="utf-8") as f:
                 f.write(result["implementation_code"])
             

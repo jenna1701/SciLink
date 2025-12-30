@@ -11,13 +11,10 @@ from datetime import datetime
 import PIL.Image as PIL_Image
 
 from .knowledge_base import KnowledgeBase
-from .excel_parser import parse_adaptive_excel
 from .parser_utils import (
     generate_repo_map, 
     write_experiments_to_disk,
     resolve_primary_data_path,
-    parse_data_file,
-    load_image_file,
     parse_multimodal_results
 )
 from .repo_loader import clone_git_repository
@@ -87,7 +84,8 @@ class PlanningAgent:
                  local_model: str = None,
                  embedding_model: str = "gemini-embedding-001",
                  kb_base_path: str = "./kb_storage/default_kb",
-                 code_chunk_size: int = 20000): 
+                 code_chunk_size: int = 20000,
+                 output_dir: str = "."): 
         
         if google_api_key is None:
             google_api_key = get_api_key('google')
@@ -116,6 +114,8 @@ class PlanningAgent:
             logging.info("ℹ️ No FutureHouse API key provided. Literature search will be skipped.")
                     
         self.code_chunk_size = code_chunk_size
+
+        self.output_dir = Path(output_dir)
 
         # --- Dual KnowledgeBase Initialization ---
         base_path = Path(kb_base_path)
@@ -516,7 +516,7 @@ class PlanningAgent:
         
         # Human code review
         if enable_human_feedback:
-            temp_dir = Path("./temp_code_review")
+            temp_dir = self.output_dir / "temp_code_review"
             print(f"\n--- Code Review ---")
             print(f"  - 💾 Saving to: {temp_dir}")
             
@@ -872,7 +872,7 @@ Select the most appropriate strategy:
 
         # --- HUMAN CODE REVIEW ---
         if enable_human_feedback and not new_plan.get("error"):
-            temp_dir = Path("./temp_code_review_iter")
+            temp_dir = self.output_dir / "temp_code_review_iter"
             print(f"\n--- Human Code Review (Iteration {next_plan_idx}) ---")
             
             if temp_dir.exists(): 

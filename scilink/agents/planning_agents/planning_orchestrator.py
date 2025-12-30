@@ -41,13 +41,14 @@ You are the **Autonomous Research Agent**. Your goal is to coordinate a scientif
             primary_data_set="./data"
 
 3. `generate_implementation_code`: Add executable code to existing plan.
-   - Use AFTER generate_initial_plan() once strategy is approved
    - Maps experimental steps to APIs/automation code
-   - Example:
-     * "Add Opentrons implementation"
-       → generate_implementation_code(code_paths="./opentrons_api")
+   - Use AFTER generate_initial_plan() once strategy is approved
+   - **TRIGGER CONDITIONS (both must be true):**
+     a) User asks for "script", "protocol", "code", or mentions equipment (Opentrons, robot, automation)
+     b) EITHER:
+        - Code KB already loaded (you'll see "✅ Code KB loaded" at startup), OR
+        - User specifies a code directory (e.g., "using ./opentrons_api", "from ./code folder")
 
-            )
 4. `refine_plan_with_results`: Refine scientific strategy based on experimental results.
    - Use for: failures, pivots, qualitative observations, visual analysis
    - Accepts: text descriptions, file paths, or comma-separated files
@@ -67,7 +68,7 @@ You are the **Autonomous Research Agent**. Your goal is to coordinate a scientif
 
 
 **DATA TOOLS:**
-7. `list_workspace_files`: Use this to find what files (data or images) are available.
+7. `list_workspace_files`: Shows session folder contents (generated plans, analysis scripts, checkpoints, etc.)
 8. `analyze_file`: Use this for RAW DATA files (CSV, XLSX, TXT) to calculate metrics via code.
     - First use: Generates analysis script automatically
     - Subsequent uses: Reuses script for consistency
@@ -81,9 +82,10 @@ You are the **Autonomous Research Agent**. Your goal is to coordinate a scientif
      * Infer N from context or ask user. Retry if "batch_size_required" returned.
 11. `save_checkpoint`: Save campaign state. Use after every 3-5 experiments.
 
+**FILE PATH RULES:**
+Assume user runs agent from project directory. For example, when user says "file.csv in data", use "./data/file.csv"
 
 **CRITICAL WORKFLOW RULES:**
-
 **Use `run_optimization` (The Math Loop) IF:**
 - You are optimizing a well-defined property for the current experimental setup.
 - The experiments are running successfully (no failures), and you just need to tune parameters.
@@ -141,7 +143,7 @@ class PlanningOrchestratorAgent:
             except Exception as e:
                 logging.warning(f"Could not load analyzed_files.json: {e}")
                 self.analyzed_files = {}
-                
+
         self.bo_data_path = self.base_dir / "optimization_data.csv"
         self.history_path = self.base_dir / "chat_history.json"
         self.checkpoint_path = self.base_dir / "checkpoint.json"
@@ -164,9 +166,24 @@ class PlanningOrchestratorAgent:
         
         # --- Init Sub-Agents ---
         print("🤖 Agent: Hiring sub-agents...")
-        self.planner = PlanningAgent(google_api_key=google_api_key, model_name=model_name, local_model=local_model)
-        self.scalarizer = ScalarizerAgent(google_api_key=google_api_key, model_name=model_name, local_model=local_model)
-        self.bo = BOAgent(google_api_key=google_api_key, model_name=model_name, local_model=local_model)
+        self.planner = PlanningAgent(
+            google_api_key=google_api_key, 
+            model_name=model_name, 
+            local_model=local_model,
+            output_dir=str(self.base_dir)
+        )
+        self.scalarizer = ScalarizerAgent(
+            google_api_key=google_api_key, 
+            model_name=model_name, 
+            local_model=local_model,
+            output_dir=str(self.base_dir / "scalarizer_outputs")
+        )
+        self.bo = BOAgent(
+            google_api_key=google_api_key, 
+            model_name=model_name, 
+            local_model=local_model,
+            output_dir=str(self.base_dir / "bo_artifacts")
+        )
 
         # --- Initialize Tools Registry ---
         self.tools = OrchestratorTools(self)

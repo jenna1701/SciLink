@@ -119,7 +119,7 @@ class OrchestratorTools:
         self._register_tool(
             func=list_workspace_files,
             name="list_workspace_files",
-            description="Lists files in the campaign directory including analysis artifacts.",
+            description="Lists files in the session directory (checkpoints, analysis artifacts, etc.). User data files may exist outside the session folder.",
             parameters={}
         )
         
@@ -350,7 +350,7 @@ class OrchestratorTools:
                 generator.generate(str(html_path))
                 
                 # Save scripts to output folder
-                final_out = "./output_scripts"
+                final_out = str(self.orch.base_dir / "output_scripts")
                 print(f"\n--- Saving Scripts to: {final_out} ---")
                 write_experiments_to_disk(updated_plan, final_out)
                 
@@ -621,7 +621,7 @@ class OrchestratorTools:
                 generator.generate(str(html_path))
                 
                 # Save scripts
-                final_out = "./output_scripts"
+                final_out = str(self.orch.base_dir / "output_scripts")
                 print(f"\n--- Saving Scripts to: {final_out} ---")
                 write_experiments_to_disk(updated_plan, final_out)
                 
