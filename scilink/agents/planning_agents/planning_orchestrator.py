@@ -137,6 +137,7 @@ class PlanningOrchestratorAgent:
                  futurehouse_api_key: str = None,
                  model_name: str = "gemini-3-pro-preview",
                  local_model: str = None,
+                 embedding_model: str = "gemini-embedding-001",
                  restore_checkpoint: bool = False):
         
         self.objective = objective
@@ -181,6 +182,7 @@ class PlanningOrchestratorAgent:
             futurehouse_api_key=futurehouse_api_key,
             model_name=model_name, 
             local_model=local_model,
+            embedding_model=embedding_model,
             output_dir=str(self.base_dir)
         )
         self.scalarizer = ScalarizerAgent(

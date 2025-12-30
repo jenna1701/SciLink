@@ -26,18 +26,17 @@ Examples:
   # Use a different Gemini model
   scilink plan --model gemini-2.0-flash-exp
   
-  # Use local/OpenAI-compatible model
-  scilink plan --local-model http://localhost:8000/v1 --model llama-3
+  # Use local/OpenAI-compatible model with custom embedding model
+  scilink plan --local-model http://localhost:8000/v1 --model llama-3 --embedding-model text-embedding-3-small
 
 Environment Variables:
   GOOGLE_API_KEY         Google Gemini API key (required for Gemini models)
   FUTUREHOUSE_API_KEY    FutureHouse API key for literature search (optional)
 
-Recommended Directory Structure:
-  📁 my_project/
-  ├── 📚 papers/              ← Scientific literature (PDFs)
-  ├── 📊 experimental_results/ ← Data files (CSV/XLSX)
-  └── 💻 code/                ← API docs, scripts (optional)
+Note on Embeddings:
+  - Gemini: Uses gemini-embedding-001 by default
+  - Local models: Specify --embedding-model for your embedding endpoint
+  - The embedding model is used for the knowledge base (RAG)
         """
     )
     
@@ -54,6 +53,12 @@ Recommended Directory Structure:
         help='Base URL for OpenAI-compatible local model (e.g., http://localhost:8000/v1)'
     )
     
+    parser.add_argument(
+        '--embedding-model',
+        type=str,
+        help='Embedding model name (default: gemini-embedding-001 for Gemini, or specify for local models)'
+    )
+    
     args = parser.parse_args()
     
     # Set model configuration in environment
@@ -61,6 +66,8 @@ Recommended Directory Structure:
         os.environ['SCILINK_MODEL_NAME'] = args.model
     if args.local_model:
         os.environ['SCILINK_LOCAL_MODEL'] = args.local_model
+    if args.embedding_model:
+        os.environ['SCILINK_EMBEDDING_MODEL'] = args.embedding_model
     
     # Run the interactive orchestrator
     try:
@@ -94,6 +101,7 @@ class OrchestratorPlayground:
         # Read model configuration from environment (set by CLI)
         model_name = os.getenv('SCILINK_MODEL_NAME', 'gemini-3-pro-preview')
         local_model = os.getenv('SCILINK_LOCAL_MODEL', None)
+        embedding_model = os.getenv('SCILINK_EMBEDDING_MODEL', None)
         
         # Logo already shown by main CLI, just show directory guide
         print("\n" + "="*60)
@@ -169,7 +177,8 @@ class OrchestratorPlayground:
                 google_api_key=api_key,
                 futurehouse_api_key=futurehouse_key if futurehouse_key else None,
                 model_name=model_name,
-                local_model=local_model
+                local_model=local_model,
+                embedding_model=embedding_model
             )
             print("✅ Agent ready!")
             
@@ -193,8 +202,14 @@ class OrchestratorPlayground:
         # Show model configuration
         if local_model:
             print(f"Model: {model_name} (Local: {local_model})")
+            if embedding_model:
+                print(f"Embedding Model: {embedding_model}")
         else:
             print(f"Model: {model_name} (Gemini)")
+            if embedding_model:
+                print(f"Embedding Model: {embedding_model}")
+            else:
+                print(f"Embedding Model: gemini-embedding-001 (default)")
         
         print(f"Available Tools: {len(self.agent.tools.functions_map)}")
         print(f"  - {', '.join(list(self.agent.tools.functions_map.keys())[:5])}...")
