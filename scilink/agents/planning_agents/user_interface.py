@@ -88,7 +88,7 @@ def get_user_feedback() -> Optional[str]:
     """
     print("\n" + "-"*60)
     
-    print("👤 HUMAN FEEDBACK STEP")
+    print("📝 REQUESTING FEEDBACK")
     print("-" * 60)
     print("Review the plan above.")
     print("• To APPROVE: Press [ENTER] directly.")
