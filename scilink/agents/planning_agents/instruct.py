@@ -274,8 +274,27 @@ Your goal is to write a Python script that converts raw experimental data files 
 The extracted metrics will be used to train a Gaussian Process model to suggest optimal parameters.
 Therefore, while summaries like "max_yield", "best_temperature", or "average" can be helpful for visualization purposes, the final output must contain individual data points for Bayesian optimization, not just summaries or averages.
 
+**IMPORTANT - FILE PATH PARAMETERIZATION:**
+Your script MUST accept the data file path as a command-line argument for reusability across multiple files.
+
+**Required structure:**
+```python
+import sys
+import pandas as pd
+# ... other imports ...
+
+# Accept file path as command-line argument
+if len(sys.argv) > 1:
+    data_path = sys.argv[1]
+else:
+    data_path = "ORIGINAL_FILE_PATH"  # Fallback for testing
+
+# Read data using the parameterized path
+df = pd.read_csv(data_path)  # or pd.read_excel(data_path)
+```
+
 **LIBRARIES AVAILABLE:**
-- `pandas`, `numpy`, `scipy` (signal, stats, optimize), `openpyxl`.
+- `pandas`, `numpy`, `scipy` (signal, stats, optimize), `sklearn`, `openpyxl`.
 - `matplotlib.pyplot` (REQUIRED for visual proof).
 
 **CRITICAL RULES:**
@@ -285,7 +304,8 @@ Therefore, while summaries like "max_yield", "best_temperature", or "average" ca
    - The plot should visually explain the calculation (e.g., highlight the peak, shade the area).
    - Title the plot with the calculated value.
 3. **Robustness:** Use `try/except`. Return `null` if data is corrupt.
-4. **Output:** Print ONLY valid JSON to STDOUT.
+4. **File Path Parameterization:** The script will be reused for multiple data files with the same structure, so file path parameterization via `sys.argv[1]` is MANDATORY.
+5. **Output:** Print ONLY valid JSON to STDOUT.
 
 **OUTPUT SCHEMA (STDOUT):**
 **For multiple measurements:**
@@ -300,7 +320,7 @@ Therefore, while summaries like "max_yield", "best_temperature", or "average" ca
 }
 ```
 
-**For single measurement (e.g single spectra):**
+**For single measurement (e.g., single spectrum):**
 ```json
 {
   "metrics": {"Peak_Absorbance": 1.45, "Peak_Time_s": 0.3},
