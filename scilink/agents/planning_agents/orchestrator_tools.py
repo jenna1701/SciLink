@@ -655,7 +655,7 @@ class OrchestratorTools:
         )
         
         # 4. REFINE PLAN (based on results)
-        def refine_plan_with_results(result_data: str):
+        def refine_plan_with_results(result_data: str, use_literature_rag: bool = False):
             """
             Refines the experimental plan (science strategy only) based on results.
             
@@ -678,7 +678,8 @@ class OrchestratorTools:
             try:
                 plan = self.orch.planner.refine_plan(
                     results=payload,
-                    enable_human_feedback=True
+                    enable_human_feedback=True,
+                    use_literature_rag=use_literature_rag
                 )
                 
                 if plan.get("error"):
@@ -726,13 +727,11 @@ class OrchestratorTools:
             parameters={
                 "result_data": {
                     "type": "string",
-                    "description": (
-                        "Experimental results. Formats: "
-                        "1) Text: 'Yield was 12%, precipitation observed' "
-                        "2) Single file: './data.csv' or './plot.png' "
-                        "3) Multiple files: './data.csv,./plot.png,./log.txt' "
-                        "Agent auto-detects format and parses accordingly."
-                    )
+                    "description": "Experimental results (text, file path, or comma-separated files)"
+                },
+                "use_literature_rag": {
+                    "type": "boolean", 
+                    "description": "Search knowledge base for relevant literature context. Default: false."
                 }
             },
             required=["result_data"]

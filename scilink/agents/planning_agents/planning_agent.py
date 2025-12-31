@@ -688,7 +688,8 @@ class PlanningAgent:
     def refine_plan(self,
                     results: Any,
                     enable_human_feedback: bool = True,
-                    state_file_path: Optional[str] = None) -> Dict[str, Any]:
+                    state_file_path: Optional[str] = None,
+                    use_literature_rag: bool = False) -> Dict[str, Any]:
         """
         Refines the experimental plan (science strategy only) based on new results.
         
@@ -696,6 +697,8 @@ class PlanningAgent:
             results: Experimental outcomes (text, dict, file path, or list of files/images)
             enable_human_feedback: If True, pauses for strategy review
             state_file_path: Optional path to restore state from checkpoint
+            use_literature_rag: If True, searches knowledge base for context relevant 
+                           to the results. Defaults to False for faster iteration.
             
         Returns:
             Dict with refined plan (proposed_experiments)
@@ -749,16 +752,28 @@ Select the most appropriate strategy:
         
         # --- 3. RESULT-AWARE RAG ---
         new_literature_context = None
-        if self.kb_docs.index and self.kb_docs.index.ntotal > 0:
-            search_query = f"Implications and causes of: {consolidated_feedback[:400]}"
-            print(f"  - 🔍 Searching literature for context on results...")
-            hits = self.kb_docs.retrieve(search_query, top_k=3)
-            if hits:
-                new_literature_context = "\n---\n".join([c['text'] for c in hits])
-                print(f"    -> Found {len(hits)} relevant document chunks.")
+        
+        if use_literature_rag:
+            if self.kb_docs.index and self.kb_docs.index.ntotal > 0:
+                search_query = f"Implications and causes of: {consolidated_feedback[:400]}"
+                print(f"  - 🔍 Searching literature for context on results...")
+                hits = self.kb_docs.retrieve(search_query, top_k=3)
+                if hits:
+                    new_literature_context = "\n---\n".join([c['text'] for c in hits])
+                    print(f"    -> Found {len(hits)} relevant document chunks.")
+                else:
+                    print(f"    -> No relevant documents found.")
+            else:
+                print(f"  - ℹ️  Literature RAG requested but no docs KB available.")
+        else:
+            print(f"  - ℹ️  Skipping literature RAG (use_literature_rag=False)")
         
         # --- 4. GENERATE REFINED PLAN ---
-        print(f"  - Reasoning over results with literature context...")
+        if new_literature_context:
+            print(f"  - Reasoning over results with literature context...")
+        else:
+            print(f"  - Reasoning over results...")
+
         
         new_plan = refine_plan_with_feedback(
             original_result=current_plan,
@@ -922,7 +937,8 @@ Select the most appropriate strategy:
                                  results: Any,
                                  output_json_path: Optional[str] = None,
                                  enable_human_feedback: bool = True,
-                                 state_file_path: Optional[str] = None) -> Dict[str, Any]:
+                                 state_file_path: Optional[str] = None,
+                                 use_literature_rag: bool = False) -> Dict[str, Any]:
         """
         Iterates on the current experimental plan based on new results.
         
@@ -1049,6 +1065,10 @@ Select the most appropriate strategy:
                 Useful for resuming after shutdown. Equivalent to calling
                 agent.restore_state() before this method.
                 Example: "./outputs/session.state.json"
+            
+            use_literature_rag: If True, searches knowledge base for context 
+                           relevant to the experimental results. 
+                           Defaults to False for faster iteration.
         
         Returns:
             Dict containing the complete agent state:
@@ -1123,7 +1143,8 @@ Select the most appropriate strategy:
         plan = self.refine_plan(
             results=results,
             enable_human_feedback=enable_human_feedback,
-            state_file_path=state_file_path
+            state_file_path=state_file_path,
+            use_literature_rag=use_literature_rag
         )
         
         if plan.get("error"):
@@ -1132,7 +1153,7 @@ Select the most appropriate strategy:
             return self.state
         
         # Phase 2: Update implementation code
-        plan = self.refine_implementation_code(  # ← RENAMED
+        plan = self.refine_implementation_code( 
             plan=plan,
             enable_human_feedback=enable_human_feedback
         )
