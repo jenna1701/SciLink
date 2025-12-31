@@ -316,6 +316,7 @@ result = {
 2. **Visual Proof:** You MUST generate a plot saving it to the EXACT path provided in the prompt (OUTPUT_DIR_PLACEHOLDER will be replaced with actual path)
    - **IMPORTANT:** Use `plt.switch_backend('Agg')` at the start to avoid GUI errors.
    - The plot should visually explain the calculation (e.g., highlight the peak, shade the area).
+   - Keep it simple and focused (1-2 subplots max)
    - Title the plot with the calculated value.
 3. **Robustness:** Use `try/except`. Return `null` if data is corrupt.
 4. **File Path Parameterization:** The script will be reused for multiple data files with the same structure, so file path parameterization via `sys.argv[1]` is MANDATORY.
