@@ -85,7 +85,6 @@ def table_to_markdown(table: List[List[str]]) -> str:
 def parse_json_from_response(resp) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     Robustly extracts and parses JSON from an LLM response object.
-    Matches the logic originally defined in rag_engine.py.
     """
     json_text = ""
     
