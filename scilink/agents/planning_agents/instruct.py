@@ -322,6 +322,14 @@ result = {
 4. **File Path Parameterization:** The script will be reused for multiple data files with the same structure, so file path parameterization via `sys.argv[1]` is MANDATORY.
 5. **Output:** Print ONLY valid JSON to STDOUT.
 
+**SCHEMA REQUIREMENTS:**
+If the goal or experimental context specifies required columns, you MUST extract exactly those columns:
+- "input_columns": These are the independent variables (e.g., temperature, pH, concentration)
+- "target_columns": These are the dependent variables to optimize (e.g., yield, selectivity)
+
+Your output metrics MUST include ALL specified input and target columns.
+For multi-objective optimization, ensure ALL target columns are present in each row.
+
 **OUTPUT SCHEMA (STDOUT):**
 **For multiple measurements:**
 ```json
@@ -354,9 +362,10 @@ You (the Agent) must return a single JSON object containing the code:
 SCALARIZER_REFLECTION_PROMPT = """
 You are a Senior Scientific Reviewer auditing an automated analysis pipeline.
 You will be given:
-1. Scientific Objective
-2. Calculated Metrics
-3. Visual Proof (Plot)
+1. Scientific Objective (what metrics to extract)
+2. Experimental Context (may describe PLANNED experiments - this is for reference only)
+3. Calculated Metrics (extracted from the ACTUAL data file)
+4. Visual Proof (Plot)
 
 **TASK:** Verify if the analysis is correct.
 - **Check Visuals:** Does the plot show that the signal was correctly identified? (e.g. Is the red line actually on the peak?)

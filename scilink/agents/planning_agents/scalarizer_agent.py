@@ -127,27 +127,42 @@ class ScalarizerAgent:
             return {"status": "failure", "error": str(e)}
 
     def _verify_analysis(self, 
-                         objective: str, 
-                         context_str: str,
-                         script_content: str, 
-                         metrics: Dict, 
-                         plot_path: str) -> Dict[str, Any]:
+                        objective: str, 
+                        context_str: str,
+                        script_content: str, 
+                        metrics: Dict, 
+                        plot_path: str,
+                        schema_requirements: Optional[Dict] = None) -> Dict[str, Any]:
         """Multimodal Self-Reflection: Checks plot vs. objective."""
         try:
             image = PIL_Image.open(plot_path)
         except Exception as e:
             return {"status": "fail", "feedback": f"Could not load visual proof: {e}"}
 
+        # Build schema verification section
+        schema_check = ""
+        if schema_requirements:
+            schema_check = f"""
+    **REQUIRED SCHEMA TO VERIFY:**
+    - Input columns that MUST be present: {schema_requirements.get('input_columns', [])}
+    - Target columns that MUST be present: {schema_requirements.get('target_columns', [])}
+    Verify ALL these columns appear in the metrics.
+    """
+
         prompt = f"""
-        **AUDIT REQUEST:**
-        **1. OBJECTIVE:** "{objective}"
-        **2. CONTEXT:** {context_str}
-        **3. METRICS:** {json.dumps(metrics, indent=2)}
-        **4. CODE:** \n```python\n{script_content[:1500]}\n```
-        **5. PROOF:** (See Attached Image)
-        
-        Does the plot prove the metric was extracted correctly?
-        """
+    **AUDIT REQUEST:**
+    **1. EXTRACTION OBJECTIVE:** "{objective}"
+    {schema_check}
+    **2. EXTRACTED METRICS:** {json.dumps(metrics, indent=2)}
+    **3. CODE SNIPPET:** 
+    ```python
+    {script_content[:3000]}
+    ```
+    **4. VISUAL PROOF:** (See Attached Image)
+    **CONTEXT (reference only):** {context_str[:500]}...
+
+    Verify the extraction is technically correct.
+    """
         
         try:
             response = self.model.generate_content(
@@ -156,7 +171,6 @@ class ScalarizerAgent:
             )
             return parse_json_from_response(response)[0]
         except Exception as e:
-            # Fail safe: If reflection crashes, warn but let human review catch it
             logging.warning(f"Reflection failed: {e}")
             return {"status": "pass", "reasoning": "Auto-reflection unavailable."}
 
@@ -229,12 +243,25 @@ class ScalarizerAgent:
         exp_context_str = json.dumps(experiment_context) if experiment_context else "None"
         plot_output_dir = str(self.output_dir.resolve())
         
+        schema_section = ""
+        if experiment_context and "_schema_requirements" in experiment_context:
+            schema = experiment_context["_schema_requirements"]
+            schema_section = f"""
+    **REQUIRED OUTPUT SCHEMA (MANDATORY):**
+    - INPUT COLUMNS: {schema.get('input_columns', [])}
+    - TARGET COLUMNS: {schema.get('target_columns', [])}
+    - OPTIMIZATION TYPE: {schema.get('optimization_type', 'single-objective')}
+
+    Your output metrics MUST include ALL of these columns for each data point.
+    """
+        
         base_prompt = f"""
         **INPUT DATA:** {data_path}
         **HEAD SNIPPET:** \n{file_context}\n
 
         **METADATA SIDECAR (Column Defs / Units):**
         {metadata_str}
+        {schema_section}
         
         **EXPERIMENTAL CONTEXT (Hypothesis / Steps):**
         {exp_context_str}
@@ -290,6 +317,10 @@ class ScalarizerAgent:
                 current_prompt = base_prompt + f"\n\n**RUNTIME ERROR:**\n{err_msg}\nFix the code."
                 continue
                 
+            schema_for_verification = None
+            if experiment_context and "_schema_requirements" in experiment_context:
+                schema_for_verification = experiment_context["_schema_requirements"]
+
             # Auto-Reflection (Visual Check)
             print(f"    🤔 Auto-Reflecting on visual proof...")
             verification = self._verify_analysis(
@@ -297,7 +328,8 @@ class ScalarizerAgent:
                 context_str=exp_context_str,
                 script_content=result["implementation_code"],
                 metrics=exec_res["metrics"],
-                plot_path=exec_res["plot_path"]
+                plot_path=exec_res["plot_path"],
+                schema_requirements=schema_for_verification
             )
             
             if verification.get("status") == "fail":

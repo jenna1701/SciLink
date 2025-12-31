@@ -810,6 +810,7 @@ class OrchestratorTools:
         )
         
         def analyze_file(
+                self,
                 file_path: str,
                 extraction_goal: str = None,
                 force_regenerate: bool = False,
@@ -822,7 +823,8 @@ class OrchestratorTools:
                 file_path: Path to data file
                 extraction_goal: What to extract
                 force_regenerate: If True, regenerates analysis script even if one exists.
-                                Use when analysis requirements change (e.g., N=1 → N=12)
+                inputs: List of column names to treat as INPUT parameters for optimization
+                targets: List of column names to treat as OPTIMIZATION TARGETS
             """
             print(f"  ⚡ Tool: Analyzing {file_path}...")
             
@@ -831,6 +833,24 @@ class OrchestratorTools:
             
             # Resolve absolute path for tracking
             file_path_abs = str(Path(file_path).resolve())
+            
+            #  Build schema-aware extraction goal
+            enhanced_objective = extraction_goal or ""
+            
+            if inputs and targets:
+                # User explicitly specified schema - incorporate into the objective query
+                schema_instruction = f"""
+        REQUIRED OUTPUT SCHEMA:
+        - INPUT PARAMETERS (for optimization): {inputs}
+        - TARGET METRICS (to optimize): {targets}
+
+        Extract EXACTLY these columns from the data. Each row should contain values for all input parameters and all target metrics.
+        For multi-objective optimization, we need BOTH targets: {targets}
+        """
+                enhanced_objective = f"{enhanced_objective}\n\n{schema_instruction}".strip()
+                print(f"    📊 User-specified schema:")
+                print(f"       Inputs: {inputs}")
+                print(f"       Targets: {targets}")
             
             # Determine script to use
             if force_regenerate:
@@ -846,13 +866,23 @@ class OrchestratorTools:
                 else: 
                     print(f"    (Discovery Mode: Generating new script)")
             
+            # Pass schema to experiment context
             current_plan = self.orch.planner.state.get("current_plan", {})
-            exp_context = current_plan.get("proposed_experiments", [{}])[0] if current_plan else None
+            exp_context = current_plan.get("proposed_experiments", [{}])[0] if current_plan else {}
+            
+            # Inject schema requirements into context
+            if inputs and targets:
+                exp_context = exp_context.copy() if exp_context else {}
+                exp_context["_schema_requirements"] = {
+                    "input_columns": inputs,
+                    "target_columns": targets,
+                    "optimization_type": "multi-objective" if len(targets) > 1 else "single-objective"
+                }
             
             try:
                 res = self.orch.scalarizer.scalarize(
                     data_path=file_path, 
-                    objective_query=extraction_goal, 
+                    objective_query=enhanced_objective,  
                     reuse_script_path=script_to_use,
                     experiment_context=exp_context, 
                     enable_human_review=True
@@ -884,7 +914,6 @@ class OrchestratorTools:
                     })
                 
                 # DEDUPLICATION - Track processed rows                
-                # Get previous row count for this file
                 previous_row_count = self.orch.analyzed_files.get(file_path_abs, 0)
                 current_row_count = len(df_new)
                 
@@ -900,7 +929,6 @@ class OrchestratorTools:
                     
                     df_to_append = df_new_only
                 elif current_row_count == previous_row_count:
-                    # File unchanged
                     print(f"    ℹ️  No new rows detected (file unchanged)")
                     df_final = pd.read_csv(self.orch.bo_data_path) if self.orch.bo_data_path.exists() else pd.DataFrame()
                     
@@ -912,32 +940,66 @@ class OrchestratorTools:
                         "optimization_ready": len(df_final) >= 3
                     })
                 else:
-                    # File has FEWER rows than before - something's wrong
                     print(f"    ⚠️  Warning: File has fewer rows than last analysis ({current_row_count} < {previous_row_count})")
                     print(f"    💡 Reprocessing entire file")
                     df_to_append = df_new
                     num_new = len(df_new)
 
-                # Explicit Schema Logic for MOO
+                # Schema enforcement BEFORE saving
                 all_cols = list(df_to_append.columns)
 
                 # Case 1: Agent explicitly provided schema (Enables MOO)
                 if inputs and targets:
+                    # Validate that requested columns exist in the extracted data
+                    missing_inputs = [c for c in inputs if c not in all_cols]
+                    missing_targets = [t for t in targets if t not in all_cols]
+                    
+                    if missing_inputs or missing_targets:
+                        # Try fuzzy matching for column names
+                        available_cols = all_cols
+                        suggestions = {}
+                        
+                        for missing in missing_inputs + missing_targets:
+                            # Simple fuzzy match: find columns containing similar substrings
+                            matches = [c for c in available_cols if missing.lower().replace('_', '') in c.lower().replace('_', '') 
+                                    or c.lower().replace('_', '') in missing.lower().replace('_', '')]
+                            if matches:
+                                suggestions[missing] = matches
+                        
+                        return json.dumps({
+                            "status": "error",
+                            "message": "Requested columns not found in extracted metrics",
+                            "missing_inputs": missing_inputs,
+                            "missing_targets": missing_targets,
+                            "available_columns": all_cols,
+                            "suggestions": suggestions if suggestions else None,
+                            "hint": "Column names may differ slightly. Check available_columns and retry with correct names, or use force_regenerate=True with updated extraction_goal."
+                        })
+                    
                     self.orch.expected_input_columns = inputs
-                    self.orch.expected_target_columns = targets  # Note: Use plural variable in orchestrator state
-                    print(f"    📊 Schema Enforced by Agent (Multi-Objective):")
+                    self.orch.expected_target_columns = targets
+                    print(f"    📊 Schema Enforced (User-Specified):")
+                    print(f"       Inputs: {self.orch.expected_input_columns}")
+                    print(f"       Targets: {self.orch.expected_target_columns}")
                 
-                # Case 2: Fallback (Auto-detect assuming last col is target)
-                elif not self.orch.expected_input_columns:
-                    self.orch.expected_target_columns = [all_cols[-1]] # Default to last col as list
+                # Case 2: Schema already established from previous analysis
+                elif self.orch.expected_input_columns and self.orch.expected_target_columns:
+                    print(f"    📊 Schema Enforced (From Previous Analysis):")
+                    print(f"       Inputs: {self.orch.expected_input_columns}")
+                    print(f"       Targets: {self.orch.expected_target_columns}")
+                
+                # Case 3: Fallback - Auto-detect (Single-Objective default)
+                else:
+                    # Heuristic: numeric columns that look like targets go to targets
+                    # This is a last resort - prefer explicit schema
+                    self.orch.expected_target_columns = [all_cols[-1]]
                     self.orch.expected_input_columns = [c for c in all_cols if c != all_cols[-1]] 
                     print(f"    📊 Schema Auto-Detected (Default Single-Objective):")
+                    print(f"       Inputs: {self.orch.expected_input_columns}")
+                    print(f"       Targets: {self.orch.expected_target_columns}")
+                    print(f"    ⚠️  Warning: Using auto-detected schema. For multi-objective optimization, specify inputs and targets explicitly.")
                 
-                # Log the schema for transparency
-                print(f"       Inputs: {self.orch.expected_input_columns}")
-                print(f"       Targets: {self.orch.expected_target_columns}")
-                
-                # SCHEMA ENFORCEMENT
+                # SCHEMA ENFORCEMENT ON SAVE
                 if self.orch.bo_data_path.exists():
                     df_existing = pd.read_csv(self.orch.bo_data_path)
                     
