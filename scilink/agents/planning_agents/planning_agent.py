@@ -784,6 +784,12 @@ Select the most appropriate strategy:
             new_context=new_literature_context,
             result_images=loaded_images
         )
+
+        if new_plan.get("error"):
+            # Print the error clearly to the user
+            print(f"\n❌ Refinement Failed: {new_plan.get('message')}")            
+            # Return immediately - do not update self.state["current_plan"]
+            return new_plan
         
         # Snapshot: Reasoning Draft
         new_plan["iteration"] = next_plan_idx
