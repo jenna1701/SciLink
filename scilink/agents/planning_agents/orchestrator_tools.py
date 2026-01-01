@@ -810,7 +810,6 @@ class OrchestratorTools:
         )
         
         def analyze_file(
-                self,
                 file_path: str,
                 extraction_goal: str = None,
                 force_regenerate: bool = False,
