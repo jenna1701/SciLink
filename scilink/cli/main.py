@@ -5,10 +5,53 @@ Routes to different agent types: plan, simulate, analyze
 """
 
 import sys
+import os
+
+
+def get_terminal_color_support():
+    """
+    Detect terminal color support level.
+    Returns: 'truecolor', '256', 'basic', or 'none'
+    """
+    # No color if not a TTY or NO_COLOR is set
+    if not sys.stdout.isatty() or os.environ.get('NO_COLOR'):
+        return 'none'
+    
+    # Check for true color support
+    colorterm = os.environ.get('COLORTERM', '').lower()
+    if colorterm in ('truecolor', '24bit'):
+        return 'truecolor'
+    
+    term = os.environ.get('TERM', '').lower()
+    term_program = os.environ.get('TERM_PROGRAM', '').lower()
+    
+    # Known true color terminals
+    if term_program in ('iterm.app', 'vscode', 'hyper', 'alacritty', 'kitty', 'warp'):
+        return 'truecolor'
+    
+    # 256 color support
+    if '256color' in term:
+        return '256'
+    
+    # Basic ANSI support
+    if term in ('xterm', 'screen', 'linux', 'ansi'):
+        return 'basic'
+    
+    # Default to basic if we have any TERM set
+    if term:
+        return 'basic'
+    
+    return 'none'
+
+
+def rgb_to_256(r, g, b):
+    """Convert RGB to closest 256-color palette index."""
+    # Use the 6x6x6 color cube (indices 16-231)
+    return 16 + 36 * round(r / 255 * 5) + 6 * round(g / 255 * 5) + round(b / 255 * 5)
 
 
 def print_gradient_logo():
-    """Prints the SciLink ASCII logo with a Blue-to-Green gradient."""
+    """Prints the SciLink ASCII logo with appropriate color support."""
     logo_text = [
         "  ____       _ _     _       _    ",
         " / ___|  ___(_) |   (_)_ __ | | __",
@@ -17,6 +60,8 @@ def print_gradient_logo():
         " |____/ \\___|_|_____|_|_| |_|_|\\_\\"
     ]
 
+    color_support = get_terminal_color_support()
+    
     # SciLink Colors: Blue (#4285F4) to Green (#34A853)
     start_rgb = (66, 133, 244)
     end_rgb = (52, 168, 83)
@@ -26,17 +71,42 @@ def print_gradient_logo():
     padding = " " * ((term_width - logo_width) // 2)
 
     for line in logo_text:
-        colored_line = padding
-        length = len(line)
+        if color_support == 'none':
+            # No color - just print plain text
+            print(padding + line)
         
-        for i, char in enumerate(line):
-            ratio = i / max(length - 1, 1)
-            r = int(start_rgb[0] + (end_rgb[0] - start_rgb[0]) * ratio)
-            g = int(start_rgb[1] + (end_rgb[1] - start_rgb[1]) * ratio)
-            b = int(start_rgb[2] + (end_rgb[2] - start_rgb[2]) * ratio)
-            colored_line += f"\033[38;2;{r};{g};{b}m{char}"
+        elif color_support == 'basic':
+            # Basic ANSI - use cyan as a simple blue-green compromise
+            print(f"{padding}\033[36m{line}\033[0m")
         
-        print(colored_line + "\033[0m")
+        elif color_support == '256':
+            # 256 color - gradient with palette approximation
+            colored_line = padding
+            length = len(line)
+            
+            for i, char in enumerate(line):
+                ratio = i / max(length - 1, 1)
+                r = int(start_rgb[0] + (end_rgb[0] - start_rgb[0]) * ratio)
+                g = int(start_rgb[1] + (end_rgb[1] - start_rgb[1]) * ratio)
+                b = int(start_rgb[2] + (end_rgb[2] - start_rgb[2]) * ratio)
+                color_idx = rgb_to_256(r, g, b)
+                colored_line += f"\033[38;5;{color_idx}m{char}"
+            
+            print(colored_line + "\033[0m")
+        
+        else:
+            # True color - full RGB gradient
+            colored_line = padding
+            length = len(line)
+            
+            for i, char in enumerate(line):
+                ratio = i / max(length - 1, 1)
+                r = int(start_rgb[0] + (end_rgb[0] - start_rgb[0]) * ratio)
+                g = int(start_rgb[1] + (end_rgb[1] - start_rgb[1]) * ratio)
+                b = int(start_rgb[2] + (end_rgb[2] - start_rgb[2]) * ratio)
+                colored_line += f"\033[38;2;{r};{g};{b}m{char}"
+            
+            print(colored_line + "\033[0m")
 
 
 def main():
