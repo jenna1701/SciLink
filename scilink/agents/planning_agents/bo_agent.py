@@ -1,6 +1,8 @@
 import pandas as pd
 import json
 import logging
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
 import PIL.Image as PIL_Image
@@ -85,6 +87,60 @@ class BOAgent:
         self.output_dir.mkdir(exist_ok=True, parents=True)
         self.history_file = self.output_dir / "bo_history.json"
 
+        self.state: Dict[str, Any] = {
+            "session_id": None,
+            "objective": None,
+            "optimization_history": [],
+            "current_config": None,
+            "data_points_seen": 0,
+            "status": "initialized"
+        }
+
+    def _init_state(self, objective: str, data_path: str) -> None:
+        """Initialize state for a new optimization session."""
+        if self.state["session_id"] is None:
+            self.state["session_id"] = str(uuid.uuid4())
+            self.state["start_time"] = datetime.now().isoformat()
+        
+        self.state["objective"] = objective
+        self.state["data_path"] = data_path
+        self.state["status"] = "active"
+
+    def _log_action(self, action: str, input_ctx: Dict, result: Dict, rationale: str = None) -> None:
+        """Record an atomic action to state history."""
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "action": action,
+            "input": input_ctx,
+            "rationale": rationale,
+            "result": result
+        }
+        self.state["optimization_history"].append(entry)
+        self._save_state()
+
+    def _save_state(self) -> None:
+        """Persist state to disk."""
+        state_file = self.output_dir / "bo_state.json"
+        try:
+            with open(state_file, 'w') as f:
+                json.dump(self.state, f, indent=2)
+        except Exception as e:
+            logging.warning(f"Failed to save BO state: {e}")
+
+    def load_state(self, state_path: str) -> bool:
+        """Restore state from disk."""
+        path = Path(state_path)
+        if not path.exists():
+            return False
+        try:
+            with open(path, 'r') as f:
+                self.state = json.load(f)
+            logging.info(f"Restored BO state: session {self.state.get('session_id')}")
+            return True
+        except Exception as e:
+            logging.warning(f"Failed to load BO state: {e}")
+            return False
+        
     def _load_history(self) -> List[Dict]:
         if self.history_file.exists():
             with open(self.history_file, 'r') as f: return json.load(f)
@@ -106,22 +162,30 @@ class BOAgent:
         return clean
 
     def run_optimization_loop(self, data_path: str, objective_text: str, 
-                              input_cols: List[str], input_bounds: List[List[float]], 
-                              target_cols: List[str], output_dir: str = "./bo_artifacts",
-                              batch_size: int = 1) -> Dict[str, Any]:
+                             input_cols: List[str], input_bounds: List[List[float]], 
+                             target_cols: List[str], output_dir: str = "./bo_artifacts",
+                             batch_size: int = 1) -> Dict[str, Any]:
         
         if output_dir is None:
             output_dir = str(self.output_dir)
         
         Path(output_dir).mkdir(exist_ok=True, parents=True)
         
+        # Initialize state
+        self._init_state(objective_text, data_path)
+        
         # 1. Load Data
         try:
             df = pd.read_excel(data_path) if data_path.endswith('.xlsx') else pd.read_csv(data_path)
             for col in input_cols + target_cols:
-                if col not in df.columns: return {"error": f"Column '{col}' not found in data."}
+                if col not in df.columns: 
+                    return {"error": f"Column '{col}' not found in data."}
             X = df[input_cols].values
             y = df[target_cols].values
+            
+            # Track data points
+            self.state["data_points_seen"] = len(df)
+            
         except Exception as e:
             return {"error": f"Data load failed: {e}"}
 
@@ -131,7 +195,6 @@ class BOAgent:
         # 2. Configure Strategy (LLM)
         trend_context = f"Last 5 strategies: {[h.get('config', {}).get('rationale', 'N/A') for h in history[-5:]]}" if history else "No history."
         
-        # Select Prompt and inject context
         prompt_tmpl = BO_CONFIG_MOO_PROMPT if is_moo else BO_CONFIG_SOO_PROMPT
         prompt_parts = [
             prompt_tmpl,
@@ -148,7 +211,10 @@ class BOAgent:
             return {"error": f"JSON Error: {parse_error}"}
         
         valid_config = self._validate_config(raw_config)
-        valid_config["batch_size"] = int(batch_size) # Lock in the user constraint
+        valid_config["batch_size"] = int(batch_size)
+        
+        # Store current config in state
+        self.state["current_config"] = valid_config
 
         # 3. Fit Model
         optimizer = get_optimizer(is_moo=is_moo)
@@ -170,7 +236,7 @@ class BOAgent:
             params=acq_conf.get("params", {})
         )
 
-        # 5. Diagnostics (Plot only first candidate)
+        # 5. Diagnostics
         plot_path = f"{output_dir}/step_{len(history)+1}.png"
         if is_moo:
             optimizer.generate_diagnostics(save_path=plot_path)
@@ -187,7 +253,7 @@ class BOAgent:
         except Exception as e:
             inspection = {"status": "skipped", "reason": str(e)}
 
-        # 7. Save History
+        # 7. Save History (existing mechanism)
         recommendations = []
         for row in next_x_batch:
             recommendations.append({k: float(v) for k, v in zip(input_cols, row)})
@@ -206,9 +272,24 @@ class BOAgent:
             pd.DataFrame(recommendations).to_csv(batch_csv, index=False)
             print(f"  - 💾 Batch saved: {batch_csv}")
 
-        return {
+        result = {
             "status": "success",
             "next_parameters": recommendations[0] if batch_size == 1 else recommendations,
             "strategy": valid_config,
             "plot_path": plot_path
         }
+        
+        # Log this action to state
+        self._log_action(
+            action="run_optimization_loop",
+            input_ctx={
+                "data_path": data_path,
+                "input_cols": input_cols,
+                "target_cols": target_cols,
+                "batch_size": batch_size
+            },
+            result=result,
+            rationale=valid_config.get("rationale")
+        )
+        
+        return result
