@@ -2,7 +2,8 @@ import subprocess
 import json
 import logging
 import re
-import sys
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import PIL.Image as PIL_Image
@@ -14,8 +15,10 @@ from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from .parser_utils import parse_json_from_response
 from .instruct import SCALARIZER_PROMPT, SCALARIZER_REFLECTION_PROMPT
 
+from .base_agent import BaseAgent
 
-class ScalarizerAgent:
+
+class ScalarizerAgent(BaseAgent):
     """
     Agent for converting raw experimental data into scalar descriptors
     suitable for Bayesian Optimization.
@@ -39,6 +42,8 @@ class ScalarizerAgent:
                  model_name: str = "gemini-3-pro-preview", 
                  local_model: str = None,
                  output_dir: str = "."):
+        super().__init__(output_dir)
+        self.agent_type = "scalarizer"
         
         # Auth & Model Initialization
         if google_api_key is None:
@@ -61,9 +66,13 @@ class ScalarizerAgent:
             self.model = genai.GenerativeModel(model_name)
             self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
 
-        # Local Storage Setup
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(exist_ok=True, parents=True)
+    def _get_initial_state_fields(self) -> Dict[str, Any]:
+        """Agent-specific state fields"""
+        return {
+            "current_data_path": None,
+            "current_objective": None,
+            "active_script": None
+        }
 
     def _read_file_head(self, file_path: str, n_lines=25) -> str:
         """Reads raw file header to help LLM handle delimiters/metadata."""
@@ -175,15 +184,14 @@ class ScalarizerAgent:
             return {"status": "pass", "reasoning": "Auto-reflection unavailable."}
 
     def scalarize(self, 
-                  data_path: str, 
-                  objective_query: str = "",
-                  reuse_script_path: str = None,
-                  experiment_context: Optional[Dict[str, Any]] = None,
-                  metadata_path: Optional[str] = None, 
-                  enable_human_review: bool = True) -> Dict[str, Any]:
+                 data_path: str, 
+                 objective_query: str = "",
+                 reuse_script_path: str = None,
+                 experiment_context: Optional[Dict[str, Any]] = None,
+                 metadata_path: Optional[str] = None, 
+                 enable_human_review: bool = True) -> Dict[str, Any]:
         """
         Main entry point. Converts raw data -> Scalar Metrics.
-        Auto-discovers metadata JSON if not provided.
 
         Example:
             >>> agent = ScalarizerAgent()
@@ -213,24 +221,36 @@ class ScalarizerAgent:
             - 'source_script': Path to the generated Python script
         """
         path_obj = Path(data_path)
+        
+        # Initialize state
+        self._init_state(current_data_path=data_path, current_objective=objective_query)
 
-        # Path 1: Re-use existign script
+        # Path 1: Re-use existing script
         if reuse_script_path and Path(reuse_script_path).exists():
             print(f"  🔄 Reusing scalarizer script: {Path(reuse_script_path).name}")
-            # Execute with input file as argument
             exec_res = self._execute_script(Path(reuse_script_path), args=[str(data_path)])
-            return {
+            
+            result = {
                 "status": exec_res["status"], 
                 "metrics": exec_res.get("metrics", {}),
                 "source_script": str(reuse_script_path),
                 "error": exec_res.get("error")
             }
+            
+            # Log the reuse action
+            self._log_action(
+                action="reuse_script",
+                input_ctx={"data_path": data_path, "script": reuse_script_path},
+                result=result,
+                rationale="Reusing previously validated analysis script for consistency"
+            )
+            
+            return result
         
         # Path 2: Generate new script
         file_context = self._read_file_head(data_path)
         
         # Metadata Auto-Discovery
-        # If no path provided, check for a JSON file with the same name (e.g., run_01.csv -> run_01.json)
         if not metadata_path:
             potential_json = path_obj.with_suffix('.json')
             if potential_json.exists():
@@ -238,8 +258,6 @@ class ScalarizerAgent:
                 print(f"  - ℹ️  Auto-discovered metadata file: {potential_json.name}")
         
         metadata_str = self._read_metadata(metadata_path)
-
-        # Format Contexts
         exp_context_str = json.dumps(experiment_context) if experiment_context else "None"
         plot_output_dir = str(self.output_dir.resolve())
         
@@ -276,6 +294,7 @@ class ScalarizerAgent:
 
         current_prompt = base_prompt
         max_retries = 5
+        human_feedback_collected = None
 
         for attempt in range(max_retries):
             print(f"  - 📉 Scalarizer (Attempt {attempt+1}): Generating script...")
@@ -288,13 +307,11 @@ class ScalarizerAgent:
                 )
                 result, error = parse_json_from_response(response)
             except Exception as e:
-                return {"error": f"LLM Generation Error: {e}"}
+                return {"status": "failure", "error": f"LLM Generation Error: {e}"}
 
             if error or not result or "implementation_code" not in result:
                 err_msg = error if error else "Missing 'implementation_code' key"
                 print(f"    ⚠️ Generation Failed (Invalid JSON): {err_msg}")
-                print("    --> Retrying with stricter JSON instructions...")
-                # Update prompt to force JSON compliance
                 current_prompt = base_prompt + f"\n\n**PREVIOUS ERROR:** JSON parsing failed ({err_msg}). Return ONLY valid JSON."
                 continue
 
@@ -304,16 +321,16 @@ class ScalarizerAgent:
             with open(script_path, "w", encoding="utf-8") as f:
                 f.write(result["implementation_code"])
             
+            # Track active script in state
+            self.state["active_script"] = str(script_path)
+            
             # Execute Script
             exec_res = self._execute_script(script_path, args=[str(data_path)])
             
             if exec_res["status"] == "failure":
                 err_msg = exec_res.get('stderr', 'Unknown Error').strip()
-                # Truncate if too long for console readability
                 display_err = (err_msg[:300] + '...') if len(err_msg) > 300 else err_msg
                 print(f"    ❌ Runtime Error:\n    {display_err}")
-                
-                # Feed stderr back to LLM
                 current_prompt = base_prompt + f"\n\n**RUNTIME ERROR:**\n{err_msg}\nFix the code."
                 continue
                 
@@ -321,7 +338,7 @@ class ScalarizerAgent:
             if experiment_context and "_schema_requirements" in experiment_context:
                 schema_for_verification = experiment_context["_schema_requirements"]
 
-            # Auto-Reflection (Visual Check)
+            # Auto-Reflection
             print(f"    🤔 Auto-Reflecting on visual proof...")
             verification = self._verify_analysis(
                 objective=objective_query,
@@ -340,7 +357,7 @@ class ScalarizerAgent:
             
             print(f"    ✅ Auto-Reflection Passed.")
 
-            # Human Review (Optional)
+            # Human Review
             if enable_human_review:
                 print("\n" + "="*60)
                 print(f"👀 SCALARIZER REVIEW: {path_obj.name}")
@@ -350,13 +367,46 @@ class ScalarizerAgent:
                 user_fb = input("> Press [ENTER] to confirm or type feedback: ").strip()
                 
                 if user_fb:
+                    human_feedback_collected = user_fb
                     current_prompt = base_prompt + f"\n\n**HUMAN FEEDBACK:**\n{user_fb}"
                     continue
 
-            return {
+            # Success - log and return
+            final_result = {
                 "status": "success", 
                 "metrics": exec_res["metrics"], 
                 "source_script": str(script_path)
             }
+            
+            self._log_action(
+                action="generate_and_execute_script",
+                input_ctx={
+                    "data_path": data_path,
+                    "objective": objective_query,
+                    "metadata_path": metadata_path,
+                    "attempt": attempt + 1
+                },
+                result=final_result,
+                rationale=result.get("thought_process"),
+                feedback=human_feedback_collected
+            )
+            
+            self.state["status"] = "success"
+            return final_result
 
-        return {"status": "failure", "error": "Max retries exceeded"}
+        # Max retries exceeded
+        failure_result = {"status": "failure", "error": "Max retries exceeded"}
+        
+        self._log_action(
+            action="generate_and_execute_script",
+            input_ctx={
+                "data_path": data_path,
+                "objective": objective_query,
+                "attempt": max_retries
+            },
+            result=failure_result,
+            rationale="All retry attempts exhausted"
+        )
+        
+        self.state["status"] = "failed"
+        return failure_result
