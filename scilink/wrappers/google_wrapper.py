@@ -278,10 +278,17 @@ class LegacyChatSession:
             if self._history:
                 config['history'] = self._history
             
+            # NOTE: In the new SDK, tools are NOT passed at chat creation time.
+            # They are passed with each send_message() call instead.
+            # We store them in self._tools and use them in send_message().
+            
             self._chat = self._client.chats.create(
                 model=self._model_name,
                 config=config if config else None
             )
+            logging.debug(f"Chat session created for model: {self._model_name}")
+            if self._tools:
+                logging.debug(f"Tools will be passed with each message ({len(self._tools) if isinstance(self._tools, list) else 1} tools)")
         except Exception as e:
             logging.warning(f"Failed to create chat session: {e}")
             self._chat = None
@@ -356,17 +363,94 @@ class LegacyChatSession:
             if stream:
                 return self._send_message_stream(message)
             else:
-                response = self._chat.send_message(message=message)
+                # Build GenerateContentConfig if we have tools, generation config, or system instruction
+                config = self._build_send_message_config(generation_config, safety_settings)
+                
+                if config:
+                    response = self._chat.send_message(message=message, config=config)
+                else:
+                    response = self._chat.send_message(message=message)
                 return LegacyGenerateContentResponse(response)
         except Exception as e:
             logging.error(f"Error sending message: {e}")
             raise
     
+    def _build_send_message_config(self, generation_config: Any = None, 
+                                    safety_settings: Any = None) -> Any:
+        """Build a GenerateContentConfig for send_message if needed."""
+        # Check if we need a config at all
+        has_tools = bool(self._tools)
+        has_gen_config = bool(generation_config or self._generation_config)
+        has_safety = bool(safety_settings or self._safety_settings)
+        has_system = bool(self._system_instruction)
+        
+        if not any([has_tools, has_gen_config, has_safety, has_system]):
+            return None
+        
+        config_kwargs = {}
+        
+        # Add tools
+        if self._tools:
+            config_kwargs['tools'] = self._tools
+        
+        # Add system instruction
+        if self._system_instruction:
+            config_kwargs['system_instruction'] = self._system_instruction
+        
+        # Add generation config parameters
+        gen_cfg = generation_config or self._generation_config
+        if gen_cfg:
+            if isinstance(gen_cfg, dict):
+                for key in ['temperature', 'top_p', 'top_k', 'max_output_tokens', 
+                           'response_mime_type', 'response_schema', 'stop_sequences']:
+                    if key in gen_cfg:
+                        config_kwargs[key] = gen_cfg[key]
+            else:
+                # Object with attributes
+                for attr in ['temperature', 'top_p', 'top_k', 'max_output_tokens',
+                            'response_mime_type', 'response_schema', 'stop_sequences']:
+                    val = getattr(gen_cfg, attr, None)
+                    if val is not None:
+                        config_kwargs[attr] = val
+        
+        # Add safety settings
+        safety = safety_settings or self._safety_settings
+        if safety:
+            # Convert to new format if needed
+            config_kwargs['safety_settings'] = self._convert_safety_for_config(safety)
+        
+        # Create the config object
+        try:
+            return types.GenerateContentConfig(**config_kwargs)
+        except Exception as e:
+            logging.warning(f"Failed to create GenerateContentConfig: {e}")
+            # Fall back to dict-based config
+            return config_kwargs
+    
+    def _convert_safety_for_config(self, safety_settings: Any) -> List:
+        """Convert safety settings for GenerateContentConfig."""
+        if isinstance(safety_settings, list):
+            result = []
+            for setting in safety_settings:
+                if isinstance(setting, dict):
+                    result.append(types.SafetySetting(
+                        category=setting.get('category'),
+                        threshold=setting.get('threshold')
+                    ))
+                else:
+                    result.append(setting)
+            return result
+        return safety_settings
+    
     def _send_message_stream(self, message) -> Iterator[LegacyGenerateContentResponse]:
         """Handle streaming message send."""
-        # The new SDK may have different streaming API
-        # For now, fall back to non-streaming and yield single response
-        response = self._chat.send_message(message=message)
+        # Build config for streaming too
+        config = self._build_send_message_config(None, None)
+        
+        if config:
+            response = self._chat.send_message(message=message, config=config)
+        else:
+            response = self._chat.send_message(message=message)
         yield LegacyGenerateContentResponse(response, is_stream_chunk=True)
     
     def _convert_parts_to_new_format(self, parts: List) -> List:
@@ -676,7 +760,7 @@ class GenAIAsLegacyGenerativeModel:
                       generation_config: Any = None,
                       safety_settings: Any = None,
                       tools: Any = None,
-                      tool_config: Any = None) -> Optional[types.GenerateContentConfig]:
+                      tool_config: Any = None) -> Optional[Any]:
         """
         Build a GenerateContentConfig from legacy parameters.
         """
