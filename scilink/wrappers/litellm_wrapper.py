@@ -30,6 +30,38 @@ except ImportError:
     litellm = None
 
 
+
+def _normalize_model_name(model: str) -> str:
+    """
+    Add provider prefix if not present.
+    
+    LiteLLM requires prefixes like 'gemini/', 'openai/', etc. to route correctly.
+    This helper auto-detects common model patterns and adds the appropriate prefix.
+    """
+    if not model:
+        return model
+        
+    if '/' in model:
+        # Already has prefix
+        return model
+    
+    model_lower = model.lower()
+    
+    # Google Gemini models
+    if 'gemini' in model_lower:
+        return f"gemini/{model}"
+    
+    # OpenAI models
+    if model_lower.startswith(('gpt-', 'o1-', 'o3-', 'text-embedding', 'davinci', 'curie', 'babbage', 'ada')):
+        return f"openai/{model}"
+    
+    # Anthropic models
+    if model_lower.startswith('claude'):
+        return f"anthropic/{model}"
+    
+    # Default: return as-is, let LiteLLM figure it out
+    return model
+
 def _check_litellm():
     """Raise ImportError if LiteLLM is not available."""
     if not LITELLM_AVAILABLE:
@@ -435,15 +467,17 @@ class LiteLLMEmbeddingModel:
     """
     LiteLLM-based embeddings matching OpenAIAsEmbeddingModel interface.
     
+    Features:
+    - Automatic provider prefix detection (gemini/, openai/, etc.)
+    - Size-aware batching to avoid payload limits
+    - Automatic retry with smaller batches on size errors
+    
     Usage:
         # Google
-        embedder = LiteLLMEmbeddingModel("gemini/text-embedding-004", api_key="...")
+        embedder = LiteLLMEmbeddingModel("gemini-embedding-001", api_key="...")
         
         # OpenAI
         embedder = LiteLLMEmbeddingModel("text-embedding-3-small", api_key="...")
-        
-        # Cohere
-        embedder = LiteLLMEmbeddingModel("cohere/embed-english-v3.0", api_key="...")
         
         response = embedder.embed_content(
             model="...",
@@ -451,6 +485,11 @@ class LiteLLMEmbeddingModel:
         )
         print(response["embedding"])  # [[...], [...]]
     """
+    
+    # Max payload size ~30MB to stay under 40MB limit with overhead
+    MAX_BATCH_BYTES = 30 * 1024 * 1024
+    # Also limit by count to avoid other API limits
+    MAX_BATCH_SIZE = 100
     
     def __init__(
         self,
@@ -468,7 +507,7 @@ class LiteLLMEmbeddingModel:
         """
         _check_litellm()
         
-        self.model = model
+        self.model = _normalize_model_name(model) if model else None
         self.api_key = api_key
         self.base_url = base_url
     
@@ -480,7 +519,7 @@ class LiteLLMEmbeddingModel:
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Generate embeddings.
+        Generate embeddings with automatic size-aware batching.
         
         Args:
             model: Model name (overrides default)
@@ -494,23 +533,147 @@ class LiteLLMEmbeddingModel:
         if not effective_model:
             raise ValueError("Model must be specified")
         
+        effective_model = _normalize_model_name(effective_model)
+        
         is_single = isinstance(content, str)
         inputs = [content] if is_single else content
         
         try:
-            response = litellm.embedding(
-                model=effective_model,
-                input=inputs,
-                api_key=self.api_key,
-                api_base=self.base_url
-            )
+            # Create size-aware batches to avoid payload limits
+            batches = self._create_size_aware_batches(inputs)
             
-            embeddings = [item["embedding"] for item in response.data]
+            all_embeddings = []
+            for batch_idx, batch in enumerate(batches):
+                try:
+                    response = litellm.embedding(
+                        model=effective_model,
+                        input=batch,
+                        api_key=self.api_key,
+                        api_base=self.base_url
+                    )
+                    
+                    batch_embeddings = [item["embedding"] for item in response.data]
+                    all_embeddings.extend(batch_embeddings)
+                    
+                except Exception as e:
+                    error_str = str(e).lower()
+                    # Check for payload size errors
+                    if "payload size" in error_str or "too large" in error_str or "exceeds the limit" in error_str:
+                        logging.warning(f"Batch {batch_idx + 1} too large, splitting and retrying...")
+                        # Recursively embed with smaller batches
+                        sub_embeddings = self._embed_with_retry(effective_model, batch)
+                        all_embeddings.extend(sub_embeddings)
+                    else:
+                        raise
             
             if is_single:
-                return {"embedding": embeddings[0]}
-            return {"embedding": embeddings}
+                return {"embedding": all_embeddings[0]}
+            return {"embedding": all_embeddings}
             
         except Exception as e:
             logging.error(f"LiteLLM embedding error: {e}")
+            raise
+    
+    def _create_size_aware_batches(self, inputs: List[str]) -> List[List[str]]:
+        """
+        Split inputs into batches that won't exceed payload limits.
+        
+        Uses both byte size and count limits to stay within API constraints.
+        """
+        batches = []
+        current_batch = []
+        current_size = 0
+        
+        for text in inputs:
+            text_size = len(text.encode('utf-8'))
+            
+            # Check if adding this text would exceed limits
+            would_exceed_size = current_size + text_size > self.MAX_BATCH_BYTES
+            would_exceed_count = len(current_batch) >= self.MAX_BATCH_SIZE
+            
+            if (would_exceed_size or would_exceed_count) and current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_size = 0
+            
+            # Handle individual texts that are too large
+            if text_size > self.MAX_BATCH_BYTES:
+                logging.warning(
+                    f"Single text too large ({text_size:,} bytes), truncating to fit limit..."
+                )
+                # Truncate to fit - estimate conservatively
+                max_chars = (self.MAX_BATCH_BYTES * 3) // 4  # Account for UTF-8 overhead
+                text = text[:max_chars]
+                text_size = len(text.encode('utf-8'))
+            
+            current_batch.append(text)
+            current_size += text_size
+        
+        if current_batch:
+            batches.append(current_batch)
+        
+        return batches
+    
+    def _embed_with_retry(
+        self, 
+        model: str, 
+        texts: List[str], 
+        max_retries: int = 3
+    ) -> List[List[float]]:
+        """
+        Recursively embed texts, splitting on size errors.
+        
+        If a batch fails due to size, split it in half and retry.
+        """
+        if not texts:
+            return []
+        
+        # Base case: single text
+        if len(texts) == 1:
+            try:
+                response = litellm.embedding(
+                    model=model,
+                    input=texts,
+                    api_key=self.api_key,
+                    api_base=self.base_url
+                )
+                return [item["embedding"] for item in response.data]
+            except Exception as e:
+                error_str = str(e).lower()
+                if "payload size" in error_str or "too large" in error_str:
+                    # Single text is too large - truncate it
+                    logging.warning("Single text still too large, truncating further...")
+                    truncated = texts[0][:len(texts[0]) // 2]
+                    response = litellm.embedding(
+                        model=model,
+                        input=[truncated],
+                        api_key=self.api_key,
+                        api_base=self.base_url
+                    )
+                    return [item["embedding"] for item in response.data]
+                raise
+        
+        # Try the full batch first
+        try:
+            response = litellm.embedding(
+                model=model,
+                input=texts,
+                api_key=self.api_key,
+                api_base=self.base_url
+            )
+            return [item["embedding"] for item in response.data]
+        except Exception as e:
+            error_str = str(e).lower()
+            if "payload size" in error_str or "too large" in error_str or "exceeds the limit" in error_str:
+                # Split in half and retry each half
+                mid = len(texts) // 2
+                left_half = texts[:mid]
+                right_half = texts[mid:]
+                
+                logging.info(f"Splitting batch of {len(texts)} into {len(left_half)} + {len(right_half)}")
+                
+                left_embeddings = self._embed_with_retry(model, left_half, max_retries)
+                right_embeddings = self._embed_with_retry(model, right_half, max_retries)
+                
+                return left_embeddings + right_embeddings
             raise
