@@ -8,6 +8,7 @@ import google.generativeai as genai
 
 from ...auth import get_api_key, APIKeyNotFoundError
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.google_wrapper import GenAIAsLegacyGenerativeModel
 from .planning_agent import PlanningAgent
 from .scalarizer_agent import ScalarizerAgent
 from .bo_agent import BOAgent
@@ -228,10 +229,10 @@ class PlanningOrchestratorAgent:
             self.tools_for_model = self.tools.openai_schemas
         else:
             logging.info(f"☁️  Orchestrator using Google Gemini model: {model_name}")
-            if google_api_key:
-                genai.configure(api_key=google_api_key)
-            self.model = genai.GenerativeModel(
+            # NEW: Use the wrapper instead of legacy genai module
+            self.model = GenAIAsLegacyGenerativeModel(
                 model_name=model_name,
+                api_key=google_api_key,
                 tools=self.tools.gemini_functions,
                 system_instruction=ORCHESTRATOR_SYSTEM_PROMPT
             )

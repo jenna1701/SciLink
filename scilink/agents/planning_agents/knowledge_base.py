@@ -1,6 +1,5 @@
 import numpy as np
 import faiss
-import google.generativeai as genai
 import time
 import json
 from pathlib import Path
@@ -9,6 +8,7 @@ from typing import List, Dict, Any
 
 from ...auth import get_api_key, APIKeyNotFoundError
 from ...wrappers.openai_wrapper_embeddings import OpenAIAsEmbeddingModel
+from ...wrappers.google_wrapper_embeddings import GenAIAsLegacyEmbeddingModel
 
 from openai import RateLimitError
 
@@ -39,9 +39,11 @@ class KnowledgeBase:
             )
         else:
             logging.info(f"☁️  Using Google Gemini model for embeddings: {self.embedding_model_name}")
-            # For Google, the client is the genai module itself after configuration
-            genai.configure(api_key=google_api_key)
-            self.embedding_client = genai
+            # Use the wrapper instead of legacy google.generativeai module
+            self.embedding_client = GenAIAsLegacyEmbeddingModel(
+                model=self.embedding_model_name,
+                api_key=google_api_key
+            )
             
         self.index = None
         self.chunks = []

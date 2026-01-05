@@ -12,6 +12,7 @@ import google.generativeai as genai
 
 from ...auth import get_api_key, APIKeyNotFoundError
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.google_wrapper import GenAIAsLegacyGenerativeModel
 from .parser_utils import parse_json_from_response
 from .instruct import SCALARIZER_PROMPT, SCALARIZER_REFLECTION_PROMPT
 
@@ -60,11 +61,16 @@ class ScalarizerAgent(BaseAgent):
             )
             self.generation_config = None 
         else:
-            logging.info(f"☁️  Analysis Agent using Google Gemini model: {model_name}")
-            if google_api_key:
-                genai.configure(api_key=google_api_key)
-            self.model = genai.GenerativeModel(model_name)
-            self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
+            logging.info(f"☁️  ScalarizerAgent using Google Gemini model: {model_name}")
+            self.model = GenAIAsLegacyGenerativeModel(
+                model_name=model_name,
+                api_key=google_api_key
+            )
+
+        # Generation config as a dict - wrapper handles translation
+        self.generation_config = {
+            "response_mime_type": "application/json"
+        }
 
     def _get_initial_state_fields(self) -> Dict[str, Any]:
         """Agent-specific state fields"""

@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Dict, Any, List
 import PIL.Image as PIL_Image
 
-import google.generativeai as genai
 from ...auth import get_api_key, APIKeyNotFoundError
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.google_wrapper import GenAIAsLegacyGenerativeModel
 from .parser_utils import parse_json_from_response 
 from ...tools.bo_tools import get_optimizer
 from .instruct import (
@@ -81,11 +81,15 @@ class BOAgent(BaseAgent):
             )
             self.generation_config = None 
         else:
-            logging.info(f"☁️  BO Agent using Google Gemini model: {model_name}")
-            if google_api_key:
-                genai.configure(api_key=google_api_key)
-            self.model = genai.GenerativeModel(model_name)
-            self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
+            logging.info(f"☁️  BOAgent using Google Gemini model: {model_name}")
+            self.model = GenAIAsLegacyGenerativeModel(
+                model_name=model_name,
+                api_key=google_api_key
+            )
+        
+        self.generation_config = {
+            "response_mime_type": "application/json"
+        }
 
         self.history_file = self.output_dir / "bo_history.json"
 

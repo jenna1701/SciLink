@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-import google.generativeai as genai
 import json
 import logging
 import shutil
@@ -26,6 +25,7 @@ from .instruct import (
 
 from ...auth import get_api_key, APIKeyNotFoundError
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.google_wrapper import GenAIAsLegacyGenerativeModel
 from ..lit_agents.literature_agent import LiteratureSearchAgent
 from ..lit_agents.optimize_query import optimize_search_query
 
@@ -105,9 +105,12 @@ class PlanningAgent(BaseAgent):
             self.generation_config = None
         else:
             logging.info(f"☁️  Using Google Gemini model for generation: {model_name}")
-            genai.configure(api_key=google_api_key)
-            self.model = genai.GenerativeModel(model_name)
-            self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
+            self.model = GenAIAsLegacyGenerativeModel(
+                model_name=model_name,
+                api_key=google_api_key
+            )
+            # Generation config as a dict - wrapper handles translation
+            self.generation_config = {"response_mime_type": "application/json"}
 
         self.lit_agent = None
         if futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY"):
