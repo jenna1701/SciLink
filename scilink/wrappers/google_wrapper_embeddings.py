@@ -104,6 +104,8 @@ class GenAIAsLegacyEmbeddingModel:
             Format: {'embedding': [[float, ...], ...]} for multiple inputs
                     or {'embedding': [float, ...]} for single input (legacy behavior)
         """
+        import time
+        
         # Use default model if not specified
         effective_model = model or self._default_model
         if not effective_model:
@@ -140,44 +142,89 @@ class GenAIAsLegacyEmbeddingModel:
         
         if len(batches) == 1:
             # Single batch - simple case
-            try:
-                response = self._client.models.embed_content(
-                    model=effective_model,
-                    contents=batches[0],
-                    config=config
-                )
-                return self._convert_response(response, is_single_input)
-            except Exception as e:
-                logging.error(f"Error generating embeddings: {e}")
-                raise
+            return {'embedding': self._embed_batch_with_retry(effective_model, batches[0], config, is_single_input)}
         else:
             # Multiple batches needed
             logging.info(f"Batching {len(contents_list)} items into {len(batches)} size-aware batches")
             all_embeddings = []
             
             for batch_num, batch in enumerate(batches, 1):
-                try:
-                    logging.debug(f"Processing batch {batch_num}/{len(batches)} ({len(batch)} items)")
-                    response = self._client.models.embed_content(
-                        model=effective_model,
-                        contents=batch,
-                        config=config
-                    )
-                    
-                    # Extract embeddings from this batch
-                    batch_result = self._convert_response(response, is_single_input=False)
-                    batch_embeddings = batch_result.get('embedding', [])
-                    all_embeddings.extend(batch_embeddings)
-                    
-                except Exception as e:
-                    logging.error(f"Error in batch {batch_num}: {e}")
-                    raise
+                logging.debug(f"Processing batch {batch_num}/{len(batches)} ({len(batch)} items)")
+                batch_embeddings = self._embed_batch_with_retry(
+                    effective_model, batch, config, is_single_input=False, 
+                    batch_info=f"{batch_num}/{len(batches)}"
+                )
+                all_embeddings.extend(batch_embeddings)
             
             # Return combined results
             if is_single_input:
                 return {'embedding': all_embeddings[0] if all_embeddings else []}
             else:
                 return {'embedding': all_embeddings}
+    
+    def _embed_batch_with_retry(self, model: str, batch: List[str], config: Any, 
+                                 is_single_input: bool = False, 
+                                 batch_info: str = "",
+                                 max_retries: int = 5,
+                                 base_delay: float = 2.0) -> List:
+        """
+        Embed a batch with automatic retry for rate limit errors.
+        
+        Args:
+            model: Model name
+            batch: List of content strings
+            config: Embedding config
+            is_single_input: Whether original input was a single string
+            batch_info: Batch identifier for logging
+            max_retries: Maximum number of retries for rate limit errors
+            base_delay: Base delay in seconds (doubles with each retry)
+            
+        Returns:
+            List of embedding vectors
+        """
+        import time
+        
+        last_error = None
+        
+        for attempt in range(max_retries + 1):
+            try:
+                response = self._client.models.embed_content(
+                    model=model,
+                    contents=batch,
+                    config=config
+                )
+                
+                # Success - convert and return
+                result = self._convert_response(response, is_single_input)
+                embeddings = result.get('embedding', [])
+                
+                # Ensure we return a list for batch processing
+                if is_single_input and isinstance(embeddings, list) and len(embeddings) > 0:
+                    if not isinstance(embeddings[0], list):
+                        # Single embedding returned as flat list
+                        return [embeddings]
+                
+                return embeddings if isinstance(embeddings, list) else [embeddings]
+                
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                
+                # Check if it's a rate limit error (429)
+                is_rate_limit = '429' in error_str or 'RESOURCE_EXHAUSTED' in error_str
+                
+                if is_rate_limit and attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    logging.warning(f"Rate limited on batch {batch_info}. Waiting {delay:.1f}s before retry {attempt + 1}/{max_retries}")
+                    time.sleep(delay)
+                    continue
+                else:
+                    # Not a rate limit error, or max retries exceeded
+                    logging.error(f"Error generating embeddings: {e}")
+                    raise
+        
+        # Should not reach here, but just in case
+        raise last_error
     
     def _create_size_aware_batches(self, contents: List[str], 
                                     max_bytes: int, 
