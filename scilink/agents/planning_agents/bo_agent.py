@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 import PIL.Image as PIL_Image
 
-from ...auth import get_api_key_for_model, infer_provider, APIKeyNotFoundError
+from ...auth import get_internal_proxy_key
 from .parser_utils import parse_json_from_response 
 from ...tools.bo_tools import get_optimizer
 from .instruct import (
@@ -91,15 +91,17 @@ class BOAgent(BaseAgent):
             source="BOAgent"
         )
         
-        # Resolve API key from environment if not provided
-        if api_key is None:
-            api_key = get_api_key_for_model(model_name)
-            if not api_key:
-                provider = infer_provider(model_name) or "unknown"
-                raise APIKeyNotFoundError(provider)
-
-        # Initialize LLM client
         if base_url:
+            # INTERNAL PROXY
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            
+            if not api_key:
+                raise ValueError(
+                    "API key required for internal proxy.\n"
+                    "Set SCILINK_API_KEY environment variable or pass api_key parameter."
+                )
+            
             logging.info(f"🏛️ BOAgent using internal proxy: {base_url}")
             self.model = OpenAIAsGenerativeModel(
                 model=model_name,
@@ -107,6 +109,7 @@ class BOAgent(BaseAgent):
                 base_url=base_url
             )
         else:
+            # PUBLIC LITELLM
             logging.info(f"🌐 BOAgent using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,

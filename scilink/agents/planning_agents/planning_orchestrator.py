@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 import google.generativeai as genai
 
-from ...auth import get_api_key_for_model, infer_provider, APIKeyNotFoundError
+from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .planning_agent import PlanningAgent
@@ -162,6 +162,7 @@ class PlanningOrchestratorAgent:
             When provided, uses OpenAI-compatible client.
             When None, uses LiteLLM for multi-provider support.
         embedding_model: Embedding model name.
+        embedding_api_key: API key for the embedding LLM provider
         futurehouse_api_key: Optional FutureHouse API key for literature search.
         restore_checkpoint: Whether to restore from previous checkpoint.
         
@@ -176,6 +177,7 @@ class PlanningOrchestratorAgent:
         model_name: str = "gemini-3-pro-preview",
         base_url: Optional[str] = None,
         embedding_model: str = "gemini-embedding-001",
+        embedding_api_key: Optional[str] = None,
         futurehouse_api_key: Optional[str] = None,
         restore_checkpoint: bool = False,
         # Deprecated
@@ -191,12 +193,24 @@ class PlanningOrchestratorAgent:
             source="PlanningOrchestratorAgent"
         )
         
-        # Resolve API key from environment if not provided
-        if api_key is None:
-            api_key = get_api_key_for_model(model_name)
+        if base_url:
+        # INTERNAL PROXY
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            
             if not api_key:
-                provider = infer_provider(model_name) or "unknown"
-                raise APIKeyNotFoundError(provider)
+                raise ValueError(
+                    "API key required for internal proxy.\n"
+                    "Set SCILINK_API_KEY environment variable or pass api_key parameter."
+                )
+            
+            if embedding_api_key is not None:
+                logging.warning(
+                    "⚠️ embedding_api_key is ignored for internal proxy. "
+                    "Using api_key for all requests."
+                )
+            
+            embedding_api_key = api_key
 
         self.objective = objective
         self.base_dir = Path(base_dir)
@@ -240,6 +254,7 @@ class PlanningOrchestratorAgent:
             model_name=model_name,
             base_url=base_url,
             embedding_model=embedding_model,
+            embedding_api_key=embedding_api_key,
             futurehouse_api_key=futurehouse_api_key,
             output_dir=str(self.base_dir)
         )

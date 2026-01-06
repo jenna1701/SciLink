@@ -22,10 +22,8 @@ from .instruct import (
     TEA_INSTRUCTIONS
 )
 
-from ...auth import get_api_key_for_model, infer_provider, APIKeyNotFoundError
-
+from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
-
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 
 from ._deprecation import normalize_params
@@ -78,6 +76,7 @@ class PlanningAgent(BaseAgent):
             When provided, uses OpenAI-compatible client.
             When None, uses LiteLLM for multi-provider support.
         embedding_model: Embedding model name.
+        embedding_api_key: API key for the embedding LLM provider.
         futurehouse_api_key: Optional API key for literature search.
         kb_base_path: Path for knowledge base storage.
         code_chunk_size: Chunk size for code files.
@@ -90,6 +89,7 @@ class PlanningAgent(BaseAgent):
                  model_name: str = "gemini-3-pro-preview",
                  base_url: Optional[str] = None,
                  embedding_model: str = "gemini-embedding-001",
+                 embedding_api_key: Optional[str] = None,
                  futurehouse_api_key: str = None,
                  kb_base_path: str = "./kb_storage/default_kb",
                  code_chunk_size: int = 20000,
@@ -109,21 +109,30 @@ class PlanningAgent(BaseAgent):
             source="PlanningAgent"
         )
         
-        if api_key is None:
-            api_key = get_api_key_for_model(model_name)
-            if not api_key:
-                provider = infer_provider(model_name) or "unknown"
-                raise APIKeyNotFoundError(provider)
-            
         # Store config
-        self._api_key = api_key
         self._base_url = base_url
         self.code_chunk_size = code_chunk_size
-
-        embedding_api_key = None
-
-        # Initialize LLM client
+        
+        # Initialize LLM client based on deployment mode
+        use_litellm = False
+        
         if base_url:
+            # INTERNAL PROXY
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            
+            if not api_key:
+                raise ValueError(
+                    "API key required for internal proxy.\n"
+                    "Set SCILINK_API_KEY environment variable or pass api_key parameter."
+                )
+            
+            if embedding_api_key is not None:
+                logging.warning(
+                    "⚠️ embedding_api_key is ignored for internal proxy. "
+                    "Using api_key for all requests."
+                )
+            
             logging.info(f"🏛️ PlanningAgent using internal proxy: {base_url}")
             self.model = OpenAIAsGenerativeModel(
                 model=model_name,
@@ -132,15 +141,18 @@ class PlanningAgent(BaseAgent):
             )
             use_litellm = False
             embedding_api_key = api_key
+            
         else:
+            # PUBLIC LITELLM - can use different keys per provider
             logging.info(f"🌐 PlanningAgent using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
-                api_key=api_key
+                api_key=api_key  # Can be None - LiteLLM reads env vars
             )
             use_litellm = True
-            embedding_api_key = None
+            # embedding_api_key stays as passed (can be None for auto-detect)
         
+        self._api_key = api_key
         self.generation_config = None
 
         self.lit_agent = None
@@ -153,8 +165,6 @@ class PlanningAgent(BaseAgent):
         else:
             logging.info("ℹ️ No FutureHouse API key provided. Literature search will be skipped.")
                     
-        self.code_chunk_size = code_chunk_size
-
         # --- Dual KnowledgeBase Initialization ---
         base_path = Path(kb_base_path)
         base_path.parent.mkdir(parents=True, exist_ok=True)

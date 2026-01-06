@@ -20,6 +20,9 @@ ENV_VARS = {
     'materials_project': ['MP_API_KEY', 'MATERIALS_PROJECT_API_KEY'],
 }
 
+# Internal proxy key (separate from provider keys)
+INTERNAL_PROXY_KEY = 'SCILINK_API_KEY'
+
 
 def infer_provider(model_name: str) -> Optional[str]:
     """
@@ -31,6 +34,9 @@ def infer_provider(model_name: str) -> Optional[str]:
     Returns:
         Provider name ('google', 'openai', 'anthropic') or None
     """
+    if not model_name:
+        return None
+        
     model_lower = model_name.lower()
     
     # Explicit prefix (e.g., "gemini/gemini-2.0-flash", "openai/gpt-4o")
@@ -54,6 +60,16 @@ def infer_provider(model_name: str) -> Optional[str]:
         return 'google'
     
     return None
+
+
+def get_internal_proxy_key() -> Optional[str]:
+    """
+    Get API key for internal proxy deployments.
+    
+    Returns:
+        SCILINK_API_KEY value or None
+    """
+    return os.getenv(INTERNAL_PROXY_KEY)
 
 
 class APIKeyManager:
@@ -82,6 +98,8 @@ class APIKeyManager:
         """
         Get API key by inferring provider from model name.
         
+        For public deployments only. Internal proxy should use get_internal_proxy_key().
+        
         Args:
             model_name: Model string (e.g., "gemini/gemini-2.0-flash", "gpt-4o")
         
@@ -105,6 +123,15 @@ class APIKeyManager:
         """Show current API key status."""
         print("API Key Status:")
         print("-" * 50)
+        
+        # Show internal proxy key status
+        print("\n🔐 Internal Proxy:")
+        proxy_key = get_internal_proxy_key()
+        if proxy_key:
+            masked = proxy_key[:4] + "..." + proxy_key[-4:] if len(proxy_key) > 12 else "***"
+            print(f"  ✓ {'SCILINK_API_KEY':18} {masked:20} (for --base-url)")
+        else:
+            print(f"  ✗ {'SCILINK_API_KEY':18} {'Not set':20} (for --base-url)")
         
         print("\n🤖 LLM Providers:")
         for service in ['google', 'openai', 'anthropic']:
@@ -191,6 +218,10 @@ class APIKeyNotFoundError(Exception):
                 "Set environment variable: export MP_API_KEY='your-key'",
                 "Configure in code: scilink.set_api_key('materials_project', 'your-key')",
                 "Get your key at: https://next-gen.materialsproject.org/api"
+            ],
+            'proxy': [
+                "Set environment variable: export SCILINK_API_KEY='your-key'",
+                "Or pass api_key parameter directly"
             ]
         }
         
