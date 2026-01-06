@@ -120,6 +120,8 @@ class PlanningAgent(BaseAgent):
         self._base_url = base_url
         self.code_chunk_size = code_chunk_size
 
+        embedding_api_key = None
+
         # Initialize LLM client
         if base_url:
             logging.info(f"🏛️ PlanningAgent using internal proxy: {base_url}")
@@ -129,6 +131,7 @@ class PlanningAgent(BaseAgent):
                 base_url=base_url
             )
             use_litellm = False
+            embedding_api_key = api_key
         else:
             logging.info(f"🌐 PlanningAgent using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
