@@ -424,25 +424,6 @@ class OrchestratorPlayground:
         self.knowledge_dir = self.config.get('knowledge_dir')
         self.code_dir = self.config.get('code_dir')
         
-        # Show directory guide
-        print("\n" + "="*60)
-        print("📁 RECOMMENDED DIRECTORY STRUCTURE")
-        print("="*60)
-        print("""
-    Run orchestrator from your project directory:
-
-    📁 my_project/
-    ├── 📚 papers/               ← PDFs, scientific literature
-    ├── 📊 experimental_results/ ← CSV/XLSX data files  
-    └── 💻 code/                 ← (Optional) Scripts, API docs
-
-    Then use natural language:
-    "Generate a plan using ./papers/"
-    "Analyze ./experimental_results/batch_001.csv"
-    "Run optimization"
-""")
-        print("="*60)
-        
         # === AUTONOMY LEVEL SELECTION ===
         if autonomy_level_str:
             # Specified via CLI
@@ -456,6 +437,26 @@ class OrchestratorPlayground:
             # Interactive selection
             autonomy_level = self._select_autonomy_level()
         
+        # === SHOW DIRECTORY GUIDE (CO-PILOT ONLY) ===
+        if autonomy_level == AutonomyLevel.CO_PILOT:
+            print("\n" + "="*60)
+            print("📁 RECOMMENDED DIRECTORY STRUCTURE")
+            print("="*60)
+            print("""
+        Run orchestrator from your project directory:
+
+        📁 my_project/
+        ├── 📚 papers/               ← PDFs, scientific literature
+        ├── 📊 experimental_results/ ← CSV/XLSX data files  
+        └── 💻 code/                 ← (Optional) Scripts, API docs
+
+        Then use natural language:
+        "Generate a plan using ./papers/"
+        "Analyze ./experimental_results/batch_001.csv"
+        "Run optimization"
+    """)
+            print("="*60)
+        
         # === DIRECTORY CONFIGURATION FOR HIGHER AUTONOMY ===
         if autonomy_level in (AutonomyLevel.SUPERVISED, AutonomyLevel.AUTONOMOUS):
             success = self._configure_workspace_directories(autonomy_level)
@@ -464,6 +465,7 @@ class OrchestratorPlayground:
                 self.data_dir = None
                 self.knowledge_dir = None
                 self.code_dir = None
+
         
         # === API KEY RESOLUTION ===
         if not api_key:
