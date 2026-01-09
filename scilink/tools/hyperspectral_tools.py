@@ -33,7 +33,7 @@ def run_spectral_unmixing(
             method=tool_kwargs.pop('method', 'nmf'),
             n_components=n_components,
             normalize=tool_kwargs.pop('normalize', True),
-            random_state=42 if 'random_state' not in tool_kwargs else tool_kwargs['random_state']
+            random_state=42 if 'random_state' not in tool_kwargs else tool_kwargs['random_state'],
             **tool_kwargs
         )
         
