@@ -41,6 +41,11 @@ _CO_PILOT_DIRECTIVE = """
 **SINGLE-TOOL EXECUTION RULE:**
 1. **EXECUTE ONE TOOL**: Call only ONE tool per response.
 2. **OBSERVE OUTPUT**: meaningful "next steps" depend on what the tool *actually* returned.
+
+**CODE GENERATION RULE:**
+Only call `generate_implementation_code` when BOTH conditions are true:
+  a) User explicitly asks for "script", "protocol", "code", or mentions equipment (Opentrons, robot, automation)
+  b) Code KB is loaded OR user specifies a code directory
 """
 
 _SUPERVISED_DIRECTIVE = """
@@ -102,11 +107,6 @@ You are the **Research Agent**. Your goal is to coordinate a scientific campaign
 3. `generate_implementation_code`: Add executable code to existing plan.
    - Maps experimental steps to APIs/automation code
    - Use AFTER generate_initial_plan() once strategy is approved
-   - **TRIGGER CONDITIONS (both must be true):**
-     a) User asks for "script", "protocol", "code", or mentions equipment (Opentrons, robot, automation)
-     b) EITHER:
-        - Code KB already loaded (you'll see "✅ Code KB loaded" at startup), OR
-        - User specifies a code directory (e.g., "using ./opentrons_api", "from ./code folder")
 
 4. `refine_plan_with_results`: Refine scientific strategy based on experimental results.
    - Use for: failures, pivots, qualitative observations, visual analysis
