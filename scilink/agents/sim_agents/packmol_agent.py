@@ -4,9 +4,11 @@ import logging
 import shutil
 import subprocess
 import re
-from typing import Dict, Any, List, Tuple, Optional, Set
+from typing import Dict, Any, List, Optional
 
-from .llm_client import LLMClient
+import google.generativeai as genai
+from google.generativeai.types import GenerationConfig
+
 from .instruct import (
     MOLECULE_EXTRACTION_TEMPLATE,
     SMILES_GENERATION_TEMPLATE,
@@ -16,7 +18,6 @@ from ase.build import molecule
 from ase.collections import g2
 from ase.io import write
 from ase.data.pubchem import pubchem_atoms_search
-from google.generativeai.types import GenerationConfig
 
 try:
     from rdkit import Chem
@@ -35,11 +36,21 @@ class PackmolGeneratorAgent:
     4. Providing detailed, educational prompts for PACKMOL generation
     """
     
-    def __init__(self, api_key: str, model_name: str = "gemini-2.5-flash-preview-05-20", working_dir: str = "packmol_run"):
-        self.llm_client = LLMClient(api_key=api_key, model_name=model_name)
+    def __init__(self, api_key: str, model_name: str = "gemini-2.5-flash-preview-05-20", 
+                 working_dir: str = "packmol_run"):
+        
+        # Initialize LLM model directly (replaces LLMClient)
+        if not api_key:
+            raise ValueError("API key not provided to PackmolGeneratorAgent.")
+        
+        genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel(model_name)
+        self.model_name = model_name
         self.generation_config = GenerationConfig()
+        
         self.working_dir = working_dir
         self.logger = logging.getLogger(__name__)
+        self.logger.info(f"PackmolGeneratorAgent initialized with model: {self.model_name}")
         
         # Initialize available molecule sources
         self.ase_molecules = set(g2.names)
@@ -48,14 +59,22 @@ class PackmolGeneratorAgent:
         if not shutil.which("packmol"):
             raise FileNotFoundError("PACKMOL executable not found in PATH")
 
+    def _generate_content(self, prompt: str) -> str:
+        """Generate content from LLM and return raw text."""
+        try:
+            response = self.model.generate_content(prompt, generation_config=self.generation_config)
+            return response.text
+        except Exception as e:
+            self.logger.exception(f"Error during LLM content generation: {e}")
+            raise
+
     def _extract_molecules_with_llm(self, description: str) -> List[Dict[str, Any]]:
         """Use LLM to intelligently extract molecules and their properties from description"""
         
         extraction_prompt = MOLECULE_EXTRACTION_TEMPLATE.format(description=description)
 
         try:
-            response = self.llm_client.model.generate_content(extraction_prompt, generation_config=self.generation_config)
-            raw_text = response.text
+            raw_text = self._generate_content(extraction_prompt)
             
             start_brace = raw_text.find('{')
             end_brace = raw_text.rfind('}')
@@ -248,8 +267,7 @@ class PackmolGeneratorAgent:
         smiles_prompt = SMILES_GENERATION_TEMPLATE.format(molecule_identifier=molecule_identifier)
 
         try:
-            response = self.llm_client.model.generate_content(smiles_prompt, generation_config=self.generation_config)
-            smiles = response.text.strip()
+            smiles = self._generate_content(smiles_prompt).strip()
             
             if smiles == "UNKNOWN" or len(smiles) > 200:  # Sanity check
                 return None
@@ -316,8 +334,7 @@ class PackmolGeneratorAgent:
             prompt = self._create_comprehensive_packmol_prompt(description, built_molecules)
             
             try:
-                response = self.llm_client.model.generate_content(prompt, generation_config=self.generation_config)
-                raw_text = response.text
+                raw_text = self._generate_content(prompt)
                 
                 start_brace = raw_text.find('{')
                 end_brace = raw_text.rfind('}')

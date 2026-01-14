@@ -30,7 +30,7 @@ keywords = [
     "literature mining"
 ]
 dependencies = [
-    "google-generativeai>=0.8.5",
+    "litellm>=1.80.16",
     "atomai>=0.8.1",
     "edison-client>=0.7.6",
     "ase>=0.8.5",

@@ -107,7 +107,8 @@ def print_gradient_logo():
                 colored_line += f"\033[38;2;{r};{g};{b}m{char}"
             
             print(colored_line + "\033[0m")
-
+    
+    print()
 
 def main():
     """Main CLI entry point with subcommands"""

@@ -1,36 +1,62 @@
 import os
 import logging
 import json
-from typing import Dict
+from typing import Dict, Optional
 
 from ase.io import read as ase_read
 
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
+# Replaced google.generativeai imports with wrappers
+from ...auth import get_internal_proxy_key
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 
 from .instruct import VALIDATOR_PROMPT_TEMPLATE, INCAR_VALIDATION_INSTRUCTIONS
 from ..lit_agents.literature_agent import IncarLiteratureAgent
 from .utils import generate_structure_views
+from ._deprecation import normalize_params
 
 
 class StructureValidatorAgent:
-    def __init__(self, api_key: str, model_name: str, local_model: str = None):
-        if api_key is None:
-            api_key = os.environ.get("GOOGLE_API_KEY")
-        if not api_key:
-            raise ValueError("API key not provided for StructureValidatorAgent and GOOGLE_API_KEY not set.")
-            
-        if (local_model is not None) and ('ai-incubator' in local_model): # True when we are using the local network models
-            from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
-            self.model = OpenAIAsGenerativeModel(model_name, api_key = api_key, base_url= local_model) #This not google API key but API key
-            self.generation_config = None
-        else:
-            genai.configure(api_key=api_key)
-            self.model = genai.GenerativeModel(model_name)
-            self.generation_config = GenerationConfig(response_mime_type="application/json")
-        self.model_name = model_name
+    def __init__(self, api_key: str = None, 
+                 model_name: str = "gemini-3-pro-preview", 
+                 base_url: Optional[str] = None,
+                 # Legacy params
+                 local_model: str = None,
+                 google_api_key: str = None):
+        
         self.logger = logging.getLogger(__name__)
-        self.logger.info(f"StructureValidatorAgent initialized with model: {self.model_name}.")
+        self.model_name = model_name
+
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="StructureValidatorAgent"
+        )
+        
+        if base_url:
+            # Internal Proxy
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            
+            self.logger.info(f"StructureValidatorAgent using internal proxy: {base_url}")
+            self.model = OpenAIAsGenerativeModel(
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url
+            )
+        else:
+            # Public / LiteLLM
+            self.logger.info(f"StructureValidatorAgent using LiteLLM: {model_name}")
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=api_key
+            )
+            
+        # We rely on the prompt to enforce JSON, 
+        # rather than the generation config.
+        self.generation_config = None
 
     def _read_structure_file_content(self, structure_file_path: str) -> str:
         """
@@ -115,7 +141,9 @@ class StructureValidatorAgent:
         ) + structure_section
 
         # --- Build multi-modal prompt ---
+        # The wrapper handles list inputs [text, image, image...]
         prompt_parts = [base_prompt]
+        
         if image_paths:
             self.logger.info("Adding structure view images to validation prompt.")
             prompt_parts.append("\n\n## STRUCTURE VISUALIZATION:\n")
@@ -125,6 +153,7 @@ class StructureValidatorAgent:
                     with open(img_path, 'rb') as f:
                         img_bytes = f.read()
                     prompt_parts.append(f"View along {axis.upper()}-axis:")
+                    # Wrapper format: {"mime_type": "...", "data": bytes}
                     prompt_parts.append({"mime_type": "image/png", "data": img_bytes})
                 except Exception as e:
                     self.logger.error(f"Could not read image file {img_path} for prompt: {e}")
@@ -132,8 +161,7 @@ class StructureValidatorAgent:
 
         
         self.logger.info("Sending request to Validator LLM for full validation and script hints...")
-        self.logger.debug(f"Validator LLM Prompt (first 500 chars):\n{base_prompt[:500]}...")
-
+        
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,
@@ -238,22 +266,43 @@ class StructureValidatorAgent:
         return final_feedback
 
 
-
-
 class IncarValidatorAgent:
     """Agent that validates and suggests improvements to VASP INCAR files using literature."""
 
-    def __init__(self, api_key: str = None, model_name: str = "gemini-2.5-pro-preview-05-06", 
-                 futurehouse_api_key: str = None, max_wait_time: int = 500):
-        if not api_key:
-            api_key = os.environ.get("GOOGLE_API_KEY")
-        if not api_key:
-            raise ValueError("Google API key required")
+    def __init__(self, api_key: str = None, 
+                 model_name: str = "gemini-3-pro-preview", 
+                 base_url: Optional[str] = None,
+                 futurehouse_api_key: str = None, 
+                 max_wait_time: int = 500,
+                 # Legacy params
+                 local_model: str = None,
+                 google_api_key: str = None):
         
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(model_name)
-        self.generation_config = GenerationConfig(response_mime_type="application/json")
         self.logger = logging.getLogger(__name__)
+
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="IncarValidatorAgent"
+        )
+        
+        if base_url:
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            self.model = OpenAIAsGenerativeModel(
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url
+            )
+        else:
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=api_key
+            )
+            
+        self.generation_config = None
         
         # Initialize literature agent
         self.literature_agent = IncarLiteratureAgent(

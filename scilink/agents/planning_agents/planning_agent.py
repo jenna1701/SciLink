@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-import google.generativeai as genai
 import json
 import logging
 import shutil
@@ -8,7 +7,6 @@ import uuid
 from typing import List, Dict, Any, Optional, Union
 from pathlib import Path
 from datetime import datetime
-import PIL.Image as PIL_Image
 
 from .knowledge_base import KnowledgeBase
 from .parser_utils import (
@@ -24,8 +22,14 @@ from .instruct import (
     TEA_INSTRUCTIONS
 )
 
-from ...auth import get_api_key, APIKeyNotFoundError
+from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+
+from ._deprecation import normalize_params
+from .base_agent import BaseAgent
+from .knowledge_base import KnowledgeBase
+
 from ..lit_agents.literature_agent import LiteratureSearchAgent
 from ..lit_agents.optimize_query import optimize_search_query
 
@@ -65,49 +69,91 @@ class PlanningAgent(BaseAgent):
     - Feedback history (both Scientific Plan and Code Implementation)
 
     Args:
-        google_api_key (str, optional): API key for Gemini models.
-            If not provided, attempts to load from environment.
-        futurehouse_api_key (str, optional): FutureHouse API key for literature search.
-            If not provided, literature search will be skipped.
-        model_name (str, optional): Name of the LLM to use. 
-            Defaults to "gemini-3-pro-preview".
-        local_model (str, optional): Base URL for OpenAI-compatible local models.
-            If provided, uses OpenAI wrapper instead of Gemini.
-        embedding_model (str, optional): Embedding model for knowledge bases.
-            Defaults to "gemini-embedding-001".
-        kb_base_path (str, optional): Base path for knowledge base storage.
-            Creates separate `_docs` and `_code` knowledge bases.
-            Defaults to "./kb_storage/default_kb".
-        code_chunk_size (int, optional): Chunk size for code files in tokens.
-            Defaults to 20000 (larger than docs for context preservation).
+        api_key: API key for the LLM provider.
+        model_name: Model name. For public deployments, use LiteLLM format
+            (e.g., "gemini/gemini-2.0-flash", "gpt-4o", "claude-sonnet-4-20250514").
+        base_url: Base URL for internal proxy endpoint.
+            When provided, uses OpenAI-compatible client.
+            When None, uses LiteLLM for multi-provider support.
+        embedding_model: Embedding model name.
+        embedding_api_key: API key for the embedding LLM provider.
+        futurehouse_api_key: Optional API key for literature search.
+        kb_base_path: Path for knowledge base storage.
+        code_chunk_size: Chunk size for code files.
+        output_dir: Output directory for artifacts.
+        
+        google_api_key: DEPRECATED. Use 'api_key' instead.
+        local_model: DEPRECATED. Use 'base_url' instead.
     """
-    def __init__(self, google_api_key: str = None,
-                 futurehouse_api_key: str = None,
+    def __init__(self, api_key: str = None,
                  model_name: str = "gemini-3-pro-preview",
-                 local_model: str = None,
+                 base_url: Optional[str] = None,
                  embedding_model: str = "gemini-embedding-001",
+                 embedding_api_key: Optional[str] = None,
+                 futurehouse_api_key: str = None,
                  kb_base_path: str = "./kb_storage/default_kb",
                  code_chunk_size: int = 20000,
-                 output_dir: str = "."): 
+                 output_dir: str = ".",
+                 google_api_key: Optional[str] = None,
+                 local_model: str = None,): 
         
         super().__init__(output_dir)
         self.agent_type = "planning"
-        
-        if google_api_key is None:
-            google_api_key = get_api_key('google')
-            if not google_api_key:
-                raise APIKeyNotFoundError('google')
 
-        # --- LLM Backend Configuration ---
-        if local_model and ('ai-incubator' in local_model or 'openai' in local_model):
-            logging.info(f"🏛️  Using OpenAI-compatible model for generation: {model_name}")
-            self.model = OpenAIAsGenerativeModel(model_name, api_key=google_api_key, base_url=local_model)
-            self.generation_config = None
+        # Handle deprecated parameters
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="PlanningAgent"
+        )
+        
+        # Store config
+        self._base_url = base_url
+        self.code_chunk_size = code_chunk_size
+        
+        # Initialize LLM client based on deployment mode
+        use_litellm = False
+        
+        if base_url:
+            # INTERNAL PROXY
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            
+            if not api_key:
+                raise ValueError(
+                    "API key required for internal proxy.\n"
+                    "Set SCILINK_API_KEY environment variable or pass api_key parameter."
+                )
+            
+            if embedding_api_key is not None:
+                logging.warning(
+                    "⚠️ embedding_api_key is ignored for internal proxy. "
+                    "Using api_key for all requests."
+                )
+            
+            logging.info(f"🏛️ PlanningAgent using internal proxy: {base_url}")
+            self.model = OpenAIAsGenerativeModel(
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url
+            )
+            use_litellm = False
+            embedding_api_key = api_key
+            
         else:
-            logging.info(f"☁️  Using Google Gemini model for generation: {model_name}")
-            genai.configure(api_key=google_api_key)
-            self.model = genai.GenerativeModel(model_name)
-            self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
+            # PUBLIC LITELLM - can use different keys per provider
+            logging.info(f"🌐 PlanningAgent using LiteLLM: {model_name}")
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=api_key  # Can be None - LiteLLM reads env vars
+            )
+            use_litellm = True
+            # embedding_api_key stays as passed (can be None for auto-detect)
+        
+        self._api_key = api_key
+        self.generation_config = None
 
         self.lit_agent = None
         if futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY"):
@@ -119,21 +165,29 @@ class PlanningAgent(BaseAgent):
         else:
             logging.info("ℹ️ No FutureHouse API key provided. Literature search will be skipped.")
                     
-        self.code_chunk_size = code_chunk_size
-
         # --- Dual KnowledgeBase Initialization ---
         base_path = Path(kb_base_path)
         base_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 1. Scientific/Docs KB
-        self.kb_docs = KnowledgeBase(google_api_key=google_api_key, embedding_model=embedding_model, local_model=local_model)
+        self.kb_docs = KnowledgeBase(
+            api_key=embedding_api_key,
+            embedding_model=embedding_model,
+            base_url=base_url,
+            use_litellm=use_litellm
+        )
         self.kb_docs_prefix = base_path.parent / f"{base_path.name}_docs"
         self.kb_docs_index = str(self.kb_docs_prefix.with_suffix(".faiss"))
         self.kb_docs_chunks = str(self.kb_docs_prefix.with_suffix(".json"))
         self.kb_docs_sources_path = str(self.kb_docs_prefix.with_suffix(".sources.json"))
 
         # 2. Implementation/Code KB
-        self.kb_code = KnowledgeBase(google_api_key=google_api_key, embedding_model=embedding_model, local_model=local_model)
+        self.kb_code = KnowledgeBase(
+            api_key=embedding_api_key,
+            embedding_model=embedding_model,
+            base_url=base_url,
+            use_litellm=use_litellm
+        )
         self.kb_code_prefix = base_path.parent / f"{base_path.name}_code"
         self.kb_code_index = str(self.kb_code_prefix.with_suffix(".faiss"))
         self.kb_code_chunks = str(self.kb_code_prefix.with_suffix(".json"))

@@ -2,7 +2,6 @@ import logging
 import logging
 import atomai as aoi
 import json
-from google.generativeai.types import GenerationConfig
 from typing import Callable
 
 from ....tools import atomistic_tools 
@@ -233,7 +232,7 @@ class GetIntensityGMMParamsController:
         
         prompt_parts.append("\nBased on the histogram and context, determine the optimal number of GMM components.")
         
-        param_gen_config = GenerationConfig(response_mime_type="application/json")
+        param_gen_config = None#GenerationConfig(response_mime_type="application/json")
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,
@@ -304,7 +303,7 @@ class GetLocalEnvParamsController:
         
         prompt_parts.append("\nBased on the intensity analysis and context, determine the optimal number of components for local environment GMM.")
         
-        param_gen_config = GenerationConfig(response_mime_type="application/json")
+        param_gen_config = None#GenerationConfig(response_mime_type="application/json")
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,

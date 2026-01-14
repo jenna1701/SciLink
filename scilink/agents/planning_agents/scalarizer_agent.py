@@ -10,10 +10,13 @@ import PIL.Image as PIL_Image
 
 import google.generativeai as genai
 
-from ...auth import get_api_key, APIKeyNotFoundError
+from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .parser_utils import parse_json_from_response
 from .instruct import SCALARIZER_PROMPT, SCALARIZER_REFLECTION_PROMPT
+
+from ._deprecation import normalize_params
 
 from .base_agent import BaseAgent
 
@@ -36,35 +39,67 @@ class ScalarizerAgent(BaseAgent):
         ... )
         >>> print(result["metrics"])
         {'purity': 98.5, 'peak_area': 12504.2}
+
+    Args:
+        api_key: API key for the LLM provider.
+        model_name: Model name. For public deployments, use LiteLLM format
+            (e.g., "gemini/gemini-2.0-flash", "gpt-4o", "claude-sonnet-4-20250514").
+        base_url: Base URL for internal proxy endpoint.
+            When provided, uses OpenAI-compatible client.
+            When None, uses LiteLLM for multi-provider support.
+        output_dir: Output directory for artifacts.
+        
+        google_api_key: DEPRECATED. Use 'api_key' instead.
+        local_model: DEPRECATED. Use 'base_url' instead.
     """
-    def __init__(self, 
-                 google_api_key: str = None, 
-                 model_name: str = "gemini-3-pro-preview", 
-                 local_model: str = None,
-                 output_dir: str = "."):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: str = "gemini-3-pro-preview",
+        base_url: Optional[str] = None,
+        output_dir: str = ".",
+        # Deprecated
+        google_api_key: Optional[str] = None,
+        local_model: Optional[str] = None,
+    ):
         super().__init__(output_dir)
         self.agent_type = "scalarizer"
+
+        # Handle deprecated parameters
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="ScalarizerAgent"
+        )
         
-        # Auth & Model Initialization
-        if google_api_key is None:
-            google_api_key = get_api_key('google')
-            if not google_api_key:
-                raise APIKeyNotFoundError('google')
-        
-        if local_model and ('ai-incubator' in local_model or 'openai' in local_model):
-            logging.info(f"🏛️  Analysis Agent using OpenAI-compatible model: {model_name}")
+        if base_url:
+            # INTERNAL PROXY
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            
+            if not api_key:
+                raise ValueError(
+                    "API key required for internal proxy.\n"
+                    "Set SCILINK_API_KEY environment variable or pass api_key parameter."
+                )
+            
+            logging.info(f"🏛️ ScalarizerAgent using internal proxy: {base_url}")
             self.model = OpenAIAsGenerativeModel(
-                model=model_name, 
-                api_key=google_api_key, 
-                base_url=local_model
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url
             )
-            self.generation_config = None 
         else:
-            logging.info(f"☁️  Analysis Agent using Google Gemini model: {model_name}")
-            if google_api_key:
-                genai.configure(api_key=google_api_key)
-            self.model = genai.GenerativeModel(model_name)
-            self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
+            # PUBLIC LITELLM
+            logging.info(f"🌐 ScalarizerAgent using LiteLLM: {model_name}")
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=api_key
+            )
+
+        self.generation_config = None
 
     def _get_initial_state_fields(self) -> Dict[str, Any]:
         """Agent-specific state fields"""
