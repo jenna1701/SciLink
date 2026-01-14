@@ -2,7 +2,6 @@ import logging
 import logging
 import atomai as aoi
 import json
-from google.generativeai.types import GenerationConfig
 from typing import Callable
 
 from ....tools import atomistic_tools 
