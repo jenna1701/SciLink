@@ -1,7 +1,5 @@
 import logging
 import json
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
 
 from .microscopy_agent import MicroscopyAnalysisAgent
 from .sam_microscopy_agent import SAMMicroscopyAnalysisAgent
