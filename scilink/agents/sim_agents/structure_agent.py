@@ -2,7 +2,8 @@ import logging
 from typing import Optional, Tuple
 import os
 
-from .llm_client import LLMClient
+import google.generativeai as genai
+
 from .tools import get_available_tools
 from .instruct import (
     INITIAL_PROMPT_TEMPLATE, 
@@ -24,10 +25,23 @@ class StructureGenerator:
                 local_model: str = None,
                 mp_api_key: str = None):
         """Initialize StructureGenerator with improved logging."""
-        self.llm_client = LLMClient(api_key=api_key, model_name=model_name, local_model=local_model)
+        
+        # Initialize LLM model directly (replaces LLMClient)
+        if not api_key:
+            raise ValueError("API key not provided to StructureGenerator.")
+        
+        if (local_model is not None) and ('ai-incubator' in local_model):
+            from ...wrappers.openai_wrapper_tools import OpenAIAsGenerativeModel
+            self.model = OpenAIAsGenerativeModel(model_name, api_key=api_key, base_url=local_model)
+        else:
+            genai.configure(api_key=api_key)
+            self.model = genai.GenerativeModel(model_name)
+        
+        self.model_name = model_name
         self.ase_executor = ScriptExecutor(timeout=executor_timeout, mp_api_key=mp_api_key)
         self.generated_script_dir = generated_script_dir
         self.logger = logging.getLogger(__name__)
+        self.logger.info(f"StructureGenerator initialized with model: {self.model_name}")
         
         self.tools = get_available_tools()
         self.mp_helper = MaterialsProjectHelper(api_key=mp_api_key)
@@ -147,6 +161,22 @@ class StructureGenerator:
             self.logger.exception(f"Error parsing LLM response structure: {e}")
             return f"[Error: Could not parse LLM response: {e}]", None
 
+    def _generate_with_tools(self, prompt: str, tools: list, generation_config=None):
+        """Generate content with tool/function calling support."""
+        self.logger.info("Sending request to LLM with tools...")
+        self.logger.debug(f"Prompt length: {len(prompt)} chars")
+        try:
+            response = self.model.generate_content(
+                prompt,
+                tools=tools,
+                generation_config=generation_config
+            )
+            self.logger.debug(f"LLM Raw Response received")
+            return response
+        except Exception as e:
+            self.logger.exception(f"Error during LLM content generation: {e}")
+            raise
+
     def generate_script(self, original_user_request: str, attempt_number_overall: int, 
                        is_refinement_from_validation: bool = False,
                        previous_script_content: Optional[str] = None,
@@ -187,7 +217,8 @@ class StructureGenerator:
                 if internal_exec_attempt > 1:
                     print(f"      🔧 Fixing script issues (attempt {internal_exec_attempt}/{MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS})")
                 
-                llm_response = self.llm_client.generate_with_tools(current_prompt, tools_list)
+                # Direct call to model instead of through LLMClient
+                llm_response = self._generate_with_tools(current_prompt, tools_list)
                 text_content, function_call = self._parse_llm_response(llm_response)
 
                 if function_call and function_call["name"] == tool_name:
