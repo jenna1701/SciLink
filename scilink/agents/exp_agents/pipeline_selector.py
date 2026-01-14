@@ -1,8 +1,6 @@
 import logging
 import json
-from typing import Dict, List, Callable
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
+from typing import Dict
 
 from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
