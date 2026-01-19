@@ -881,21 +881,20 @@ Your decision MUST be based on the visual evidence in the image and accompanying
 - **ID 1: `SAMMicroscopyAnalysisAgent`**: The correct choice for images containing large, distinct, countable objects. Use this for tasks like measuring the size distribution, shape, and spatial arrangement of features like nanoparticles, cells, pores, or other discrete entities.
 - **ID 2: `AtomisticMicroscopyAnalysisAgent`**: **The primary choice for any high-quality image where individual atoms are clearly visible.** This is the correct agent for analyzing crystalline structures, defects, and interfaces at the atomic scale.
 - **ID 3: `HyperspectralAnalysisAgent`**: For all 'spectroscopy' data types (no image will be provided).
-- **ID 4:  'Holistic Microscopy Agent'**: Internally runs BOTH the 'AtomisticMicroscopyAnalysisAgent' and 'MicroscopyAnalysisAgent' and synthesizes their results. Choose this advanced agent if the user's goal explicitly implies connecting atomic-level features (like defects) to larger, meso-scale phenomena (like domains or superlattices).**
 
 **Decision Guide for Atomically-Resolved Images:**
 
-*   **When to use Agent 2 (Atomistic Analysis):**
-    *   For high-quality image where individual atoms or atomic columns are clearly visible in a crystalline lattice.
-    *   For analyzing well-defined interfaces, grain boundaries, and point defects within an otherwise crystalline structure.
+* **When to use Agent 2 (Atomistic Analysis):**
+    * For high-quality image where individual atoms or atomic columns are clearly visible in a crystalline lattice.
+    * For analyzing well-defined interfaces, grain boundaries, and point defects within an otherwise crystalline structure.
 
-*   **When to use Agent 0 (General Analysis with FFT/NMF):**
-    *   Use this agent when the image is dominated by **large-scale disorder**, making direct atom-finding unreliable or less informative.
-    *   **Examples of such disorder include:**
-        *   Large amorphous (non-crystalline) regions.
-        *   Numerous small, disconnected, and poorly-ordered crystalline flakes.
-        *   Extreme noise levels that obscure the atomic lattice.
-    *   **For STM images:** Also use this agent if the image shows large variations in electronic contrast (LDOS) that are not simple atomic differences, as an FFT-based analysis is more suitable for identifying the periodicities in such patterns.
+* **When to use Agent 0 (General Analysis with FFT/NMF):**
+    * Use this agent when the image is dominated by **large-scale disorder**, making direct atom-finding unreliable or less informative.
+    * **Examples of such disorder include:**
+        * Large amorphous (non-crystalline) regions.
+        * Numerous small, disconnected, and poorly-ordered crystalline flakes.
+        * Extreme noise levels that obscure the atomic lattice.
+    * **For STM images:** Also use this agent if the image shows large variations in electronic contrast (LDOS) that are not simple atomic differences, as an FFT-based analysis is more suitable for identifying the periodicities in such patterns.
 
 **Input You Will Receive:**
 1.  `data_type`: e.g., "microscopy" or "spectroscopy".
@@ -1248,34 +1247,6 @@ You MUST output a valid JSON object with two keys: "analysis_integration" and "m
 Focus on actionable recommendations that directly build upon the quantitative insights derived from the curve fitting.
 """
 
-
-HOLISTIC_SYNTHESIS_INSTRUCTIONS = """
-You are an expert materials scientist performing a multi-modal synthesis of results from two different analysis methods run on the SAME microscopy image.
-
-You will be given a comprehensive data package for each analysis:
-1.  **Atomistic Analysis:**
-    - A text summary identifying individual atoms, defects, and local structures.
-    - **Analysis Images:** Visual maps showing atomic clustering by intensity, local environment classification, etc.
-2.  **General (FFT-NMF) Analysis:**
-    - A text summary identifying larger-scale domains and periodicities.
-    - **Analysis Images:** Visual maps of NMF components (FFT patterns) and their corresponding abundance maps (spatial locations).
-
-Your task is to act as a senior researcher reviewing all the evidence to formulate a unified analysis.
-
-**Output Format:**
-Provide your response in a single JSON object.
-{{
-  "detailed_analysis": "<Your synthesized, multi-modal analysis text that explicitly references the visual data>",
-  "scientific_claims": [
-    {{
-      "claim": "<A concise scientific claim linking visual evidence from both analyses>",
-      "scientific_impact": "<The potential impact of this synthesized finding>",
-      "has_anyone_question": "<A 'Has anyone...' question for a literature search>",
-      "keywords": ["<keyword1>", "<keyword2>"]
-    }}
-  ]
-}}
-"""
 
 HOLISTIC_EXPERIMENTAL_SYNTHESIS_INSTRUCTIONS = """
 You are an expert materials scientist tasked with synthesizing findings from a multi-modal characterization of a single sample. You have been provided with analyses from different experimental techniques, which may provide information at different length scales (e.g., local atomic structure vs. bulk crystal phase).
