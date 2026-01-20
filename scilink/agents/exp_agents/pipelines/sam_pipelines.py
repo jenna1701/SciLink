@@ -1,57 +1,153 @@
-from ..controllers.sam_controllers import (
-    RunSAMRefinementLoopController,
-    CalculateSAMStatsController,
-    BuildSAMPromptController
-)
-from ..controllers.base_controllers import (
-    RunFinalInterpretationController,
-    StoreAnalysisResultsController
-)
+"""
+SAM Analysis Pipelines
+
+Factory functions for creating SAM analysis pipelines.
+"""
+
+import logging
 from typing import Callable, List
 
+from ..controllers.sam_controllers import (
+    # Single-image pipeline controllers
+    RunSAMRefinementLoopController,
+    CalculateSAMStatsController,
+    BuildSAMPromptController,
+    RunFinalInterpretationController,
+    StoreAnalysisResultsController,
+    # Batch pipeline controllers
+    HumanFeedbackRefinementController,
+    BatchImageProcessingController,
+    CustomAnalysisScriptController,
+    BatchSynthesisController
+)
+
+
 def create_sam_pipeline(
-    model, 
-    logger, 
-    generation_config, 
-    safety_settings, 
+    model,
+    logger: logging.Logger,
+    generation_config,
+    safety_settings,
     settings: dict,
     parse_fn: Callable,
     store_fn: Callable
 ) -> List:
     """
-    Assembles and returns a list of controller instances 
-    for the standard SAM analysis pipeline.
+    Factory function to create the single-image SAM analysis pipeline.
+    
+    This pipeline:
+    1. Runs SAM segmentation with optional LLM-driven refinement
+    2. Calculates morphological statistics
+    3. Builds the final prompt with results
+    4. Generates scientific interpretation via LLM
+    5. Stores analysis images for feedback
+    
+    Args:
+        model: LLM model instance
+        logger: Logger instance
+        generation_config: LLM generation configuration
+        safety_settings: LLM safety settings
+        settings: Pipeline settings dict
+        parse_fn: Function to parse LLM responses
+        store_fn: Function to store analysis images
+    
+    Returns:
+        List of controller instances to execute in sequence
     """
-    
-    pipeline = []
-
-    # 1. 🛠️/🧠 Tool/LLM Step (This controller runs the whole loop)
-    pipeline.append(
+    pipeline = [
         RunSAMRefinementLoopController(
-            model, logger, generation_config, safety_settings, settings, parse_fn
-        )
-    )
-    
-    # 2. 🛠️ Tool Step (Calculate final stats)
-    pipeline.append(
-        CalculateSAMStatsController(logger)
-    )
-
-    # 3. 📝 Prep Step (Builds prompt)
-    pipeline.append(
-        BuildSAMPromptController(logger)
-    )
-    
-    # 4. 🧠 LLM Step (Interpret)
-    pipeline.append(
+            model=model,
+            logger=logger,
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            settings=settings,
+            parse_fn=parse_fn
+        ),
+        CalculateSAMStatsController(
+            logger=logger
+        ),
+        BuildSAMPromptController(
+            logger=logger
+        ),
         RunFinalInterpretationController(
-            model, logger, generation_config, safety_settings, parse_fn
+            model=model,
+            logger=logger,
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            parse_fn=parse_fn
+        ),
+        StoreAnalysisResultsController(
+            logger=logger,
+            store_fn=store_fn
         )
-    )
+    ]
     
-    # 5. 🛠️ Tool Step (Store results)
-    pipeline.append(
-        StoreAnalysisResultsController(logger, store_fn)
-    )
+    return pipeline
+
+
+def create_sam_batch_pipeline(
+    model,
+    logger: logging.Logger,
+    generation_config,
+    safety_settings,
+    settings: dict,
+    parse_fn: Callable,
+    store_fn: Callable
+) -> List:
+    """
+    Factory function to create the batch SAM analysis pipeline.
+    
+    This pipeline:
+    1. Human feedback refinement on first image
+    2. Batch processing of all images with refined parameters
+    3. Custom analysis script generation and execution
+    4. Scientific synthesis of batch findings
+    5. Storage of results
+    
+    Args:
+        model: LLM model instance
+        logger: Logger instance
+        generation_config: LLM generation configuration
+        safety_settings: LLM safety settings
+        settings: Pipeline settings dict
+        parse_fn: Function to parse LLM responses
+        store_fn: Function to store analysis images
+    
+    Returns:
+        List of controller instances to execute in sequence
+    """
+    pipeline = [
+        HumanFeedbackRefinementController(
+            model=model,
+            logger=logger,
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            parse_fn=parse_fn,
+            settings=settings
+        ),
+        BatchImageProcessingController(
+            logger=logger,
+            settings=settings
+        ),
+        CustomAnalysisScriptController(
+            model=model,
+            logger=logger,
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            parse_fn=parse_fn,
+            settings=settings
+        ),
+        BatchSynthesisController(
+            model=model,
+            logger=logger,
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            parse_fn=parse_fn,
+            settings=settings
+        ),
+        StoreAnalysisResultsController(
+            logger=logger,
+            store_fn=store_fn
+        )
+    ]
     
     return pipeline

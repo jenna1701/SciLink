@@ -1532,41 +1532,125 @@ Update your analysis **ONLY** to address the specific points raised in the criti
 Return the **complete, updated JSON object** (same format as the original: `detailed_analysis` and `scientific_claims`).
 """
 
+# ============================================================================
+# NEW INSTRUCTION PROMPTS FOR BATCH ANALYSIS
+# ============================================================================
 
-# ITERATION_REFINEMENT_INSTRUCTIONS = """You are an expert scientist acting as a steering committee for an automated data analysis pipeline. You have just reviewed the intermediate output from one step of the analysis.
+SAM_BATCH_REFINEMENT_INSTRUCTIONS = """You are a computer vision expert analyzing segmentation results from a microscopy image.
 
-# Your task is to analyze these results and determine if **one or more** focused, higher-resolution "sub-analyses" are scientifically or mathematically justified to resolve ambiguities.
+You will see TWO images:
+1. **ORIGINAL MICROSCOPY IMAGE** - The source image containing the features of interest.
+2. **CURRENT SEGMENTATION RESULT** - Red outlines show the currently detected features.
 
-# **Input You Will Receive:**
-# 1.  **Analysis Title**: (e.g., "Global Search", "Fit Attempt 1").
-# 2.  **Analysis Results**: Plots, figures, tables, or text summary describing the output of the current step.
-# 3.  **Scientific/System Context**: Metadata relevant to the overall goal.
+Additionally, you will see **MORPHOLOGICAL STATISTICS** summarizing the detected particles.
 
-# **Your Decision Process:**
-# 1. **Rule out Artifacts:** If the model fits noise, "hallucinates" features not present in the raw data, or produces physically implausible results (e.g., random spatial static, jagged noise peaks), **STOP**. Mark `refinement_needed: false`.
-# 2. **Identify Ambiguity:** If the signal is valid but complex (e.g., overlapping peaks, mixed spatial domains, broad distributions, or suboptimal parameters), **REFINE**. Define specific targets to isolate or resolve the feature.
+**Your task:** Evaluate the segmentation quality and decide if parameters need adjustment.
 
-# **Output Format:**
-# You MUST output a valid JSON object.
+**Evaluation Criteria:**
+1. **Coverage**: Are all visible features detected? Any obvious misses?
+2. **Boundary Accuracy**: Do outlines follow feature edges precisely?
+3. **False Positives**: Are non-features being incorrectly detected?
+4. **Size Filtering**: Are the size thresholds appropriate for the features present?
 
-# **If NO further focused analysis is needed (e.g., the result is clear):**
-# {
-#   "refinement_needed": false,
-#   "reasoning": "The current results are unambiguous and directly address the initial problem."
-# }
+**Parameters you can adjust:**
+- `sam_parameters`: "default", "sensitive" (more detections), "ultra-permissive" (maximum detection)
+- `use_clahe`: true/false - Enable for low-contrast boundaries
+- `min_area`: Increase to filter small noise
+- `max_area`: Decrease to avoid merging adjacent features
+- `pruning_iou_threshold`: 0.3-0.7 - Lower = more aggressive duplicate removal
 
-# **If focused analysis IS needed (You can propose multiple sub-tasks):**
-# {
-#   "refinement_needed": true,
-#   "reasoning": "The current step suggests the presence of two distinct phenomena that must be analyzed separately to prevent convolution.",
-#   "targets": [
-#       {
-#         "type": "[STRING, defining the kind of resource needed, e.g., 'spectral_range', 'spatial_region', 'data_subset', 'new_parameters']",
-#         "description": "[A concise description of what the sub-task should achieve]",
-#         "value": "[The specific technical value needed for the next step, e.g., [400, 500] for a range, 'component 4' for a specific cluster, or {'n_components': 2} for new parameters]"
-#       }
-#   ]
-# }
+**Output JSON format:**
+```json
+{
+  "evaluation": {
+    "coverage_score": "[0-10, 10=perfect]",
+    "accuracy_score": "[0-10, 10=perfect]",
+    "false_positive_rate": "[low/medium/high]",
+    "overall_quality": "[poor/acceptable/good/excellent]"
+  },
+  "needs_refinement": "[true/false]",
+  "reasoning": "[Explanation of your assessment]",
+  "recommended_parameters": {
+    "use_clahe": "[true/false]",
+    "sam_parameters": "[default/sensitive/ultra-permissive]",
+    "min_area": "[number]",
+    "max_area": "[number]",
+    "pruning_iou_threshold": "[0.0-1.0]"
+  }
+}
+```
+"""
 
-# Provide ONLY the JSON object."""
+SAM_BATCH_CUSTOM_ANALYSIS_INSTRUCTIONS = """
+You are an expert data scientist specializing in microscopy image analysis.
 
+Your task is to write a Python script that analyzes particle detection results from a time series or comparative study.
+
+**INPUT DATA:**
+The script will have access to a JSON file called 'batch_results.json' in the current directory containing:
+- Individual image results with particle counts and morphological statistics
+- Time points or condition labels
+- Mean areas, standard deviations, and other measurements
+
+**REQUIREMENTS:**
+1. Load data from 'batch_results.json'
+2. Perform appropriate statistical analysis based on the series type
+3. Generate publication-quality visualizations (save as PNG)
+4. Print a summary report to stdout
+5. Save any computed metrics to a CSV file
+
+**PYTHON SCRIPT GUIDELINES:**
+- Use only standard scientific Python: numpy, pandas, matplotlib, scipy, sklearn
+- Handle edge cases (missing data, zero values)
+- Use clear variable names and include comments
+- Save all figures with dpi=300 for publication quality
+- CRITICAL: DO NOT use f-strings with complex expressions inside curly braces
+  - BAD: f"Value: {df.loc[df['x'].idxmax(), 'y']}"
+  - GOOD: max_val = df.loc[df['x'].idxmax(), 'y']; f"Value: {max_val}"
+- CRITICAL: Use .format() or string concatenation for complex expressions
+
+**OUTPUT FORMAT:**
+Return a JSON object with these exact keys:
+{
+  "analysis_approach": "time_series" | "comparative" | "morphological",
+  "key_metrics_to_track": ["list", "of", "metrics"],
+  "reasoning": "Brief explanation of why this approach fits the data",
+  "script": "Complete Python script as a single escaped string"
+}
+
+The script string must have newlines as \\n and quotes properly escaped.
+"""
+
+
+SAM_BATCH_SYNTHESIS_INSTRUCTIONS = """You are an expert materials scientist synthesizing findings from a batch SAM analysis of a microscopy image series.
+
+You will receive:
+1. **Individual Analysis Results** - Per-image scientific claims and statistics
+2. **Custom Analysis Results** - Trend analysis and visualizations from the LLM-generated script
+3. **Series Context** - Metadata about what the series represents
+
+**Your Task:**
+Synthesize all findings into a cohesive scientific narrative that:
+1. Identifies major trends and patterns across the series
+2. Correlates morphological changes with experimental conditions
+3. Highlights statistically significant observations
+4. Proposes mechanistic explanations where appropriate
+
+You MUST output a valid JSON object with two keys: "detailed_analysis" and "scientific_claims".
+
+1. **detailed_analysis**: (String) Comprehensive narrative integrating:
+   - Evolution of key morphological parameters
+   - Statistical trends and their significance
+   - Correlations between different metrics
+   - Comparison with expected behavior
+   - Notable anomalies or unexpected findings
+
+2. **scientific_claims**: (List of Objects) 2-4 high-level claims based on the batch analysis:
+   * **claim**: A focused scientific claim about the observed trends
+   * **scientific_impact**: Why this finding is significant
+   * **supporting_evidence**: Quantitative evidence from the batch analysis
+   * **has_anyone_question**: Research question starting with "Has anyone"
+   * **keywords**: 3-5 key terms for literature searches
+
+Focus on claims that leverage the statistical power of analyzing multiple images rather than single-image observations.
+"""
