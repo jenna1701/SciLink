@@ -14,6 +14,8 @@ from datetime import datetime
 from typing import Callable, Optional, Any, Dict
 import numpy as np
 
+from PIL import Image
+
 from ..instruct import (
     SAM_BATCH_REFINEMENT_INSTRUCTIONS,
     SAM_BATCH_SYNTHESIS_INSTRUCTIONS,
@@ -466,6 +468,11 @@ class HumanFeedbackRefinementController:
     """
     [👤 Human Step + 🧠 LLM Step]
     Facilitates human-in-the-loop parameter refinement for the first image in a batch.
+    
+    Options:
+    1. Accept current results
+    2. Accept LLM's recommended parameters  
+    3. Provide feedback in natural language (LLM interprets)
     """
     
     def __init__(self, model, logger, generation_config, safety_settings, 
@@ -477,15 +484,27 @@ class HumanFeedbackRefinementController:
         self._parse_llm_response = parse_fn
         self.settings = settings
         self.max_refinement_iterations = settings.get('max_feedback_iterations', 3)
+
+        self.output_dir = Path(settings.get('output_dir', 'sam_output'))
+        self.output_dir.mkdir(parents=True, exist_ok=True)
     
     def _display_analysis_for_review(self, state: dict, iteration: int) -> None:
         """Display current analysis results for human review."""
         sam_result = state.get("sam_result")
         sam_stats = state.get("summary_stats", {})
+
+        overlay_img = visualize_sam_results(sam_result)
         
+        review_viz_path = self.output_dir / f"review_iteration_{iteration}.png"
+        review_viz_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(overlay_img).save(review_viz_path)
+
         print("\n" + "=" * 80)
         print(f"🔬 SAM ANALYSIS REVIEW - Iteration {iteration}")
         print("=" * 80)
+
+        print(f"\n🖼️  **Visualization saved to:** {review_viz_path}")
+        print(f"   Open this file to see the segmentation overlay.\n")
         
         print(f"\n📊 **Detection Summary:**")
         print(f"   - Total particles detected: {sam_stats.get('total_particles', 0)}")
@@ -516,6 +535,8 @@ class HumanFeedbackRefinementController:
     
     def _get_llm_assessment(self, state: dict) -> dict:
         """Get LLM's assessment of the current segmentation quality."""
+        from ..instruct import SAM_BATCH_REFINEMENT_INSTRUCTIONS
+        
         self.logger.info("   🧠 Getting LLM assessment of segmentation quality...")
         
         original_image_bytes = state["image_blob"]["data"]
@@ -573,59 +594,106 @@ class HumanFeedbackRefinementController:
         print("👤 **Your Options:**")
         print("   [1] Accept current results (proceed to batch processing)")
         print("   [2] Accept LLM's recommended parameters")
-        print("   [3] Provide custom parameters")
-        print("   [4] View larger overlay image")
-        print("   [q] Quit refinement loop")
+        print("   [3] Provide feedback in natural language")
         
         try:
-            choice = input("\nYour choice [1/2/3/4/q]: ").strip().lower()
+            choice = input("\nYour choice [1/2/3]: ").strip()
         except KeyboardInterrupt:
             self.logger.warning("User interrupted. Accepting current results.")
             return {"action": "accept", "params": None}
         
-        if choice == '1' or choice == 'q':
+        if choice == '1' or choice == '':
             return {"action": "accept", "params": None}
         elif choice == '2':
             return {"action": "use_llm", "params": llm_assessment.get("recommended_parameters", {})}
         elif choice == '3':
-            return self._collect_custom_parameters()
-        elif choice == '4':
-            return {"action": "view_image", "params": None}
+            return self._collect_natural_language_feedback()
         else:
             print("Invalid choice. Accepting current results.")
             return {"action": "accept", "params": None}
     
-    def _collect_custom_parameters(self) -> dict:
-        """Collect custom parameter values from the user."""
-        print("\n📝 **Enter custom parameters** (press Enter to keep current value):")
+    def _collect_natural_language_feedback(self) -> dict:
+        """Collect natural language feedback and convert to parameters via LLM."""
+        print("\n📝 **Describe what you'd like to change:**")
+        print("   Examples:")
+        print("   - 'Detect smaller particles, current minimum is too high'")
+        print("   - 'The contrast is low, try enhancing it'")
+        print("   - 'Increase min_area to 150'")
         
-        params = {}
-        
-        clahe_input = input("   use_clahe [true/false]: ").strip().lower()
-        if clahe_input in ['true', 'false']:
-            params['use_clahe'] = clahe_input == 'true'
-        
-        sam_input = input("   sam_parameters [default/sensitive/ultra-permissive]: ").strip()
-        if sam_input in ['default', 'sensitive', 'ultra-permissive']:
-            params['sam_parameters'] = sam_input
-        
-        min_area_input = input("   min_area [integer]: ").strip()
-        if min_area_input.isdigit():
-            params['min_area'] = int(min_area_input)
-        
-        max_area_input = input("   max_area [integer]: ").strip()
-        if max_area_input.isdigit():
-            params['max_area'] = int(max_area_input)
-        
-        pruning_input = input("   pruning_iou_threshold [0.0-1.0]: ").strip()
         try:
-            pruning_val = float(pruning_input)
-            if 0.0 <= pruning_val <= 1.0:
-                params['pruning_iou_threshold'] = pruning_val
-        except ValueError:
-            pass
+            user_feedback = input("\nYour feedback: ").strip()
+        except KeyboardInterrupt:
+            self.logger.warning("User interrupted. Accepting current results.")
+            return {"action": "accept", "params": None}
         
-        return {"action": "custom", "params": params}
+        if not user_feedback:
+            print("No feedback provided. Accepting current results.")
+            return {"action": "accept", "params": None}
+        
+        # Convert natural language to parameters via LLM
+        params = self._convert_feedback_to_params(user_feedback)
+        
+        if params:
+            return {"action": "custom", "params": params}
+        else:
+            print("Could not interpret feedback. Accepting current results.")
+            return {"action": "accept", "params": None}
+    
+    def _convert_feedback_to_params(self, user_feedback: str) -> dict:
+        """Use LLM to convert natural language feedback to SAM parameters."""
+        self.logger.info("   🧠 Converting feedback to parameters...")
+        
+        current_params = {
+            "use_clahe": self.settings.get('use_clahe', False),
+            "sam_parameters": self.settings.get('sam_parameters', 'default'),
+            "min_area": self.settings.get('min_area', 500),
+            "max_area": self.settings.get('max_area', 50000),
+            "pruning_iou_threshold": self.settings.get('pruning_iou_threshold', 0.5)
+        }
+        
+        prompt = f"""You are an expert in image segmentation. Convert the user's natural language feedback into SAM parameter adjustments.
+
+**Current Parameters:**
+{json.dumps(current_params, indent=2)}
+
+**Available Parameters:**
+- `use_clahe` (true/false): Enable contrast enhancement. Use for low-contrast images.
+- `sam_parameters` ("default"/"sensitive"/"ultra-permissive"): Detection sensitivity. "sensitive" finds more objects, "ultra-permissive" maximizes detection.
+- `min_area` (integer, pixels): Minimum particle size. Lower = detect smaller particles.
+- `max_area` (integer, pixels): Maximum particle size. Lower = reject large merged detections.
+- `pruning_iou_threshold` (0.0-1.0): Overlap threshold for removing duplicates. Lower = more aggressive merging.
+
+**User Feedback:**
+"{user_feedback}"
+
+**Task:**
+Return a JSON object with ONLY the parameters that should be changed based on the feedback.
+
+Example response:
+{{"min_area": 200, "sam_parameters": "sensitive"}}
+
+Return only the JSON object, no explanation."""
+
+        try:
+            response = self.model.generate_content(
+                contents=[prompt],
+                generation_config=self.generation_config,
+                safety_settings=self.safety_settings,
+            )
+            result_json, error_dict = self._parse_llm_response(response)
+            
+            if error_dict or not result_json:
+                self.logger.warning("Failed to parse LLM parameter conversion.")
+                return None
+            
+            # Validate and show the interpreted parameters
+            print(f"\n   ✅ Interpreted as: {json.dumps(result_json, indent=2)}")
+            
+            return result_json
+            
+        except Exception as e:
+            self.logger.error(f"Error converting feedback: {e}")
+            return None
     
     def execute(self, state: dict) -> dict:
         """Execute the human feedback refinement loop."""
@@ -640,10 +708,13 @@ class HumanFeedbackRefinementController:
         while iteration < self.max_refinement_iterations:
             iteration += 1
             
+            # Display current results
             self._display_analysis_for_review(state, iteration)
             
+            # Get LLM assessment
             llm_assessment = self._get_llm_assessment(state)
             
+            # Collect human feedback
             feedback = self._collect_human_feedback(llm_assessment)
             
             if feedback["action"] == "accept":
@@ -652,21 +723,10 @@ class HumanFeedbackRefinementController:
                 state["final_params_for_batch"] = state.get("current_params", {})
                 break
             
-            elif feedback["action"] == "view_image":
-                self.logger.info("📷 Displaying larger overlay image...")
-                # Save and potentially open the image
-                sam_result = state.get("sam_result")
-                if sam_result:
-                    overlay_img = visualize_sam_results(sam_result)
-                    viz_path = Path(self.settings.get('output_dir', '.')) / "review_overlay.png"
-                    save_sam_visualization(overlay_img, str(viz_path), iteration, 
-                                         sam_result['total_count'], state.get("current_params", {}), self.logger)
-                    print(f"   Overlay saved to: {viz_path}")
-                continue
-            
             elif feedback["action"] in ["use_llm", "custom"]:
                 new_params = feedback["params"]
                 if new_params:
+                    # Update parameters
                     current_params = state.get("current_params", {})
                     current_params.update(new_params)
                     state["current_params"] = current_params
@@ -891,7 +951,6 @@ class BatchImageProcessingController:
         self.logger.info(f"\n✅ Batch processing complete: {successful}/{num_images} images processed successfully.")
         
         return state
-
 
 
 class CustomAnalysisScriptController:
@@ -1159,7 +1218,7 @@ Return JSON with:
                     break
         
         generated_files = []
-        for ext in ['*.png', '*.csv', '*.json']:
+        for ext in ['*.png', '*.csv']:
             generated_files.extend(self.output_dir.glob(ext))
         
         state["custom_analysis_results"] = {
@@ -1175,8 +1234,678 @@ Return JSON with:
         
         if success:
             self.logger.info(f"   📁 Generated {len(generated_files)} output files")
+            
+            # Save JSON summary (report generation happens after synthesis)
+            self._save_analysis_summary(state, script_result)
         
         return state
+    
+    def generate_final_report(self, state: dict) -> None:
+        """
+        Generate final HTML report. Call this AFTER BatchSynthesisController runs,
+        so that synthesis_result is available.
+        """
+        self._generate_html_report(state)
+    
+    def _save_analysis_summary(self, state: dict, script_result: dict) -> None:
+        """Save structured JSON summary of the analysis."""
+        batch_results = state.get("batch_results", [])
+        custom_results = state.get("custom_analysis_results", {})
+        
+        # Extract key metrics from batch results
+        metrics_over_time = []
+        for r in batch_results:
+            if r["success"]:
+                stats = r.get("statistics", {})
+                metrics_over_time.append({
+                    "index": r["index"],
+                    "image_name": r.get("image_name"),
+                    "particle_count": r["particle_count"],
+                    "mean_area_pixels": stats.get("mean_area_pixels"),
+                    "mean_area_nm2": stats.get("mean_area_nm2"),
+                    "mean_circularity": stats.get("mean_circularity"),
+                    "mean_solidity": stats.get("mean_solidity"),
+                    "mean_aspect_ratio": stats.get("mean_aspect_ratio"),
+                })
+        
+        summary = {
+            "analysis_info": {
+                "timestamp": state.get("batch_results", [{}])[0].get("statistics", {}).get("parameters_used", {}),
+                "approach": script_result.get("analysis_approach"),
+                "metrics_tracked": script_result.get("key_metrics_to_track"),
+                "reasoning": script_result.get("reasoning"),
+            },
+            "batch_overview": {
+                "total_images": len(batch_results),
+                "successful": sum(1 for r in batch_results if r["success"]),
+            },
+            "metrics_over_time": metrics_over_time,
+            "generated_plots": custom_results.get("generated_files", []),
+            "script_output": custom_results.get("stdout", ""),
+        }
+        
+        summary_path = self.output_dir / "analysis_summary.json"
+        with open(summary_path, 'w') as f:
+            json.dump(summary, f, indent=2, default=str)
+        
+        self.logger.info(f"   📄 Saved analysis summary: {summary_path}")
+    
+    def _generate_html_report(self, state: dict) -> None:
+        """Generate a professional HTML report with embedded figures and scientific synthesis."""
+        import base64
+        from datetime import datetime
+        
+        batch_results = state.get("batch_results", [])
+        custom_results = state.get("custom_analysis_results", {})
+        series_metadata = state.get("series_metadata", {})
+        synthesis_result = state.get("synthesis_result", {})
+        
+        # Extract synthesis content
+        detailed_analysis = synthesis_result.get("detailed_analysis", "No synthesis available.")
+        scientific_claims = synthesis_result.get("scientific_claims", [])
+        
+        # Collect PNG files
+        png_files = sorted(self.output_dir.glob("*.png"))
+        
+        # Build embedded images
+        embedded_images = []
+        for png_path in png_files:
+            if png_path.name.startswith("review_iteration"):
+                continue
+            if png_path.exists():
+                with open(png_path, 'rb') as f:
+                    b64 = base64.b64encode(f.read()).decode('utf-8')
+                    embedded_images.append({
+                        "name": png_path.stem,
+                        "data": b64
+                    })
+        
+        # Calculate summary statistics
+        successful = [r for r in batch_results if r["success"]]
+        counts = [r["particle_count"] for r in successful]
+        areas = [r["statistics"].get("mean_area_pixels", 0) for r in successful]
+        
+        # Safe averages
+        avg_count = sum(counts) / len(counts) if counts else 0
+        avg_area = sum(areas) / len(areas) if areas else 0
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SAM Batch Analysis Report</title>
+    <style>
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f4f4f9;
+        }}
+        .container {{
+            background-color: #fff;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }}
+        h1 {{
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+        }}
+        h2 {{
+            color: #2980b9;
+            margin-top: 30px;
+        }}
+        h3 {{
+            color: #16a085;
+        }}
+        .metadata-box {{
+            background-color: #ecf0f1;
+            padding: 15px;
+            border-radius: 5px;
+            border-left: 5px solid #3498db;
+            margin-bottom: 20px;
+        }}
+        .metadata-box p {{
+            margin: 5px 0;
+        }}
+        .summary-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }}
+        .stat-card {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }}
+        .stat-card .value {{
+            font-size: 2.2em;
+            font-weight: bold;
+            display: block;
+        }}
+        .stat-card .label {{
+            font-size: 0.85em;
+            opacity: 0.9;
+            margin-top: 5px;
+        }}
+        .analysis-text {{
+            white-space: pre-wrap;
+            background-color: #fafafa;
+            padding: 20px;
+            border-radius: 5px;
+            border: 1px solid #eee;
+            font-size: 0.95em;
+            line-height: 1.8;
+        }}
+        .claim-card {{
+            background-color: #e8f6f3;
+            border-left: 5px solid #1abc9c;
+            padding: 15px 20px;
+            margin-bottom: 15px;
+            border-radius: 0 5px 5px 0;
+        }}
+        .claim-title {{
+            font-weight: bold;
+            font-size: 1.05em;
+            color: #0e6655;
+            margin-bottom: 8px;
+        }}
+        .claim-card p {{
+            margin: 5px 0;
+        }}
+        .claim-card em {{
+            color: #555;
+        }}
+        .keywords {{
+            margin-top: 8px;
+        }}
+        .keyword-tag {{
+            display: inline-block;
+            background: #d5f5e3;
+            color: #1e8449;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            margin-right: 5px;
+            margin-top: 3px;
+        }}
+        .image-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+            gap: 25px;
+            margin-top: 20px;
+        }}
+        .image-card {{
+            background: white;
+            border: 1px solid #ddd;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        }}
+        .image-card img {{
+            max-width: 100%;
+            height: auto;
+            border-radius: 4px;
+        }}
+        .image-label {{
+            margin-top: 12px;
+            font-weight: 600;
+            color: #444;
+            font-size: 0.95em;
+            border-top: 1px solid #eee;
+            padding-top: 10px;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            font-size: 0.9em;
+        }}
+        th {{
+            background: #3498db;
+            color: white;
+            padding: 12px 10px;
+            text-align: left;
+        }}
+        td {{
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+        }}
+        tr:hover {{
+            background-color: #f8f9fa;
+        }}
+        .output-box {{
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 15px 20px;
+            border-radius: 5px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.85em;
+            white-space: pre-wrap;
+            overflow-x: auto;
+            max-height: 300px;
+            overflow-y: auto;
+        }}
+        .footer {{
+            margin-top: 50px;
+            text-align: center;
+            color: #7f8c8d;
+            font-size: 0.8em;
+            border-top: 1px solid #eee;
+            padding-top: 20px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔬 SAM Batch Analysis Report</h1>
+        
+        <div class="metadata-box">
+            <p><strong>Date:</strong> {timestamp}</p>
+            <p><strong>Analysis Approach:</strong> {custom_results.get("approach", "time_series")}</p>
+            <p><strong>Series Type:</strong> {series_metadata.get("series_type", "unknown")}</p>
+            <p><strong>Metrics Tracked:</strong> {", ".join(custom_results.get("metrics_tracked", [])) or "particle_count, mean_area"}</p>
+        </div>
+
+        <h2>1. Summary Statistics</h2>
+        <div class="summary-grid">
+            <div class="stat-card">
+                <span class="value">{len(successful)}/{len(batch_results)}</span>
+                <span class="label">Images Processed</span>
+            </div>
+            <div class="stat-card">
+                <span class="value">{sum(counts)}</span>
+                <span class="label">Total Particles</span>
+            </div>
+            <div class="stat-card">
+                <span class="value">{avg_count:.1f}</span>
+                <span class="label">Avg Particles/Image</span>
+            </div>
+            <div class="stat-card">
+                <span class="value">{avg_area:.0f}</span>
+                <span class="label">Avg Area (px²)</span>
+            </div>
+        </div>
+
+        <h2>2. Scientific Analysis</h2>
+        <div class="analysis-text">{detailed_analysis}</div>
+"""
+
+        # Scientific claims section
+        if scientific_claims:
+            html += """
+        <h2>3. Key Scientific Claims</h2>
+"""
+            for i, claim in enumerate(scientific_claims, 1):
+                claim_text = claim.get('claim', 'N/A')
+                impact = claim.get('scientific_impact', 'N/A')
+                evidence = claim.get('supporting_evidence', '')
+                question = claim.get('has_anyone_question', 'N/A')
+                keywords = claim.get('keywords', [])
+                
+                html += f"""
+        <div class="claim-card">
+            <div class="claim-title">Claim {i}: {claim_text}</div>
+            <p><strong>Scientific Impact:</strong> {impact}</p>
+"""
+                if evidence:
+                    html += f"""            <p><strong>Supporting Evidence:</strong> {evidence}</p>
+"""
+                html += f"""            <p><strong>Research Question:</strong> <em>{question}</em></p>
+"""
+                if keywords:
+                    html += """            <div class="keywords">
+                <strong>Keywords:</strong> 
+"""
+                    for kw in keywords:
+                        html += f"""                <span class="keyword-tag">{kw}</span>
+"""
+                    html += """            </div>
+"""
+                html += """        </div>
+"""
+
+        # Figures section
+        section_num = 4 if scientific_claims else 3
+        if embedded_images:
+            html += f"""
+        <h2>{section_num}. Visualizations</h2>
+        <div class="image-grid">
+"""
+            for img in embedded_images:
+                display_name = img['name'].replace('_', ' ').replace('-', ' ').title()
+                html += f"""
+            <div class="image-card">
+                <img src="data:image/png;base64,{img['data']}" alt="{img['name']}" loading="lazy">
+                <div class="image-label">{display_name}</div>
+            </div>
+"""
+            html += "        </div>\n"
+            section_num += 1
+
+        # Data table section
+        html += f"""
+        <h2>{section_num}. Per-Image Results</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Image Name</th>
+                    <th>Particles</th>
+                    <th>Mean Area (px²)</th>
+                    <th>Circularity</th>
+                    <th>Solidity</th>
+                </tr>
+            </thead>
+            <tbody>
+"""
+        for r in successful:
+            stats = r.get("statistics", {})
+            circ = stats.get('mean_circularity')
+            solid = stats.get('mean_solidity')
+            circ_str = f"{circ:.3f}" if circ is not None else "N/A"
+            solid_str = f"{solid:.3f}" if solid is not None else "N/A"
+            
+            html += f"""
+                <tr>
+                    <td>{r['index']}</td>
+                    <td>{r.get('image_name', 'N/A')}</td>
+                    <td>{r['particle_count']}</td>
+                    <td>{stats.get('mean_area_pixels', 0):.1f}</td>
+                    <td>{circ_str}</td>
+                    <td>{solid_str}</td>
+                </tr>
+"""
+        
+        html += """
+            </tbody>
+        </table>
+"""
+
+        # Script output section (collapsed at end)
+        stdout = custom_results.get("stdout", "")
+        if stdout:
+            section_num += 1
+            html += f"""
+        <h2>{section_num}. Script Output</h2>
+        <div class="output-box">{stdout}</div>
+"""
+
+        html += """
+        <div class="footer">
+            Generated by SAM Batch Analysis Agent
+        </div>
+    </div>
+</body>
+</html>
+"""
+        
+        report_path = self.output_dir / "analysis_report.html"
+        with open(report_path, 'w') as f:
+            f.write(html)
+        
+        self.logger.info(f"   📊 Generated HTML report: {report_path}")
+
+
+class ReportGenerationController:
+    """
+    [📄 Report Step]
+    Generates final HTML report and JSON summary after synthesis is complete.
+    Should be the LAST controller in the pipeline.
+    """
+    
+    def __init__(self, logger: logging.Logger, settings: dict):
+        self.logger = logger
+        self.settings = settings
+        self.output_dir = Path(settings.get('output_dir', 'sam_batch_output'))
+    
+    def execute(self, state: dict) -> dict:
+        """Generate final reports using synthesis results."""
+        self.logger.info("\n\n📄 --- GENERATING FINAL REPORTS --- 📄\n")
+        
+        custom_results = state.get("custom_analysis_results", {})
+        
+        if not custom_results.get("success"):
+            self.logger.warning("Skipping report generation: custom analysis was not successful.")
+            return state
+        
+        # Generate HTML report
+        self._generate_html_report(state)
+        
+        # Update generated files list
+        report_path = self.output_dir / "analysis_report.html"
+        summary_path = self.output_dir / "analysis_summary.json"
+        
+        if "generated_files" not in custom_results:
+            custom_results["generated_files"] = []
+        
+        if report_path.exists():
+            custom_results["generated_files"].append(str(report_path))
+        if summary_path.exists():
+            custom_results["generated_files"].append(str(summary_path))
+        
+        return state
+    
+    def _generate_html_report(self, state: dict) -> None:
+        """Generate a professional HTML report with embedded figures and scientific synthesis."""
+        import base64
+        from datetime import datetime
+        
+        custom_results = state.get("custom_analysis_results", {})
+        series_metadata = state.get("series_metadata", {})
+        synthesis_result = state.get("synthesis_result", {})
+        
+        # Extract synthesis content
+        detailed_analysis = synthesis_result.get("detailed_analysis", "No synthesis available.")
+        scientific_claims = synthesis_result.get("scientific_claims", [])
+        
+        # Collect PNG files
+        png_files = sorted(self.output_dir.glob("*.png"))
+        
+        # Build embedded images
+        embedded_images = []
+        for png_path in png_files:
+            if png_path.name.startswith("review_iteration"):
+                continue
+            if png_path.exists():
+                with open(png_path, 'rb') as f:
+                    b64 = base64.b64encode(f.read()).decode('utf-8')
+                    embedded_images.append({
+                        "name": png_path.stem,
+                        "data": b64
+                    })
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SAM Batch Analysis Report</title>
+    <style>
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f4f4f9;
+        }}
+        .container {{
+            background-color: #fff;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }}
+        h1 {{
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+        }}
+        h2 {{
+            color: #2980b9;
+            margin-top: 30px;
+        }}
+        .metadata-box {{
+            background-color: #ecf0f1;
+            padding: 15px;
+            border-radius: 5px;
+            border-left: 5px solid #3498db;
+            margin-bottom: 20px;
+        }}
+        .metadata-box p {{
+            margin: 5px 0;
+        }}
+        .analysis-text {{
+            white-space: pre-wrap;
+            background-color: #fafafa;
+            padding: 20px;
+            border-radius: 5px;
+            border: 1px solid #eee;
+            font-size: 0.95em;
+            line-height: 1.8;
+        }}
+        .claim-card {{
+            background-color: #e8f6f3;
+            border-left: 5px solid #1abc9c;
+            padding: 15px 20px;
+            margin-bottom: 15px;
+            border-radius: 0 5px 5px 0;
+        }}
+        .claim-title {{
+            font-weight: bold;
+            font-size: 1.05em;
+            color: #0e6655;
+            margin-bottom: 8px;
+        }}
+        .claim-card p {{
+            margin: 5px 0;
+        }}
+        .keyword-tag {{
+            display: inline-block;
+            background: #d5f5e3;
+            color: #1e8449;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            margin-right: 5px;
+            margin-top: 3px;
+        }}
+        .image-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+            gap: 25px;
+            margin-top: 20px;
+        }}
+        .image-card {{
+            background: white;
+            border: 1px solid #ddd;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        }}
+        .image-card img {{
+            max-width: 100%;
+            height: auto;
+            border-radius: 4px;
+        }}
+        .image-label {{
+            margin-top: 12px;
+            font-weight: 600;
+            color: #444;
+            border-top: 1px solid #eee;
+            padding-top: 10px;
+        }}
+        .footer {{
+            margin-top: 50px;
+            text-align: center;
+            color: #7f8c8d;
+            font-size: 0.8em;
+            border-top: 1px solid #eee;
+            padding-top: 20px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔬 SAM Batch Analysis Report</h1>
+        
+        <div class="metadata-box">
+            <p><strong>Date:</strong> {timestamp}</p>
+            <p><strong>Analysis Approach:</strong> {custom_results.get("approach", "time_series")}</p>
+            <p><strong>Series Type:</strong> {series_metadata.get("series_type", "unknown")}</p>
+            <p><strong>Metrics Tracked:</strong> {", ".join(custom_results.get("metrics_tracked", [])) or "particle_count, mean_area"}</p>
+        </div>
+
+        <h2>1. Scientific Analysis</h2>
+        <div class="analysis-text">{detailed_analysis}</div>
+"""
+
+        # Visualizations section
+        if embedded_images:
+            html += """
+        <h2>2. Visualizations</h2>
+        <div class="image-grid">
+"""
+            for img in embedded_images:
+                display_name = img['name'].replace('_', ' ').replace('-', ' ').title()
+                html += f"""            <div class="image-card">
+                <img src="data:image/png;base64,{img['data']}" alt="{img['name']}" loading="lazy">
+                <div class="image-label">{display_name}</div>
+            </div>
+"""
+            html += "        </div>\n"
+
+        # Scientific claims section
+        if scientific_claims:
+            html += "        <h2>3. Key Scientific Claims</h2>\n"
+            for i, claim in enumerate(scientific_claims, 1):
+                claim_text = claim.get('claim', 'N/A')
+                impact = claim.get('scientific_impact', 'N/A')
+                evidence = claim.get('supporting_evidence', '')
+                question = claim.get('has_anyone_question', 'N/A')
+                keywords = claim.get('keywords', [])
+                
+                html += f"""        <div class="claim-card">
+            <div class="claim-title">Claim {i}: {claim_text}</div>
+            <p><strong>Scientific Impact:</strong> {impact}</p>
+"""
+                if evidence:
+                    html += f"            <p><strong>Supporting Evidence:</strong> {evidence}</p>\n"
+                html += f"            <p><strong>Research Question:</strong> <em>{question}</em></p>\n"
+                if keywords:
+                    html += "            <div><strong>Keywords:</strong> "
+                    html += " ".join(f'<span class="keyword-tag">{kw}</span>' for kw in keywords)
+                    html += "</div>\n"
+                html += "        </div>\n"
+
+        html += """
+        <div class="footer">Generated by SAM Batch Analysis Agent</div>
+    </div>
+</body>
+</html>
+"""
+        
+        report_path = self.output_dir / "analysis_report.html"
+        with open(report_path, 'w') as f:
+            f.write(html)
+        
+        self.logger.info(f"   ✅ Generated HTML report: {report_path}")
 
 
 class BatchSynthesisController:

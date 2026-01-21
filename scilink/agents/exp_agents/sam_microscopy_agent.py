@@ -171,22 +171,12 @@ class SAMBatchAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         Returns:
             Dictionary containing batch results, custom analysis, and synthesis
-        
-        Examples:
-            # Using file paths
-            results = agent.analyze_image_series(
-                image_paths=["img1.tif", "img2.tif", "img3.tif"],
-                system_info={"sample": "Gold NPs"}
-            )
-            
-            # Using numpy array stack
-            image_stack = np.stack([img1, img2, img3], axis=0)  # shape: (3, H, W)
-            results = agent.analyze_image_series(
-                image_stack=image_stack,
-                system_info={"sample": "Gold NPs"}
-            )
         """
-        # Validate inputs
+        from .pipelines.sam_pipelines import create_sam_batch_pipeline
+        
+        # ============================================================
+        # Input Validation
+        # ============================================================
         if image_paths is None and image_stack is None:
             return {"error": "Must provide either image_paths or image_stack"}
         
@@ -213,55 +203,66 @@ class SAMBatchAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.logger.info(f"🔬 SAM BATCH ANALYSIS - {num_images} images")
         self.logger.info(f"{'='*80}\n")
         
-        # Initialize state
+        # ============================================================
+        # Initialize State
+        # ============================================================
+        
+        # Load and preprocess first image for initial analysis
+        if image_stack is not None:
+            first_image = image_stack[0]
+            first_image_name = "frame_0000"
+        else:
+            first_image = load_image(image_paths[0])
+            first_image_name = Path(image_paths[0]).stem
+        
+        preprocessed_img, _ = preprocess_image(first_image)
+        image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img)
+        
+        nm_per_pixel, fov_in_nm = self._calculate_spatial_scale(
+            self._handle_system_info(system_info), first_image.shape
+        )
+        
+        # Build initial state dict
         state = {
+            # Input data
             "image_paths": image_paths,
             "image_stack": image_stack,
             "input_type": input_type,
             "num_images": num_images,
+            
+            # System info
             "system_info": self._handle_system_info(system_info),
             "series_metadata": series_metadata or {},
-            "enable_human_feedback": self.settings.get('enable_human_feedback', True),
-            "current_params": self._initialize_sam_params()
+            
+            # First image (preprocessed)
+            "image_path": image_paths[0] if image_paths else first_image_name,
+            "first_image_name": first_image_name,
+            "preprocessed_image_array": preprocessed_img,
+            "image_blob": {"mime_type": "image/jpeg", "data": image_bytes},
+            
+            # Spatial calibration
+            "nm_per_pixel": nm_per_pixel,
+            "fov_in_nm": fov_in_nm,
+            
+            # Settings and params
+            "settings": self.settings,
+            "enable_human_feedback": self.settings.get('enable_human_feedback', False),
+            "current_params": self._initialize_sam_params(),
+            
+            # Initial SAM analysis on first image
+            "sam_result": None,
+            "summary_stats": None,
         }
         
         # ============================================================
-        # STEP 1: Process first image with human feedback refinement
+        # Run Initial SAM Analysis on First Image
         # ============================================================
-        self.logger.info("📍 STEP 1: First Image Analysis with Human Feedback\n")
+        self.logger.info("📍 Running initial SAM analysis on first image...\n")
         
         try:
-            # Get first image
-            if image_stack is not None:
-                first_image = image_stack[0]
-                first_image_name = "frame_0000"
-            else:
-                first_image = load_image(image_paths[0])
-                first_image_name = Path(image_paths[0]).stem
-            
-            # Preprocess first image
-            preprocessed_img, _ = preprocess_image(first_image)
-            image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img)
-            
-            nm_per_pixel, fov_in_nm = self._calculate_spatial_scale(
-                state["system_info"], first_image.shape
-            )
-            
-            state.update({
-                "image_path": image_paths[0] if image_paths else first_image_name,
-                "first_image_name": first_image_name,
-                "preprocessed_image_array": preprocessed_img,
-                "image_blob": {"mime_type": "image/jpeg", "data": image_bytes},
-                "nm_per_pixel": nm_per_pixel,
-                "fov_in_nm": fov_in_nm
-            })
-            
-            # Initial SAM analysis
-            self.logger.info("   Running initial SAM analysis...")
             sam_result = run_sam_analysis(preprocessed_img, params=state["current_params"])
             state["sam_result"] = sam_result
             
-            # Calculate initial statistics
             summary_stats = calculate_sam_statistics(
                 sam_result=sam_result,
                 image_path=state["image_path"],
@@ -270,66 +271,44 @@ class SAMBatchAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             )
             state["summary_stats"] = summary_stats
             
-            self.logger.info(f"   Initial detection: {sam_result['total_count']} particles")
-            
-            # Human feedback refinement loop
-            feedback_controller = HumanFeedbackRefinementController(
-                model=self.model,
-                logger=self.logger,
-                generation_config=self.generation_config,
-                safety_settings=self.safety_settings,
-                parse_fn=self._parse_llm_response,
-                settings=self.settings
-            )
-            state = feedback_controller.execute(state)
+            self.logger.info(f"   Initial detection: {sam_result['total_count']} particles\n")
             
         except Exception as e:
-            self.logger.error(f"First image analysis failed: {e}")
-            return {"error": f"First image analysis failed: {e}"}
+            self.logger.error(f"Initial SAM analysis failed: {e}")
+            return {"error": f"Initial SAM analysis failed: {e}"}
         
         # ============================================================
-        # STEP 2: Batch process remaining images
+        # Create and Execute Batch Pipeline
         # ============================================================
-        self.logger.info("\n📍 STEP 2: Batch Processing Remaining Images\n")
-        
-        batch_controller = BatchImageProcessingController(
-            logger=self.logger,
-            settings=self.settings
-        )
-        state = batch_controller.execute(state)
-        
-        # ============================================================
-        # STEP 3: Generate and run custom analysis script
-        # ============================================================
-        self.logger.info("\n📍 STEP 3: Custom Trend Analysis\n")
-        
-        custom_controller = CustomAnalysisScriptController(
+        batch_pipeline = create_sam_batch_pipeline(
             model=self.model,
             logger=self.logger,
             generation_config=self.generation_config,
             safety_settings=self.safety_settings,
-            parse_fn=self._parse_llm_response,
-            settings=self.settings
+            settings=self.settings,
+            parse_fn=self._parse_llm_response
         )
-        state = custom_controller.execute(state)
+        
+        # Execute pipeline steps
+        for i, controller in enumerate(batch_pipeline, 1):
+            step_name = controller.__class__.__name__
+            self.logger.info(f"\n📍 STEP {i}: {step_name}\n")
+            
+            try:
+                state = controller.execute(state)
+                
+                # Check for errors
+                if state.get("error_dict"):
+                    self.logger.error(f"Pipeline failed at step {step_name}: {state['error_dict']}")
+                    break
+                    
+            except Exception as e:
+                self.logger.error(f"Pipeline step {step_name} raised exception: {e}")
+                state["error_dict"] = {"error": f"Pipeline step failed: {step_name}", "details": str(e)}
+                break
         
         # ============================================================
-        # STEP 4: Synthesize findings
-        # ============================================================
-        self.logger.info("\n📍 STEP 4: Scientific Synthesis\n")
-        
-        synthesis_controller = BatchSynthesisController(
-            model=self.model,
-            logger=self.logger,
-            generation_config=self.generation_config,
-            safety_settings=self.safety_settings,
-            parse_fn=self._parse_llm_response,
-            settings=self.settings
-        )
-        state = synthesis_controller.execute(state)
-        
-        # ============================================================
-        # Compile final results
+        # Compile Final Results
         # ============================================================
         final_results = {
             "batch_summary": {
@@ -344,7 +323,7 @@ class SAMBatchAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "output_directory": str(self.output_dir)
         }
         
-        # Save final results
+        # Save final results JSON
         final_path = self.output_dir / "final_batch_results.json"
         with open(final_path, 'w') as f:
             json.dump(final_results, f, indent=2, default=str)

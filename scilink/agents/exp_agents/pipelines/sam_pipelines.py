@@ -18,7 +18,8 @@ from ..controllers.sam_controllers import (
     HumanFeedbackRefinementController,
     BatchImageProcessingController,
     CustomAnalysisScriptController,
-    BatchSynthesisController
+    BatchSynthesisController,
+    ReportGenerationController
 )
 
 
@@ -90,8 +91,7 @@ def create_sam_batch_pipeline(
     generation_config,
     safety_settings,
     settings: dict,
-    parse_fn: Callable,
-    store_fn: Callable
+    parse_fn: Callable
 ) -> List:
     """
     Factory function to create the batch SAM analysis pipeline.
@@ -101,7 +101,7 @@ def create_sam_batch_pipeline(
     2. Batch processing of all images with refined parameters
     3. Custom analysis script generation and execution
     4. Scientific synthesis of batch findings
-    5. Storage of results
+    5. HTML report generation
     
     Args:
         model: LLM model instance
@@ -110,7 +110,6 @@ def create_sam_batch_pipeline(
         safety_settings: LLM safety settings
         settings: Pipeline settings dict
         parse_fn: Function to parse LLM responses
-        store_fn: Function to store analysis images
     
     Returns:
         List of controller instances to execute in sequence
@@ -144,9 +143,9 @@ def create_sam_batch_pipeline(
             parse_fn=parse_fn,
             settings=settings
         ),
-        StoreAnalysisResultsController(
+        ReportGenerationController(
             logger=logger,
-            store_fn=store_fn
+            settings=settings
         )
     ]
     
