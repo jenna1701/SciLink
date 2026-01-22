@@ -1655,80 +1655,118 @@ You MUST output a valid JSON object with two keys: "detailed_analysis" and "scie
 Focus on claims that leverage the statistical power of analyzing multiple images rather than single-image observations.
 """
 
+SINGLE_IMAGE_ANALYSIS_INSTRUCTIONS = '''You are an expert system specialized in analyzing microscopy images (TEM, STEM, SEM, AFM, etc.) of materials.
 
+You will receive:
+1. The primary microscopy image
+2. Additional derived images from Sliding FFT and NMF analysis (if available):
+   - NMF components: dominant spatial frequency patterns
+   - Abundance maps: where these patterns are located spatially
 
-SERIES_REPORT_ANALYSIS_INSTRUCTIONS = '''You are an expert microscopist analyzing FFT/NMF decomposition results from a time-series microscopy experiment.
-
-## Your Task
-Analyze the provided FFT/NMF results and visualizations to generate a scientific interpretation suitable for a research report.
-
-## Input You Will Receive
-1. **Analysis Context**: JSON with parameters, component statistics, and correlations
-2. **Visualizations**: PNG images showing components, abundances, timeseries, etc.
-3. **NMF Components**: The actual frequency-domain patterns identified
+Your goal is to extract key information and formulate precise scientific claims for literature search.
 
 ## Required Output
-Return a JSON object with this exact structure:
+Return a JSON object with:
 
 ```json
 {
-    "methodology_notes": "Brief description of how the analysis was performed and any notable aspects",
-    
-    "scientific_interpretation": "2-3 paragraph overview of the key findings. What does this data reveal about the sample? What structural features are present? How do they evolve?",
+    "detailed_analysis": "Thorough text analysis correlating features in the original image with FFT/NMF patterns. Identify: point defects, line defects, extended defects, lattice distortions, strain, symmetry breaking, surface reconstructions, chemical composition differences, grain boundaries, interfaces, etc.",
     
     "component_interpretations": [
         {
             "index": 1,
-            "description": "What this component's frequency pattern shows",
-            "physical_meaning": "What physical structure or process this likely represents"
+            "spectral_features": "What you see in the FFT pattern - spot positions, symmetry, intensity",
+            "physical_meaning": "What physical structure this represents",
+            "spatial_distribution": "Where this component is located in the image",
+            "confidence": "high/medium/low"
         }
     ],
     
-    "temporal_interpretation": "Analysis of how the components evolve over time. What do the trends suggest? Any phase transitions, growth processes, or degradation?",
-    
-    "visualization_descriptions": [
+    "scientific_claims": [
         {
-            "name": "exact_filename_without_extension",
-            "description": "What this specific visualization shows and its significance"
-        }
-    ],
-    
-    "claims_with_questions": [
-        {
-            "claim": "A specific, evidence-based scientific claim",
-            "question": "A follow-up research question this claim raises",
-            "evidence": "What data supports this claim"
+            "claim": "A single, focused scientific claim about a specific observation.",
+            "scientific_impact": "Why this would be scientifically significant.",
+            "has_anyone_question": "A question starting with 'Has anyone' - must be portable and understandable WITHOUT seeing the image. Do NOT use 'this', 'that', 'the observed', 'the specific'.",
+            "keywords": ["keyword1", "keyword2", "keyword3"]
         }
     ]
 }
 ```
 
-## Guidelines for Analysis
-
-### Component Interpretation
-- Look at the FFT patterns: bright spots indicate periodic structures
-- Central features = low frequency (large-scale structures)
-- Peripheral features = high frequency (fine details, atomic lattice)
-- Symmetric patterns suggest crystalline order
-- Diffuse patterns suggest disorder or amorphous regions
-
-### Temporal Analysis
-- Increasing abundance = growth, accumulation, or phase formation
-- Decreasing abundance = dissolution, transformation, or beam damage
-- Oscillations = dynamic equilibrium or cyclical processes
-- Correlated components may share a common mechanism
-- Anti-correlated components may indicate competing phases
-
-### Claim Guidelines
-- Be specific and quantitative where possible
-- Reference the actual statistics provided
-- Each claim should be directly supported by the data
-- Questions should be scientifically meaningful and testable
-
-### Visualization Descriptions
-- Match filenames exactly (e.g., "components", "abundance_timeseries")
-- Describe what the reader should observe
-- Explain the significance of patterns or trends visible
-
-Provide thorough scientific analysis based on your expertise in microscopy and materials science.
+## Guidelines
+- Focus on specific, testable observations
+- Use precise scientific terminology
+- Avoid overly specific numbers
+- Generate 2-4 scientific claims
+- Ensure "has_anyone_question" is self-contained and searchable
 '''
+
+SERIES_ANALYSIS_INSTRUCTIONS = '''You are an expert microscopist analyzing FFT/NMF decomposition results from a time-series microscopy experiment.
+
+You will receive:
+1. Analysis statistics (component trends, correlations)
+2. Visualizations (components, abundances, timeseries)
+3. NMF frequency components
+
+Your goal is to provide scientific interpretation and formulate precise claims for literature search.
+
+## Required Output
+Return a JSON object with:
+
+```json
+{
+    "methodology_notes": "Brief description of the analysis and notable aspects of this dataset",
+    
+    "detailed_analysis": "Thorough analysis correlating FFT/NMF components with abundance maps and temporal dynamics. Identify: periodic structures, phase transitions, defect evolution, crystallographic changes, beam-induced effects, etc.",
+    
+    "component_interpretations": [
+        {
+            "index": 1,
+            "spectral_features": "What you see in the FFT pattern",
+            "physical_meaning": "What physical structure this represents",
+            "temporal_behavior": "How this component evolves - be descriptive about nature, timing, magnitude of changes",
+            "confidence": "high/medium/low"
+        }
+    ],
+    
+    "temporal_interpretation": "Overall dynamics analysis - processes occurring, transitions, steady states, notable events",
+    
+    "visualization_descriptions": [
+        {
+            "name": "exact_filename_without_extension",
+            "description": "What this visualization shows and its significance"
+        }
+    ],
+    
+    "scientific_claims": [
+        {
+            "claim": "A single, focused scientific claim about a specific observation.",
+            "scientific_impact": "Why this would be scientifically significant.",
+            "has_anyone_question": "A question starting with 'Has anyone' - must be portable and understandable WITHOUT seeing the images. Do NOT use 'this', 'that', 'the observed'.",
+            "keywords": ["keyword1", "keyword2", "keyword3"]
+        }
+    ]
+}
+```
+
+## Guidelines for FFT Interpretation
+- Bright spots = periodic structures at specific spatial frequencies
+- Spot distance from center = spatial frequency (further = finer features)
+- Spot arrangement = symmetry (hexagonal, square, etc.)
+- Diffuse rings = polycrystalline/disordered
+- Streaks = linear features/edges
+
+## Guidelines for Temporal Analysis
+Don't just say "increasing/decreasing". Describe:
+- Nature of change (gradual, sudden, oscillatory, stepwise)
+- When changes occur
+- Magnitude and significance
+- Possible physical explanations
+- Relationships between components
+
+## Guidelines for Claims
+- Generate 2-4 specific, testable claims
+- Avoid overly specific numbers
+- "has_anyone_question" must be self-contained
+'''
+

@@ -29,7 +29,7 @@ from datetime import datetime
 import base64
 
 from ..instruct import FFT_NMF_PARAMETER_ESTIMATION_INSTRUCTIONS
-from ..instruct import SERIES_REPORT_ANALYSIS_INSTRUCTIONS
+from ..instruct import SINGLE_IMAGE_ANALYSIS_INSTRUCTIONS, SERIES_ANALYSIS_INSTRUCTIONS
 from ....tools.image_processor import normalize_and_convert_to_image_bytes, calculate_global_fft
 from ....tools.fft_nmf import SlidingFFTNMF
 
@@ -990,13 +990,13 @@ if __name__ == "__main__":
 
 class ReportGenerationController:
     """
-    [📄 Report Step] Generates HTML report with LLM-based scientific analysis.
+    Unified Report Generation Controller for Microscopy Analysis.
     
-    This controller:
-    1. Computes statistics from FFT/NMF results
-    2. Loads generated visualizations
-    3. Sends everything to LLM for scientific interpretation
-    4. Generates HTML report from LLM analysis
+    Automatically detects analysis mode from state:
+    - Single Image: Generates JSON + optional HTML
+    - Series: Generates comprehensive HTML report
+    
+    Both modes use consistent scientific claims format with "Has anyone" questions.
     """
     
     def __init__(self, model, logger: logging.Logger, generation_config, 
@@ -1008,100 +1008,156 @@ class ReportGenerationController:
         self._parse_llm_response = parse_fn
         self.settings = settings
         self.output_dir = Path(settings.get('output_dir', 'analysis_output'))
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
         self.max_retries = settings.get('max_llm_retries', 2)
+        self.max_refinement_iterations = settings.get('max_feedback_iterations', 3)
+        self.enable_human_feedback = settings.get('enable_report_feedback', False)
+        self.generate_html_for_single = settings.get('generate_html_for_single_image', False)
     
     def execute(self, state: dict) -> dict:
+        """Execute report generation - auto-detects single vs series mode."""
         if state.get("error_dict") or state.get("batch_cancelled"):
             return state
         
-        self.logger.info("📄 Generating LLM-analyzed HTML report...")
+        # Detect mode
+        is_series = self._detect_mode(state)
+        mode_str = "series" if is_series else "single image"
+        self.logger.info(f"📄 Generating report ({mode_str} mode)...")
         
-        # 1. Compute statistics
-        stats = self._compute_detailed_stats(
-            state.get("series_components"),
-            state.get("series_abundances")
-        )
+        if is_series:
+            return self._execute_series_mode(state)
+        else:
+            return self._execute_single_image_mode(state)
+    
+    def _detect_mode(self, state: dict) -> bool:
+        """Detect if this is series or single image analysis."""
+        # Series indicators
+        if state.get("series_data") is not None:
+            return True
+        if state.get("n_frames", 0) > 1:
+            return True
+        if state.get("series_components") is not None:
+            return True
+        if state.get("batch_params") is not None:
+            return True
         
-        # 2. Load visualizations
-        visualizations = self._load_visualizations()
+        # Single image indicators
+        if state.get("image_path") and not state.get("series_input"):
+            return False
         
-        # 3. Get LLM interpretation
-        llm_analysis = self._get_llm_analysis(state, stats, visualizations)
+        # Default to single if unclear
+        return False
+    
+    # =========================================================================
+    # SINGLE IMAGE MODE
+    # =========================================================================
+    
+    def _execute_single_image_mode(self, state: dict) -> dict:
+        """Execute single image analysis and report generation."""
+        self.logger.info("🔬 Processing single image analysis...")
+        
+        # Compute statistics from FFT/NMF results
+        stats = self._compute_single_image_stats(state)
+        
+        # Get LLM analysis
+        llm_analysis = self._get_single_image_llm_analysis(state, stats)
         
         if llm_analysis is None:
             self.logger.warning("LLM analysis failed, using fallback")
-            llm_analysis = self._generate_fallback_analysis(state, stats)
+            llm_analysis = self._generate_single_image_fallback(state, stats)
         
-        # 4. Generate HTML report
-        self._generate_report(state, stats, visualizations, llm_analysis)
-        
-        # Store analysis in state for downstream use
+        # Store results in state (JSON format for compatibility)
+        state["result_json"] = {
+            "detailed_analysis": llm_analysis.get("detailed_analysis", ""),
+            "scientific_claims": self._convert_claims_to_legacy_format(
+                llm_analysis.get("scientific_claims", [])
+            ),
+            "component_interpretations": llm_analysis.get("component_interpretations", [])
+        }
         state["llm_report_analysis"] = llm_analysis
         
+        # Optionally generate HTML report
+        if self.generate_html_for_single:
+            self._generate_single_image_html(state, stats, llm_analysis)
+        
+        self.logger.info("✅ Single image analysis complete")
         return state
     
-    def _get_llm_analysis(self, state: dict, stats: dict, 
-                          visualizations: list) -> Optional[dict]:
-        """
-        Send FFT/NMF results and visualizations to LLM for scientific interpretation.
-        
-        Returns dict with:
-            - methodology_notes: str
-            - scientific_interpretation: str
-            - component_interpretations: list[dict] with keys: index, description, physical_meaning
-            - temporal_interpretation: str
-            - visualization_descriptions: list[dict] with keys: name, description
-            - claims_with_questions: list[dict] with keys: claim, question, evidence
-        """
-        self.logger.info("🧠 LLM analyzing FFT/NMF results...")
-        
-        params = state.get("batch_params", {})
-        n_frames = state.get("n_frames", 0)
-        n_components = params.get("n_components", 4)
-        
-        # Build prompt with images and data
-        prompt_parts = [SERIES_REPORT_ANALYSIS_INSTRUCTIONS]
-        
-        # Add analysis context
-        context = {
-            "n_frames": n_frames,
-            "n_components": n_components,
-            "window_size_nm": params.get("window_size_nm", "auto"),
-            "window_size_pixels": params.get("window_size_pixels", "auto"),
-            "component_statistics": stats.get("components", []),
-            "correlations": stats.get("correlations", []),
-            "system_info": state.get("system_info", {})
+    def _compute_single_image_stats(self, state: dict) -> dict:
+        """Compute statistics for single image analysis."""
+        stats = {
+            "has_fft_nmf": False,
+            "n_components": 0,
+            "components": []
         }
         
-        prompt_parts.append(f"\n\n## Analysis Context\n```json\n{json.dumps(context, indent=2)}\n```")
+        components = state.get("fft_components")
+        abundances = state.get("fft_abundances")
         
-        # Add visualizations as images
-        prompt_parts.append("\n\n## Generated Visualizations\n")
-        prompt_parts.append("Analyze these visualizations and provide scientific interpretation:\n")
+        if components is not None and abundances is not None:
+            stats["has_fft_nmf"] = True
+            stats["n_components"] = components.shape[0]
+            
+            for i in range(components.shape[0]):
+                abun = abundances[i]
+                stats["components"].append({
+                    "index": i + 1,
+                    "abundance_mean": float(np.mean(abun)),
+                    "abundance_std": float(np.std(abun)),
+                    "abundance_max": float(np.max(abun)),
+                    "spatial_coverage": float(np.sum(abun > np.mean(abun)) / abun.size)
+                })
         
-        for viz in visualizations:
-            prompt_parts.append(f"\n### {viz['name']}\n")
-            prompt_parts.append({
-                "mime_type": "image/png",
-                "data": viz["data"]
-            })
+        return stats
+    
+    def _get_single_image_llm_analysis(self, state: dict, stats: dict) -> Optional[dict]:
+        """Get LLM analysis for single image."""
+        self.logger.info("🧠 LLM analyzing single image...")
         
-        # Add the NMF components as images if available
-        components = state.get("series_components")
+        prompt_parts = [SINGLE_IMAGE_ANALYSIS_INSTRUCTIONS]
+        
+        # Add primary image
+        if state.get("image_blob"):
+            prompt_parts.append("\n\n## Primary Microscopy Image\n")
+            prompt_parts.append(state["image_blob"])
+        
+        # Add system info
+        system_info = state.get("system_info", {})
+        if system_info:
+            prompt_parts.append(f"\n\n## System Information\n```json\n{json.dumps(system_info, indent=2)}\n```")
+        
+        # Add FFT/NMF results if available
+        components = state.get("fft_components")
+        abundances = state.get("fft_abundances")
+        
         if components is not None:
-            prompt_parts.append("\n\n## NMF Frequency Components\n")
-            for i in range(min(components.shape[0], 6)):  # Limit to 6 components
+            prompt_parts.append("\n\n## FFT/NMF Components\n")
+            for i in range(min(components.shape[0], 6)):
                 comp_bytes = self._array_to_png_bytes(components[i])
                 if comp_bytes:
                     prompt_parts.append(f"\nComponent {i+1} (frequency pattern):\n")
-                    prompt_parts.append({
-                        "mime_type": "image/png",
-                        "data": comp_bytes
-                    })
+                    prompt_parts.append({"mime_type": "image/png", "data": comp_bytes})
         
-        prompt_parts.append("\n\nProvide your analysis as a JSON object following the schema in the instructions.")
+        if abundances is not None:
+            prompt_parts.append("\n\n## Abundance Maps\n")
+            for i in range(min(abundances.shape[0], 6)):
+                abun_bytes = self._array_to_png_bytes(abundances[i])
+                if abun_bytes:
+                    prompt_parts.append(f"\nAbundance Map {i+1}:\n")
+                    prompt_parts.append({"mime_type": "image/png", "data": abun_bytes})
         
-        # Call LLM with retry
+        # Add global FFT if available
+        global_fft = state.get("global_fft_image")
+        if global_fft is not None:
+            fft_bytes = self._array_to_png_bytes(global_fft)
+            if fft_bytes:
+                prompt_parts.append("\n\n## Global FFT\n")
+                prompt_parts.append({"mime_type": "image/png", "data": fft_bytes})
+        
+        prompt_parts.append("\n\nProvide your analysis as a JSON object. Output ONLY the JSON.")
+        
+        # Call LLM
         for attempt in range(self.max_retries):
             try:
                 response = self.model.generate_content(
@@ -1113,71 +1169,207 @@ class ReportGenerationController:
                 result, error = self._parse_llm_response(response)
                 
                 if error:
-                    self.logger.warning(f"LLM parse error (attempt {attempt+1}): {error}")
+                    self.logger.warning(f"Parse error (attempt {attempt+1}): {error}")
                     continue
                 
-                if result and self._validate_analysis(result):
+                if result and "detailed_analysis" in result:
                     self.logger.info("✅ LLM analysis complete")
                     return result
-                else:
-                    self.logger.warning(f"Invalid LLM response structure (attempt {attempt+1})")
                     
             except Exception as e:
-                self.logger.error(f"LLM analysis error (attempt {attempt+1}): {e}")
+                self.logger.error(f"LLM error (attempt {attempt+1}): {e}")
         
         return None
     
-    def _validate_analysis(self, analysis: dict) -> bool:
-        """Check that LLM response has required fields."""
-        required_fields = [
-            "scientific_interpretation",
-            "claims_with_questions"
-        ]
-        return all(field in analysis for field in required_fields)
-    
-    def _generate_fallback_analysis(self, state: dict, stats: dict) -> dict:
-        """Generate template-based analysis if LLM fails."""
-        params = state.get("batch_params", {})
-        n_frames = state.get("n_frames", 0)
-        n_components = params.get("n_components", 4)
-        
-        # Build component interpretations from stats
-        component_interps = []
-        for comp in stats.get("components", []):
-            component_interps.append({
-                "index": comp["index"],
-                "description": f"Component {comp['index']} shows {comp['trend']} trend with {comp['pct_change']:+.1f}% change",
-                "physical_meaning": "Requires expert interpretation of the frequency pattern"
-            })
-        
-        # Build claims from stats
-        claims = []
-        claims.append({
-            "claim": f"The FFT/NMF decomposition identifies {n_components} distinct frequency-domain components in the microscopy series.",
-            "question": "What physical structures or processes correspond to each identified component?",
-            "evidence": "NMF decomposition of sliding-window FFT spectra"
-        })
-        
-        for comp in stats.get("components", []):
-            if comp["trend"] != "stable":
-                claims.append({
-                    "claim": f"Component {comp['index']} exhibits a {comp['trend']} trend ({comp['pct_change']:+.1f}% change over {n_frames} frames).",
-                    "question": f"What mechanism drives the {comp['trend']} abundance of Component {comp['index']}?",
-                    "evidence": f"Linear fit slope: {comp['slope']:.4f}, R² from trend analysis"
-                })
+    def _generate_single_image_fallback(self, state: dict, stats: dict) -> dict:
+        """Generate fallback analysis for single image."""
+        n_comps = stats.get("n_components", 0)
         
         return {
-            "methodology_notes": "Sliding window FFT combined with NMF was used to decompose the image series into frequency-domain components.",
-            "scientific_interpretation": f"Analysis of {n_frames} frames reveals {n_components} distinct structural signatures with varying temporal dynamics.",
-            "component_interpretations": component_interps,
-            "temporal_interpretation": "Temporal trends were computed from spatially-averaged abundance maps.",
-            "visualization_descriptions": [],
-            "claims_with_questions": claims
+            "detailed_analysis": f"FFT/NMF analysis identified {n_comps} frequency components. Manual inspection recommended for detailed interpretation.",
+            "component_interpretations": [
+                {
+                    "index": c["index"],
+                    "spectral_features": "Requires visual inspection",
+                    "physical_meaning": "Requires expert interpretation",
+                    "spatial_distribution": f"Coverage: {c.get('spatial_coverage', 0)*100:.1f}%",
+                    "confidence": "low"
+                }
+                for c in stats.get("components", [])
+            ],
+            "scientific_claims": [{
+                "claim": f"Microscopy image analysis reveals {n_comps} distinct structural frequency components.",
+                "scientific_impact": "Identification of multiple frequency components suggests complex microstructure.",
+                "has_anyone_question": f"Has anyone observed multi-component FFT/NMF decomposition patterns in similar microscopy data?",
+                "keywords": ["microscopy", "FFT", "NMF", "microstructure"]
+            }]
         }
     
-    def _compute_detailed_stats(self, components: Optional[np.ndarray], 
-                                 abundances: Optional[np.ndarray]) -> dict:
-        """Compute detailed statistics for LLM context."""
+    def _convert_claims_to_legacy_format(self, claims: list) -> list:
+        """Convert new claims format to legacy format for backward compatibility."""
+        legacy_claims = []
+        for claim in claims:
+            legacy_claims.append({
+                "claim": claim.get("claim", ""),
+                "scientific_impact": claim.get("scientific_impact", ""),
+                "has_anyone_question": claim.get("has_anyone_question", ""),
+                "keywords": claim.get("keywords", [])
+            })
+        return legacy_claims
+    
+    def _generate_single_image_html(self, state: dict, stats: dict, llm_analysis: dict) -> None:
+        """Generate HTML report for single image (optional)."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        
+        detailed_analysis = llm_analysis.get("detailed_analysis", "")
+        component_interps = llm_analysis.get("component_interpretations", [])
+        claims = llm_analysis.get("scientific_claims", [])
+        
+        html = self._generate_html_header("Single Image Analysis Report", timestamp)
+        
+        html += """
+        <section>
+            <h2>1. Scientific Analysis</h2>
+            <div class="analysis-content">
+                <div class="analysis-subsection">
+                    <h3>1.1 Detailed Analysis</h3>
+                    <p>{}</p>
+                </div>
+                
+                <div class="analysis-subsection">
+                    <h3>1.2 Component Interpretation</h3>
+                    {}
+                </div>
+            </div>
+        </section>
+""".format(detailed_analysis, self._render_component_interpretations(component_interps))
+        
+        # Add images if available
+        html += self._render_single_image_visualizations(state)
+        
+        # Add claims
+        html += self._render_claims_section(claims)
+        
+        html += self._generate_html_footer()
+        
+        report_path = self.output_dir / "analysis_report.html"
+        with open(report_path, 'w') as f:
+            f.write(html)
+        
+        self.logger.info(f"✅ HTML report saved: {report_path}")
+    
+    def _render_single_image_visualizations(self, state: dict) -> str:
+        """Render visualizations section for single image."""
+        html = """
+        <section>
+            <h2>2. Visualizations</h2>
+            <div class="image-grid">
+"""
+        
+        images_added = 0
+        
+        # Primary image
+        if state.get("image_blob"):
+            html += self._render_image_card(
+                state["image_blob"]["data"],
+                "Primary Image",
+                "Original microscopy image"
+            )
+            images_added += 1
+        
+        # Global FFT
+        global_fft = state.get("global_fft_image")
+        if global_fft is not None:
+            fft_bytes = self._array_to_png_bytes(global_fft)
+            if fft_bytes:
+                html += self._render_image_card(
+                    fft_bytes,
+                    "Global FFT",
+                    "Frequency content of the full image"
+                )
+                images_added += 1
+        
+        # Components and abundances
+        components = state.get("fft_components")
+        abundances = state.get("fft_abundances")
+        
+        if components is not None:
+            for i in range(min(components.shape[0], 4)):
+                comp_bytes = self._array_to_png_bytes(components[i])
+                if comp_bytes:
+                    html += self._render_image_card(
+                        comp_bytes,
+                        f"Component {i+1}",
+                        "NMF frequency pattern"
+                    )
+                    images_added += 1
+        
+        if abundances is not None:
+            for i in range(min(abundances.shape[0], 4)):
+                abun_bytes = self._array_to_png_bytes(abundances[i])
+                if abun_bytes:
+                    html += self._render_image_card(
+                        abun_bytes,
+                        f"Abundance {i+1}",
+                        "Spatial distribution of component"
+                    )
+                    images_added += 1
+        
+        if images_added == 0:
+            html += '<p style="color: #7f8c8d; font-style: italic;">No visualizations available.</p>'
+        
+        html += """
+            </div>
+        </section>
+"""
+        return html
+    
+    # =========================================================================
+    # SERIES MODE
+    # =========================================================================
+    
+    def _execute_series_mode(self, state: dict) -> dict:
+        """Execute series analysis and report generation."""
+        self.logger.info("🔬 Processing series analysis...")
+        
+        # Compute statistics
+        stats = self._compute_series_stats(
+            state.get("series_components"),
+            state.get("series_abundances")
+        )
+        
+        # Load visualizations
+        visualizations = self._load_visualizations()
+        
+        # Optional feedback loop
+        if self.enable_human_feedback:
+            state = self._run_feedback_loop(state, stats, visualizations)
+            if state.get("report_cancelled"):
+                return state
+        
+        # Get LLM analysis
+        llm_analysis = self._get_series_llm_analysis(state, stats, visualizations)
+        
+        if llm_analysis is None:
+            self.logger.warning("LLM analysis failed, using fallback")
+            llm_analysis = self._generate_series_fallback(state, stats)
+        
+        # Generate HTML report
+        self._generate_series_html(state, stats, visualizations, llm_analysis)
+        
+        # Store in state
+        state["llm_report_analysis"] = llm_analysis
+        state["result_json"] = {
+            "detailed_analysis": llm_analysis.get("detailed_analysis", ""),
+            "scientific_claims": llm_analysis.get("scientific_claims", [])
+        }
+        
+        self.logger.info("✅ Series analysis complete")
+        return state
+    
+    def _compute_series_stats(self, components: Optional[np.ndarray], 
+                               abundances: Optional[np.ndarray]) -> dict:
+        """Compute statistics for series analysis."""
         stats = {
             "components": [],
             "correlations": [],
@@ -1189,38 +1381,28 @@ class ReportGenerationController:
         
         n_frames = abundances.shape[0]
         n_comps = abundances.shape[1]
-        mean_abundances = abundances.mean(axis=(2, 3))  # (n_frames, n_comps)
+        mean_abundances = abundances.mean(axis=(2, 3))
         
         for i in range(n_comps):
             ts = mean_abundances[:, i]
             
-            # Linear fit
             slope, intercept = np.polyfit(range(len(ts)), ts, 1)
             y_pred = slope * np.arange(len(ts)) + intercept
             ss_res = np.sum((ts - y_pred) ** 2)
             ss_tot = np.sum((ts - np.mean(ts)) ** 2)
             r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
             
-            # Trend direction
-            if slope > 0.001:
-                trend_dir = "increasing"
-            elif slope < -0.001:
-                trend_dir = "decreasing"
-            else:
-                trend_dir = "stable"
-            
-            # Percent change
             pct_change = ((ts[-1] - ts[0]) / ts[0]) * 100 if ts[0] != 0 else 0
             
-            # Periodicity detection
-            period, has_periodicity = None, False
+            period, periodicity_strength = None, 0
             if len(ts) > 4:
                 fft_mag = np.abs(np.fft.fft(ts - ts.mean()))
                 half_len = len(ts) // 2
                 if half_len > 1:
                     dominant_idx = np.argmax(fft_mag[1:half_len]) + 1
                     period = n_frames / dominant_idx if dominant_idx > 0 else None
-                    has_periodicity = bool(fft_mag[dominant_idx] > 2.5 * np.mean(fft_mag[1:half_len]))
+                    mean_mag = np.mean(fft_mag[1:half_len])
+                    periodicity_strength = float(fft_mag[dominant_idx] / mean_mag) if mean_mag > 0 else 0
             
             stats["components"].append({
                 "index": i + 1,
@@ -1230,13 +1412,11 @@ class ReportGenerationController:
                 "max": float(np.max(ts)),
                 "slope": float(slope),
                 "r_squared": float(r_squared),
-                "trend": trend_dir,
                 "pct_change": float(pct_change),
-                "has_periodicity": has_periodicity,
+                "periodicity_strength": float(periodicity_strength),
                 "period_frames": float(period) if period else None
             })
         
-        # Correlations
         if n_comps > 1:
             corr_matrix = np.corrcoef(mean_abundances.T)
             for i in range(n_comps):
@@ -1248,81 +1428,305 @@ class ReportGenerationController:
         
         return stats
     
-    def _load_visualizations(self) -> list:
-        """Load PNG visualizations from output directory."""
-        visualizations = []
+    def _get_series_llm_analysis(self, state: dict, stats: dict, 
+                                  visualizations: list) -> Optional[dict]:
+        """Get LLM analysis for series."""
+        self.logger.info("🧠 LLM analyzing series...")
         
-        png_files = sorted(self.output_dir.glob("*.png"))
-        for png_path in png_files:
-            # Skip review iterations
-            if png_path.name.startswith("review_iteration"):
-                continue
-            
+        params = state.get("batch_params", {})
+        
+        prompt_parts = [SERIES_ANALYSIS_INSTRUCTIONS]
+        
+        context = {
+            "n_frames": state.get("n_frames", 0),
+            "n_components": params.get("n_components", len(stats.get("components", []))),
+            "window_size_nm": params.get("window_size_nm", "auto"),
+            "component_statistics": stats.get("components", []),
+            "correlations": stats.get("correlations", []),
+            "system_info": state.get("system_info", {})
+        }
+        
+        prompt_parts.append(f"\n\n## Analysis Context\n```json\n{json.dumps(context, indent=2)}\n```")
+        
+        prompt_parts.append("\n\n## Visualizations\n")
+        for viz in visualizations:
+            prompt_parts.append(f"\n### {viz['name']}\n")
+            prompt_parts.append({"mime_type": "image/png", "data": viz["data"]})
+        
+        components = state.get("series_components")
+        if components is not None:
+            prompt_parts.append("\n\n## NMF Frequency Components\n")
+            for i in range(min(components.shape[0], 6)):
+                comp_bytes = self._array_to_png_bytes(components[i])
+                if comp_bytes:
+                    prompt_parts.append(f"\nComponent {i+1}:\n")
+                    prompt_parts.append({"mime_type": "image/png", "data": comp_bytes})
+        
+        prompt_parts.append("\n\nProvide your analysis as a JSON object. Output ONLY the JSON.")
+        
+        for attempt in range(self.max_retries):
             try:
-                with open(png_path, 'rb') as f:
-                    b64 = base64.b64encode(f.read()).decode('utf-8')
-                    visualizations.append({
-                        "name": png_path.stem,
-                        "path": str(png_path),
-                        "data": b64
-                    })
+                response = self.model.generate_content(
+                    contents=prompt_parts,
+                    generation_config=self.generation_config,
+                    safety_settings=self.safety_settings,
+                )
+                
+                result, error = self._parse_llm_response(response)
+                
+                if error:
+                    self.logger.warning(f"Parse error (attempt {attempt+1}): {error}")
+                    continue
+                
+                if result and "detailed_analysis" in result:
+                    self.logger.info("✅ LLM analysis complete")
+                    return result
+                    
             except Exception as e:
-                self.logger.warning(f"Failed to load {png_path}: {e}")
+                self.logger.error(f"LLM error (attempt {attempt+1}): {e}")
         
-        return visualizations
+        return None
     
-    def _array_to_png_bytes(self, array: np.ndarray) -> Optional[str]:
-        """Convert numpy array to base64 PNG string."""
-        try:
-            import matplotlib
-            matplotlib.use('Agg')
-            import matplotlib.pyplot as plt
-            import io
-            
-            fig, ax = plt.subplots(figsize=(4, 4))
-            ax.imshow(array, cmap='viridis')
-            ax.axis('off')
-            
-            buf = io.BytesIO()
-            plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1, dpi=100)
-            plt.close(fig)
-            
-            buf.seek(0)
-            return base64.b64encode(buf.read()).decode('utf-8')
-        except Exception as e:
-            self.logger.warning(f"Failed to convert array to PNG: {e}")
-            return None
+    def _generate_series_fallback(self, state: dict, stats: dict) -> dict:
+        """Generate fallback analysis for series."""
+        n_frames = state.get("n_frames", 0)
+        n_comps = len(stats.get("components", []))
+        
+        return {
+            "methodology_notes": "Sliding window FFT with NMF decomposition.",
+            "detailed_analysis": f"Analysis of {n_frames} frames identified {n_comps} components. Manual inspection recommended.",
+            "component_interpretations": [
+                {
+                    "index": c["index"],
+                    "spectral_features": "Requires visual inspection",
+                    "physical_meaning": "Requires expert interpretation",
+                    "temporal_behavior": f"Change: {c.get('pct_change', 0):+.1f}%",
+                    "confidence": "low"
+                }
+                for c in stats.get("components", [])
+            ],
+            "temporal_interpretation": "See component statistics for quantitative trends.",
+            "visualization_descriptions": [],
+            "scientific_claims": [{
+                "claim": f"Time-series FFT/NMF analysis of {n_frames} microscopy frames reveals {n_comps} distinct evolving structural components.",
+                "scientific_impact": "Temporal decomposition enables tracking of structural dynamics.",
+                "has_anyone_question": f"Has anyone performed FFT/NMF decomposition on in-situ microscopy time-series to track structural evolution?",
+                "keywords": ["in-situ microscopy", "FFT", "NMF", "time-series", "structural dynamics"]
+            }]
+        }
     
-    def _generate_report(self, state: dict, stats: dict, 
-                         visualizations: list, llm_analysis: dict) -> None:
-        """Generate HTML report from LLM analysis."""
+    def _generate_series_html(self, state: dict, stats: dict, 
+                               visualizations: list, llm_analysis: dict) -> None:
+        """Generate HTML report for series analysis."""
         params = state.get("batch_params", {})
         n_frames = state.get("n_frames", 0)
-        n_components = params.get("n_components", 4)
+        n_components = params.get("n_components", len(stats.get("components", [])))
         window_size_nm = params.get("window_size_nm", "auto")
         window_size_px = params.get("window_size_pixels", "auto")
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         
-        # Extract LLM analysis fields
         methodology = llm_analysis.get("methodology_notes", "")
-        interpretation = llm_analysis.get("scientific_interpretation", "")
+        detailed_analysis = llm_analysis.get("detailed_analysis", "")
         component_interps = llm_analysis.get("component_interpretations", [])
         temporal_interp = llm_analysis.get("temporal_interpretation", "")
         viz_descriptions = {v.get("name", ""): v.get("description", "") 
                           for v in llm_analysis.get("visualization_descriptions", [])}
-        claims_questions = llm_analysis.get("claims_with_questions", [])
+        claims = llm_analysis.get("scientific_claims", [])
         
-        html = f"""<!DOCTYPE html>
+        html = self._generate_html_header("FFT/NMF Series Analysis Report", timestamp)
+        
+        # Scientific Analysis section
+        html += f"""
+        <section>
+            <h2>1. Scientific Analysis</h2>
+            <div class="analysis-content">
+                
+                <div class="analysis-subsection">
+                    <h3>1.1 Methodology</h3>
+                    <p>{methodology if methodology else self._default_methodology()}</p>
+                    <table class="param-table">
+                        <tr><th>Parameter</th><th>Value</th></tr>
+                        <tr><td>Frames Analyzed</td><td><strong>{n_frames}</strong></td></tr>
+                        <tr><td>NMF Components</td><td><strong>{n_components}</strong></td></tr>
+                        <tr><td>Window Size</td><td><strong>{window_size_nm} nm</strong> ({window_size_px} px)</td></tr>
+                    </table>
+                </div>
+                
+                <div class="analysis-subsection">
+                    <h3>1.2 Detailed Analysis</h3>
+                    <p>{detailed_analysis}</p>
+                </div>
+                
+                <div class="analysis-subsection">
+                    <h3>1.3 Component Interpretation</h3>
+                    {self._render_component_interpretations(component_interps)}
+                </div>
+                
+                <div class="analysis-subsection">
+                    <h3>1.4 Temporal Dynamics</h3>
+                    <p>{temporal_interp if temporal_interp else "See component analysis for temporal details."}</p>
+                </div>
+                
+            </div>
+        </section>
+"""
+        
+        # Visualizations section
+        html += """
+        <section>
+            <h2>2. Visualizations</h2>
+            <div class="image-grid">
+"""
+        
+        for viz in visualizations:
+            name = viz["name"]
+            display_name = name.replace('_', ' ').replace('-', ' ').title()
+            description = viz_descriptions.get(name, "Analysis visualization from FFT/NMF processing.")
+            html += self._render_image_card(viz["data"], display_name, description)
+        
+        if not visualizations:
+            html += '<p style="color: #7f8c8d; font-style: italic;">No visualizations available.</p>'
+        
+        html += """
+            </div>
+        </section>
+"""
+        
+        # Claims section
+        html += self._render_claims_section(claims)
+        
+        html += self._generate_html_footer()
+        
+        report_path = self.output_dir / "analysis_report.html"
+        with open(report_path, 'w') as f:
+            f.write(html)
+        
+        self.logger.info(f"✅ Report saved: {report_path}")
+        print(f"\n📊 Report: {report_path}")
+    
+    # =========================================================================
+    # HUMAN FEEDBACK LOOP
+    # =========================================================================
+    
+    def _run_feedback_loop(self, state: dict, stats: dict, visualizations: list) -> dict:
+        """Human-in-the-loop review before final report generation."""
+        self.logger.info("\n\n👤 --- REPORT REVIEW LOOP --- 👤\n")
+        
+        iteration = 0
+        while iteration < self.max_refinement_iterations:
+            iteration += 1
+            
+            self._display_results_for_review(state, stats, visualizations, iteration)
+            
+            feedback = self._collect_human_feedback()
+            
+            if feedback["action"] == "accept":
+                self.logger.info("✅ User accepted results.")
+                break
+            elif feedback["action"] == "get_assessment":
+                assessment = self._get_llm_preliminary_assessment(state, stats, visualizations)
+                self._display_llm_assessment(assessment)
+            elif feedback["action"] == "cancel":
+                self.logger.info("❌ User cancelled.")
+                state["report_cancelled"] = True
+                return state
+        
+        return state
+    
+    def _display_results_for_review(self, state: dict, stats: dict, 
+                                     visualizations: list, iteration: int) -> None:
+        """Display results for human review."""
+        params = state.get("batch_params", {})
+        n_frames = state.get("n_frames", 0)
+        
+        print("\n" + "=" * 80)
+        print(f"🔬 ANALYSIS REVIEW - Iteration {iteration}")
+        print("=" * 80)
+        
+        print(f"\n🖼️  Visualizations: {self.output_dir}")
+        for viz in visualizations[:5]:
+            print(f"   - {viz['name']}.png")
+        
+        print(f"\n📊 Summary:")
+        print(f"   - Frames: {n_frames}")
+        print(f"   - Components: {params.get('n_components', len(stats.get('components', [])))}")
+        
+        print(f"\n📈 Component Statistics:")
+        for comp in stats.get("components", []):
+            print(f"   C{comp['index']}: mean={comp['mean']:.4f}, change={comp['pct_change']:+.1f}%")
+        
+        print("-" * 80)
+    
+    def _collect_human_feedback(self) -> dict:
+        """Collect human feedback."""
+        print("\n👤 Options:")
+        print("   [1] Accept and generate report")
+        print("   [2] Get LLM assessment")
+        print("   [c] Cancel")
+        
+        try:
+            choice = input("\nChoice [1/2/c]: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            return {"action": "accept"}
+        
+        if choice == '1' or choice == '':
+            return {"action": "accept"}
+        elif choice == '2':
+            return {"action": "get_assessment"}
+        elif choice == 'c':
+            return {"action": "cancel"}
+        else:
+            return {"action": "accept"}
+    
+    def _get_llm_preliminary_assessment(self, state: dict, stats: dict, 
+                                         visualizations: list) -> dict:
+        """Get quick LLM assessment."""
+        prompt_parts = [
+            "Briefly assess these FFT/NMF results.",
+            f"\n\nStatistics:\n```json\n{json.dumps(stats, indent=2)}\n```"
+        ]
+        
+        for viz in visualizations[:3]:
+            prompt_parts.append({"mime_type": "image/png", "data": viz["data"]})
+        
+        prompt_parts.append("""
+Return JSON: {"quality": "good/moderate/poor", "observations": ["..."], "issues": ["..."]}""")
+        
+        try:
+            response = self.model.generate_content(
+                contents=prompt_parts,
+                generation_config=self.generation_config,
+                safety_settings=self.safety_settings,
+            )
+            result, _ = self._parse_llm_response(response)
+            return result or {"quality": "unknown", "observations": [], "issues": []}
+        except Exception as e:
+            return {"quality": "error", "observations": [], "issues": [str(e)]}
+    
+    def _display_llm_assessment(self, assessment: dict) -> None:
+        """Display LLM assessment."""
+        print(f"\n🤖 LLM Assessment: {assessment.get('quality', 'N/A')}")
+        for obs in assessment.get("observations", []):
+            print(f"   • {obs}")
+        for issue in assessment.get("issues", []):
+            print(f"   ⚠️ {issue}")
+        print("-" * 80)
+    
+    # =========================================================================
+    # HTML HELPERS
+    # =========================================================================
+    
+    def _generate_html_header(self, title: str, timestamp: str) -> str:
+        """Generate HTML header with CSS."""
+        return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FFT/NMF Analysis Report</title>
+    <title>{title}</title>
     <style>
-        * {{
-            box-sizing: border-box;
-        }}
+        * {{ box-sizing: border-box; }}
         body {{
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             line-height: 1.7;
@@ -1344,14 +1748,8 @@ class ReportGenerationController:
             padding-bottom: 20px;
             border-bottom: 2px solid #9b59b6;
         }}
-        h1 {{
-            color: #2c3e50;
-            margin-bottom: 10px;
-        }}
-        .timestamp {{
-            color: #7f8c8d;
-            font-size: 0.9em;
-        }}
+        h1 {{ color: #2c3e50; margin-bottom: 10px; }}
+        .timestamp {{ color: #7f8c8d; font-size: 0.9em; }}
         h2 {{
             color: #8e44ad;
             margin-top: 40px;
@@ -1359,14 +1757,7 @@ class ReportGenerationController:
             padding-bottom: 10px;
             border-bottom: 1px solid #e0e0e0;
         }}
-        h3 {{
-            color: #5b2c6f;
-            margin-top: 25px;
-            margin-bottom: 15px;
-            font-size: 1.1em;
-        }}
-        
-        /* Scientific Analysis Section */
+        h3 {{ color: #5b2c6f; margin-top: 25px; margin-bottom: 15px; font-size: 1.1em; }}
         .analysis-content {{
             background-color: #fafafa;
             padding: 25px 30px;
@@ -1374,20 +1765,13 @@ class ReportGenerationController:
             border: 1px solid #eee;
             font-size: 0.95em;
         }}
-        .analysis-content p {{
-            margin-bottom: 15px;
-            text-align: justify;
-        }}
+        .analysis-content p {{ margin-bottom: 15px; text-align: justify; }}
         .analysis-subsection {{
             margin-top: 25px;
             padding-top: 20px;
             border-top: 1px dashed #ddd;
         }}
-        .analysis-subsection:first-of-type {{
-            margin-top: 0;
-            padding-top: 0;
-            border-top: none;
-        }}
+        .analysis-subsection:first-of-type {{ margin-top: 0; padding-top: 0; border-top: none; }}
         .param-table {{
             width: 100%;
             border-collapse: collapse;
@@ -1399,54 +1783,40 @@ class ReportGenerationController:
             text-align: left;
             border-bottom: 1px solid #eee;
         }}
-        .param-table th {{
-            background-color: #f5eef8;
-            color: #5b2c6f;
-            font-weight: 600;
-        }}
-        .component-interpretation {{
-            background: linear-gradient(135deg, #f5eef8 0%, #fafafa 100%);
-            padding: 15px 20px;
-            border-radius: 8px;
+        .param-table th {{ background-color: #f5eef8; color: #5b2c6f; font-weight: 600; }}
+        .component-card {{
+            background: #fff;
+            border: 1px solid #e0e0e0;
             border-left: 4px solid #9b59b6;
-            margin-bottom: 15px;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
         }}
-        .component-interpretation h4 {{
-            margin: 0 0 10px 0;
-            color: #5b2c6f;
-        }}
-        .component-interpretation .physical-meaning {{
-            font-style: italic;
-            color: #666;
-            margin-top: 8px;
-            padding-top: 8px;
-            border-top: 1px dashed #ddd;
-        }}
-        .trend-badge {{
-            display: inline-block;
-            padding: 2px 10px;
+        .component-card h4 {{ margin: 0 0 15px 0; color: #5b2c6f; display: flex; align-items: center; gap: 10px; }}
+        .confidence-badge {{
+            font-size: 0.75em;
+            padding: 3px 10px;
             border-radius: 12px;
-            font-size: 0.8em;
             font-weight: 600;
-            margin-left: 10px;
+            text-transform: uppercase;
         }}
-        .trend-increasing {{
-            background-color: #d5f5e3;
-            color: #1e8449;
+        .confidence-high {{ background-color: #d5f5e3; color: #1e8449; }}
+        .confidence-medium {{ background-color: #fef9e7; color: #9a7b0a; }}
+        .confidence-low {{ background-color: #fadbd8; color: #922b21; }}
+        .component-section {{ margin-bottom: 12px; }}
+        .component-section-title {{
+            font-weight: 600;
+            color: #666;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 5px;
         }}
-        .trend-decreasing {{
-            background-color: #fadbd8;
-            color: #922b21;
-        }}
-        .trend-stable {{
-            background-color: #ebf5fb;
-            color: #2471a3;
-        }}
-        
-        /* Visualizations Section */
+        .component-section p {{ margin: 0; color: #333; }}
         .image-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
             gap: 25px;
             margin-top: 20px;
         }}
@@ -1457,30 +1827,12 @@ class ReportGenerationController:
             overflow: hidden;
             box-shadow: 0 2px 5px rgba(0,0,0,0.05);
         }}
-        .image-card img {{
-            width: 100%;
-            height: auto;
-            display: block;
-        }}
-        .image-info {{
-            padding: 15px 20px;
-            border-top: 1px solid #eee;
-        }}
-        .image-label {{
-            font-weight: 600;
-            color: #2c3e50;
-            font-size: 1em;
-            margin-bottom: 8px;
-        }}
-        .image-description {{
-            font-size: 0.9em;
-            color: #666;
-            line-height: 1.6;
-        }}
-        
-        /* Claims & Questions Section */
+        .image-card img {{ width: 100%; height: auto; display: block; }}
+        .image-info {{ padding: 15px 20px; border-top: 1px solid #eee; }}
+        .image-label {{ font-weight: 600; color: #2c3e50; font-size: 1em; margin-bottom: 8px; }}
+        .image-description {{ font-size: 0.9em; color: #666; line-height: 1.6; }}
         .claim-block {{
-            margin-bottom: 25px;
+            margin-bottom: 30px;
             border-radius: 8px;
             overflow: hidden;
             box-shadow: 0 2px 5px rgba(0,0,0,0.05);
@@ -1490,12 +1842,7 @@ class ReportGenerationController:
             padding: 20px 25px;
             border-left: 5px solid #1abc9c;
         }}
-        .claim-header {{
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 10px;
-        }}
+        .claim-header {{ display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }}
         .claim-number {{
             display: inline-flex;
             align-items: center;
@@ -1507,24 +1854,16 @@ class ReportGenerationController:
             border-radius: 50%;
             font-size: 0.85em;
             font-weight: bold;
-            flex-shrink: 0;
         }}
-        .claim-title {{
-            font-weight: 600;
-            color: #0e6655;
-            font-size: 1em;
-        }}
-        .claim-text {{
-            color: #1a5246;
-            font-size: 0.95em;
-            margin-left: 40px;
-        }}
-        .claim-evidence {{
-            font-size: 0.85em;
+        .claim-title {{ font-weight: 600; color: #0e6655; font-size: 1em; }}
+        .claim-text {{ color: #1a5246; font-size: 0.95em; margin-left: 40px; }}
+        .claim-impact {{
+            font-size: 0.9em;
             color: #148f77;
             margin-left: 40px;
-            margin-top: 8px;
-            font-style: italic;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px dashed #a3e4d7;
         }}
         .question-content {{
             background-color: #fef9e7;
@@ -1549,12 +1888,18 @@ class ReportGenerationController:
             letter-spacing: 0.5px;
             margin-bottom: 5px;
         }}
-        .question-text {{
+        .question-text {{ color: #7d6608; font-size: 0.95em; }}
+        .keywords {{ margin-top: 10px; padding-top: 10px; border-top: 1px dashed #f9e79f; }}
+        .keyword-tag {{
+            display: inline-block;
+            background-color: #fcf3cf;
             color: #7d6608;
-            font-size: 0.95em;
+            padding: 3px 10px;
+            border-radius: 15px;
+            font-size: 0.8em;
+            margin-right: 5px;
+            margin-bottom: 5px;
         }}
-        
-        /* Footer */
         .footer {{
             margin-top: 50px;
             text-align: center;
@@ -1568,158 +1913,160 @@ class ReportGenerationController:
 <body>
     <div class="container">
         <header>
-            <h1>🔬 FFT/NMF Series Analysis Report</h1>
+            <h1>🔬 {title}</h1>
             <p class="timestamp">Generated: {timestamp}</p>
         </header>
-
-        <section>
-            <h2>1. Scientific Analysis</h2>
-            <div class="analysis-content">
-                
-                <div class="analysis-subsection">
-                    <h3>1.1 Methodology</h3>
-                    <p>{methodology if methodology else self._default_methodology()}</p>
-                    <table class="param-table">
-                        <tr>
-                            <th>Parameter</th>
-                            <th>Value</th>
-                        </tr>
-                        <tr>
-                            <td>Total Frames Analyzed</td>
-                            <td><strong>{n_frames}</strong></td>
-                        </tr>
-                        <tr>
-                            <td>NMF Components</td>
-                            <td><strong>{n_components}</strong></td>
-                        </tr>
-                        <tr>
-                            <td>Window Size</td>
-                            <td><strong>{window_size_nm} nm</strong> ({window_size_px} px)</td>
-                        </tr>
-                    </table>
-                </div>
-                
-                <div class="analysis-subsection">
-                    <h3>1.2 Key Findings</h3>
-                    <p>{interpretation}</p>
-                </div>
-                
-                <div class="analysis-subsection">
-                    <h3>1.3 Component Interpretation</h3>
-                    {self._render_component_interpretations(component_interps, stats)}
-                </div>
-                
-                <div class="analysis-subsection">
-                    <h3>1.4 Temporal Dynamics</h3>
-                    <p>{temporal_interp if temporal_interp else "See component analysis above for temporal trends."}</p>
-                </div>
-                
-            </div>
-        </section>
-
-        <section>
-            <h2>2. Visualizations</h2>
-            <div class="image-grid">
 """
-        
-        # Add visualizations with LLM descriptions
-        for viz in visualizations:
-            name = viz["name"]
-            display_name = name.replace('_', ' ').replace('-', ' ').title()
-            description = viz_descriptions.get(name, "Analysis visualization from FFT/NMF processing.")
-            
-            html += f"""                <div class="image-card">
-                    <img src="data:image/png;base64,{viz['data']}" alt="{name}" loading="lazy">
+    
+    def _generate_html_footer(self) -> str:
+        """Generate HTML footer."""
+        return """
+        <div class="footer">
+            Generated by Microscopy Analysis Agent
+        </div>
+    </div>
+</body>
+</html>
+"""
+    
+    def _render_image_card(self, image_data: str, title: str, description: str) -> str:
+        """Render a single image card."""
+        return f"""
+                <div class="image-card">
+                    <img src="data:image/png;base64,{image_data}" alt="{title}" loading="lazy">
                     <div class="image-info">
-                        <div class="image-label">{display_name}</div>
+                        <div class="image-label">{title}</div>
                         <div class="image-description">{description}</div>
                     </div>
                 </div>
 """
+    
+    def _render_component_interpretations(self, interps: list) -> str:
+        """Render component interpretation cards."""
+        if not interps:
+            return "<p>No component interpretations available.</p>"
         
-        if not visualizations:
-            html += """                <p style="color: #7f8c8d; font-style: italic; padding: 20px;">No visualizations available.</p>
+        html = ""
+        for interp in interps:
+            idx = interp.get("index", "?")
+            confidence = interp.get("confidence", "medium").lower()
+            confidence_class = f"confidence-{confidence}" if confidence in ["high", "medium", "low"] else "confidence-medium"
+            
+            html += f"""
+                <div class="component-card">
+                    <h4>
+                        Component {idx}
+                        <span class="confidence-badge {confidence_class}">{confidence}</span>
+                    </h4>
 """
+            
+            for field, title in [
+                ("spectral_features", "Spectral Features"),
+                ("physical_meaning", "Physical Interpretation"),
+                ("temporal_behavior", "Temporal Behavior"),
+                ("spatial_distribution", "Spatial Distribution")
+            ]:
+                value = interp.get(field, "")
+                if value:
+                    html += f"""
+                    <div class="component-section">
+                        <div class="component-section-title">{title}</div>
+                        <p>{value}</p>
+                    </div>
+"""
+            
+            html += "                </div>\n"
         
-        html += """            </div>
-        </section>
-
+        return html
+    
+    def _render_claims_section(self, claims: list) -> str:
+        """Render the claims and questions section."""
+        html = """
         <section>
-            <h2>3. Research Claims & Questions</h2>
+            <h2>3. Scientific Claims & Research Questions</h2>
 """
         
-        # Add claims with questions
-        for i, item in enumerate(claims_questions, 1):
-            claim = item.get("claim", "")
-            question = item.get("question", "")
-            evidence = item.get("evidence", "")
+        for i, claim_data in enumerate(claims, 1):
+            claim = claim_data.get("claim", "")
+            impact = claim_data.get("scientific_impact", "")
+            question = claim_data.get("has_anyone_question", "")
+            keywords = claim_data.get("keywords", [])
             
-            evidence_html = f'<p class="claim-evidence">Evidence: {evidence}</p>' if evidence else ""
+            keywords_html = ""
+            if keywords:
+                keywords_html = '<div class="keywords"><strong>Keywords:</strong> '
+                keywords_html += " ".join([f'<span class="keyword-tag">{kw}</span>' for kw in keywords])
+                keywords_html += "</div>"
             
-            html += f"""            <div class="claim-block">
+            html += f"""
+            <div class="claim-block">
                 <div class="claim-content">
                     <div class="claim-header">
                         <span class="claim-number">{i}</span>
                         <span class="claim-title">Scientific Claim</span>
                     </div>
                     <p class="claim-text">{claim}</p>
-                    {evidence_html}
+                    <p class="claim-impact"><strong>Scientific Impact:</strong> {impact}</p>
                 </div>
                 <div class="question-content">
-                    <div class="question-label">Follow-up Research Question</div>
+                    <div class="question-label">Research Question</div>
                     <p class="question-text">{question}</p>
+                    {keywords_html}
                 </div>
             </div>
 """
         
-        html += """        </section>
-
-        <div class="footer">
-            Generated by FFT/NMF Series Analysis Agent (LLM-Analyzed)
-        </div>
-    </div>
-</body>
-</html>
-"""
-        
-        report_path = self.output_dir / "analysis_report.html"
-        with open(report_path, 'w') as f:
-            f.write(html)
-        
-        self.logger.info(f"✅ Report saved: {report_path}")
-        print(f"\n📊 Report: {report_path}")
+        html += "        </section>\n"
+        return html
     
     def _default_methodology(self) -> str:
-        return ("This analysis employs Sliding Window Fast Fourier Transform (FFT) combined with "
-                "Non-negative Matrix Factorization (NMF) to decompose microscopy image series into "
-                "interpretable frequency-domain components. The sliding window approach captures local "
-                "periodic structures, while NMF identifies recurring spectral patterns across the dataset.")
+        """Default methodology text."""
+        return ("Sliding Window FFT combined with Non-negative Matrix Factorization (NMF) "
+                "was used to decompose the microscopy data into frequency-domain components.")
     
-    def _render_component_interpretations(self, interps: list, stats: dict) -> str:
-        """Render component interpretations with statistics."""
-        if not interps:
-            return "<p>No component interpretations available.</p>"
+    # =========================================================================
+    # UTILITY METHODS
+    # =========================================================================
+    
+    def _load_visualizations(self) -> list:
+        """Load PNG visualizations from output directory."""
+        visualizations = []
         
-        # Create lookup for stats
-        stats_lookup = {c["index"]: c for c in stats.get("components", [])}
-        
-        html = ""
-        for interp in interps:
-            idx = interp.get("index", 0)
-            desc = interp.get("description", "")
-            meaning = interp.get("physical_meaning", "")
+        for png_path in sorted(self.output_dir.glob("*.png")):
+            if png_path.name.startswith("review_iteration"):
+                continue
             
-            # Get trend from stats
-            comp_stats = stats_lookup.get(idx, {})
-            trend = comp_stats.get("trend", "stable")
-            trend_class = f"trend-{trend}"
-            
-            html += f"""
-                <div class="component-interpretation">
-                    <h4>Component {idx} <span class="trend-badge {trend_class}">{trend.upper()}</span></h4>
-                    <p>{desc}</p>
-                    <p class="physical-meaning"><strong>Physical interpretation:</strong> {meaning}</p>
-                </div>
-"""
+            try:
+                with open(png_path, 'rb') as f:
+                    b64 = base64.b64encode(f.read()).decode('utf-8')
+                    visualizations.append({
+                        "name": png_path.stem,
+                        "path": str(png_path),
+                        "data": b64
+                    })
+            except Exception as e:
+                self.logger.warning(f"Failed to load {png_path}: {e}")
         
-        return html
+        return visualizations
+    
+    def _array_to_png_bytes(self, array: np.ndarray) -> Optional[str]:
+        """Convert numpy array to base64 PNG."""
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            import io
+            
+            fig, ax = plt.subplots(figsize=(4, 4))
+            ax.imshow(array, cmap='viridis')
+            ax.axis('off')
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1, dpi=100)
+            plt.close(fig)
+            
+            buf.seek(0)
+            return base64.b64encode(buf.read()).decode('utf-8')
+        except Exception as e:
+            self.logger.warning(f"Array to PNG failed: {e}")
+            return None
