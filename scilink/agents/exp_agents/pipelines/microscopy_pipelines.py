@@ -1,103 +1,294 @@
 """
-Microscopy Analysis Pipeline Factories.
+Microscopy Analysis Pipelines - Unified Architecture
 
-Updated to include LLM-based ReportGenerationController.
+Factory functions for creating microscopy analysis pipelines.
+All analysis now uses a single unified pipeline that handles both
+single images (n=1) and batches (n>1) identically.
 """
 
+import logging
+from typing import Callable, List, Optional
+
 from ..controllers.microscopy_controllers import (
-    GetFFTParamsController,
-    RunFFTNMFController,
-    RunGlobalFFTController,
-    BuildFFTNMFPromptController,
-    FinalLLMAnalysisController,
-    SeriesLoaderController,
-    FirstFrameAnalysisController,
-    UserFeedbackController,
-    SeriesBatchController,
-    SummaryScriptController,
-    ReportGenerationController  # Now requires model + LLM params
+    # Unified pipeline controllers
+    InitialFFTAnalysisController,
+    HumanFeedbackRefinementController,
+    UnifiedBatchProcessingController,
+    ConditionalCustomAnalysisController,
+    UnifiedSynthesisController,
+    UnifiedReportGenerationController,
 )
 
 
-def create_fftnmf_pipeline(model, logger, generation_config, safety_settings, settings, parse_fn, store_fn):
-    """Create single-image FFT/NMF pipeline."""
-    return [
-        GetFFTParamsController(model, logger, generation_config, safety_settings),
-        RunGlobalFFTController(logger, settings),
-        RunFFTNMFController(logger, settings),
-        BuildFFTNMFPromptController(logger),
-        FinalLLMAnalysisController(model, logger, generation_config, safety_settings, parse_fn, store_fn),
-    ]
-
-
-def create_series_pipeline(model, logger, generation_config, safety_settings, settings, 
-                           parse_fn, feedback_callback=None):
+def create_unified_microscopy_pipeline(
+    model,
+    logger: logging.Logger,
+    generation_config,
+    safety_settings,
+    settings: dict,
+    parse_fn: Callable,
+    store_fn: Callable,
+    preset_params: Optional[dict] = None
+) -> List:
     """
-    Create series analysis pipeline with feedback, script generation, and LLM-analyzed HTML report.
+    Factory function to create the unified microscopy analysis pipeline.
     
-    Updated: ReportGenerationController now takes model and LLM parameters for 
-    scientific interpretation of results.
+    This pipeline handles BOTH single images and batches:
+    
+    1. Initial FFT Analysis (on first image)
+       - Gets LLM parameter suggestions
+       - Runs FFT/NMF on first frame
+       - Skipped if preset_params provided
+       
+    2. Human Feedback Refinement (optional)
+       - Refines FFT/NMF parameters on the first image
+       - Skipped if enable_human_feedback=False or preset_params provided
+       
+    3. Batch Processing
+       - Processes ALL images (including single images as n=1)
+       - Caches FFT/NMF analyzer for efficiency
+       
+    4. Conditional Custom Analysis
+       - For n>=2: Generates and executes trend analysis script
+       - For n=1: Skipped (no trends to analyze)
+       
+    5. Synthesis
+       - For n>=2: Cross-image synthesis of findings
+       - For n=1: Single-image scientific interpretation
+       
+    6. Report Generation
+       - Generates HTML report and JSON summary
+       - Adapts format based on single vs batch
+    
+    Args:
+        model: LLM model instance
+        logger: Logger instance
+        generation_config: LLM generation configuration
+        safety_settings: LLM safety settings
+        settings: Pipeline settings dict
+        parse_fn: Function to parse LLM responses
+        store_fn: Function to store analysis images
+        preset_params: If provided, skip initial analysis and use these params
+    
+    Returns:
+        List of controller instances to execute in sequence
     """
-    return [
-        SeriesLoaderController(logger),
-        FirstFrameAnalysisController(model, logger, generation_config, safety_settings, settings),
-        UserFeedbackController(logger, settings, feedback_callback),
-        SeriesBatchController(logger, settings),
-        SummaryScriptController(model, logger, generation_config, safety_settings, parse_fn, settings),
-        # Updated: Now passes model for LLM-based analysis
-        ReportGenerationController(model, logger, generation_config, safety_settings, parse_fn, settings),
-    ]
-
-
-def create_batch_only_pipeline(model, logger, generation_config, safety_settings, settings, parse_fn, locked_params):
-    """Create batch-only pipeline (skip first-frame analysis)."""
+    pipeline = []
     
-    class PresetParamsController:
-        """Injects preset parameters without LLM estimation."""
-        def __init__(self, params):
-            self.params = params
-        def execute(self, state):
-            state["locked_params"] = self.params
-            state["first_frame_results"] = {"llm_params": self.params}
-            return state
+    # Step 1: Initial FFT Analysis (skip if preset_params)
+    if preset_params is None:
+        pipeline.append(
+            InitialFFTAnalysisController(
+                model=model,
+                logger=logger,
+                generation_config=generation_config,
+                safety_settings=safety_settings,
+                settings=settings
+            )
+        )
+    else:
+        # Inject preset params directly
+        pipeline.append(
+            _PresetParamsController(preset_params, logger)
+        )
     
-    return [
-        SeriesLoaderController(logger),
-        PresetParamsController(locked_params),
-        SeriesBatchController(logger, settings),
-        SummaryScriptController(model, logger, generation_config, safety_settings, parse_fn, settings),
-        # Updated: Now passes model for LLM-based analysis
-        ReportGenerationController(model, logger, generation_config, safety_settings, parse_fn, settings),
-    ]
-
-
-def create_quick_series_pipeline(model, logger, generation_config, safety_settings, settings, parse_fn):
-    """
-    Create minimal series pipeline - no feedback loop, no script generation.
+    # Step 2: Human feedback refinement on first image
+    pipeline.append(
+        HumanFeedbackRefinementController(
+            model=model,
+            logger=logger,
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            parse_fn=parse_fn,
+            settings=settings
+        )
+    )
     
-    Useful for batch processing where you just want results + report.
-    """
-    return [
-        SeriesLoaderController(logger),
-        FirstFrameAnalysisController(model, logger, generation_config, safety_settings, settings),
-        # Skip UserFeedbackController - auto-accept LLM params
-        _AutoAcceptController(logger),
-        SeriesBatchController(logger, settings),
-        # Skip SummaryScriptController - no custom script
-        ReportGenerationController(model, logger, generation_config, safety_settings, parse_fn, settings),
-    ]
+    # Step 3: Process all images with refined parameters
+    pipeline.append(
+        UnifiedBatchProcessingController(
+            logger=logger,
+            settings=settings
+        )
+    )
+    
+    # Step 4: Custom analysis script (conditional on n>=2)
+    pipeline.append(
+        ConditionalCustomAnalysisController(
+            model=model,
+            logger=logger,
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            parse_fn=parse_fn,
+            settings=settings
+        )
+    )
+    
+    # Step 5: Scientific synthesis
+    pipeline.append(
+        UnifiedSynthesisController(
+            model=model,
+            logger=logger,
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            parse_fn=parse_fn,
+            settings=settings,
+            store_fn=store_fn
+        )
+    )
+    
+    # Step 6: Report generation
+    pipeline.append(
+        UnifiedReportGenerationController(
+            model=model,
+            logger=logger,
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            parse_fn=parse_fn,
+            settings=settings
+        )
+    )
+    
+    return pipeline
 
 
-class _AutoAcceptController:
-    """Auto-accepts LLM parameters without user feedback."""
-    def __init__(self, logger):
+class _PresetParamsController:
+    """Injects preset parameters without LLM estimation."""
+    
+    def __init__(self, params: dict, logger: logging.Logger):
+        self.params = params
         self.logger = logger
     
     def execute(self, state: dict) -> dict:
-        if state.get("error_dict"):
-            return state
+        self.logger.info("📋 Using preset parameters (skipping LLM estimation)")
+        self.logger.info(f"   Parameters: {self.params}")
         
-        llm_params = state.get("first_frame_results", {}).get("llm_params", {})
-        state["locked_params"] = llm_params
-        self.logger.info(f"✅ Auto-accepted LLM parameters: {llm_params}")
+        state["locked_params"] = self.params
+        state["llm_params"] = self.params
+        state["first_frame_results"] = {"llm_params": self.params}
+        state["current_params"] = self.params
+        
         return state
+
+
+# =============================================================================
+# LEGACY PIPELINE FACTORIES (for backward compatibility)
+# =============================================================================
+
+def create_fftnmf_pipeline(
+    model,
+    logger: logging.Logger,
+    generation_config,
+    safety_settings,
+    settings: dict,
+    parse_fn: Callable,
+    store_fn: Callable
+) -> List:
+    """
+    DEPRECATED: Use create_unified_microscopy_pipeline instead.
+    
+    This factory is preserved for backward compatibility but now
+    returns the unified pipeline.
+    """
+    logger.warning(
+        "create_fftnmf_pipeline() is deprecated. "
+        "Use create_unified_microscopy_pipeline() instead."
+    )
+    return create_unified_microscopy_pipeline(
+        model=model,
+        logger=logger,
+        generation_config=generation_config,
+        safety_settings=safety_settings,
+        settings=settings,
+        parse_fn=parse_fn,
+        store_fn=store_fn
+    )
+
+
+def create_series_pipeline(
+    model,
+    logger: logging.Logger,
+    generation_config,
+    safety_settings,
+    settings: dict,
+    parse_fn: Callable,
+    feedback_callback=None
+) -> List:
+    """
+    DEPRECATED: Use create_unified_microscopy_pipeline instead.
+    
+    This factory is preserved for backward compatibility.
+    """
+    logger.warning(
+        "create_series_pipeline() is deprecated. "
+        "Use create_unified_microscopy_pipeline() instead."
+    )
+    return create_unified_microscopy_pipeline(
+        model=model,
+        logger=logger,
+        generation_config=generation_config,
+        safety_settings=safety_settings,
+        settings=settings,
+        parse_fn=parse_fn,
+        store_fn=lambda *args, **kwargs: None
+    )
+
+
+def create_batch_only_pipeline(
+    model,
+    logger: logging.Logger,
+    generation_config,
+    safety_settings,
+    settings: dict,
+    parse_fn: Callable,
+    locked_params: dict
+) -> List:
+    """
+    DEPRECATED: Use create_unified_microscopy_pipeline with preset_params instead.
+    """
+    logger.warning(
+        "create_batch_only_pipeline() is deprecated. "
+        "Use create_unified_microscopy_pipeline(preset_params=...) instead."
+    )
+    return create_unified_microscopy_pipeline(
+        model=model,
+        logger=logger,
+        generation_config=generation_config,
+        safety_settings=safety_settings,
+        settings=settings,
+        parse_fn=parse_fn,
+        store_fn=lambda *args, **kwargs: None,
+        preset_params=locked_params
+    )
+
+
+def create_quick_series_pipeline(
+    model,
+    logger: logging.Logger,
+    generation_config,
+    safety_settings,
+    settings: dict,
+    parse_fn: Callable
+) -> List:
+    """
+    DEPRECATED: Use create_unified_microscopy_pipeline instead.
+    
+    For quick processing, disable human feedback in settings.
+    """
+    logger.warning(
+        "create_quick_series_pipeline() is deprecated. "
+        "Use create_unified_microscopy_pipeline() with enable_human_feedback=False."
+    )
+    # Temporarily disable feedback
+    settings_copy = settings.copy()
+    settings_copy['enable_human_feedback'] = False
+    
+    return create_unified_microscopy_pipeline(
+        model=model,
+        logger=logger,
+        generation_config=generation_config,
+        safety_settings=safety_settings,
+        settings=settings_copy,
+        parse_fn=parse_fn,
+        store_fn=lambda *args, **kwargs: None
+    )
