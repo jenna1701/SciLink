@@ -1,510 +1,458 @@
-import logging
+# controllers/curve_fitting_controllers.py
+
+"""
+Controllers for the curve fitting analysis pipeline.
+"""
+
 import json
-import re
-import numpy as np
+import logging
 import os
-from typing import Callable
+import numpy as np
+from typing import Callable, Any
 
-from ..preprocess import CurvePreprocessingAgent
-from ....executors import ScriptExecutor
-from ...lit_agents.literature_agent import FittingModelLiteratureAgent
-from ....tools.curve_fitting_tools import plot_curve_to_bytes
-from ..instruct import (
-    LITERATURE_QUERY_GENERATION_INSTRUCTIONS,
-    FITTING_SCRIPT_GENERATION_INSTRUCTIONS,
-    FITTING_SCRIPT_CORRECTION_INSTRUCTIONS,
-    FITTING_QUALITY_ASSESSMENT_INSTRUCTIONS,
-    FITTING_MODEL_CORRECTION_INSTRUCTIONS
-)
 
-# --- Tool Controllers ---
+class AnalyzeDataController:
+    """Compute data statistics and create initial visualization."""
+
+    def __init__(self, logger: logging.Logger, plot_fn: Callable):
+        self.logger = logger
+        self.plot_fn = plot_fn
+
+    def execute(self, state: dict) -> dict:
+        if state.get("error_dict"):
+            return state
+
+        self.logger.info("\n🔍 --- Analyzing Data ---\n")
+
+        try:
+            data = state["curve_data"]
+
+            if data.ndim == 1:
+                x = np.arange(len(data))
+                y = data
+            elif data.shape[0] == 2:
+                x, y = data[0], data[1]
+            elif data.shape[1] == 2:
+                x, y = data[:, 0], data[:, 1]
+            else:
+                raise ValueError(f"Unexpected data shape: {data.shape}")
+
+            state["data_statistics"] = {
+                "n_points": len(x),
+                "x_range": [float(np.nanmin(x)), float(np.nanmax(x))],
+                "y_range": [float(np.nanmin(y)), float(np.nanmax(y))],
+                "y_mean": float(np.nanmean(y)),
+                "y_std": float(np.nanstd(y)),
+                "has_nans": bool(np.any(np.isnan(data))),
+            }
+
+            plot_bytes = self.plot_fn(state["curve_data"], state.get("system_info", {}))
+            state["original_plot_bytes"] = plot_bytes
+            state["analysis_images"] = [{"label": "Raw Data", "data": plot_bytes}]
+
+            self.logger.info(f"  Points: {state['data_statistics']['n_points']}")
+            self.logger.info(f"  X: {state['data_statistics']['x_range']}")
+            self.logger.info(f"  Y: {state['data_statistics']['y_range']}")
+
+        except Exception as e:
+            self.logger.error(f"❌ Data analysis failed: {e}", exc_info=True)
+            state["error_dict"] = {"error": "Data analysis failed", "details": str(e)}
+
+        return state
+
+
+class PlanAnalysisController:
+    """LLM examines data and plans the fitting approach."""
+
+    def __init__(
+        self,
+        model,
+        logger: logging.Logger,
+        generation_config,
+        safety_settings,
+        parse_fn: Callable,
+        instructions: str,
+    ):
+        self.model = model
+        self.logger = logger
+        self.generation_config = generation_config
+        self.safety_settings = safety_settings
+        self._parse = parse_fn
+        self.instructions = instructions
+
+    def execute(self, state: dict) -> dict:
+        if state.get("error_dict"):
+            return state
+
+        self.logger.info("\n🧠 --- Planning Analysis ---\n")
+
+        try:
+            prompt = [
+                self.instructions,
+                "\n## Data Plot",
+                {"mime_type": "image/png", "data": state["original_plot_bytes"]},
+                "\n## Data Statistics\n" + json.dumps(state["data_statistics"], indent=2),
+                "\n## Metadata\n" + json.dumps(state.get("system_info", {}), indent=2),
+            ]
+
+            if state.get("analysis_hints"):
+                prompt.append(f"\n## User Guidance\n{state['analysis_hints']}")
+
+            response = self.model.generate_content(prompt, generation_config=self.generation_config)
+            result, error = self._parse(response)
+
+            if error or not result:
+                raise ValueError(f"Failed to parse: {error}")
+
+            state["observations"] = result.get("observations", "")
+            state["analysis_approach"] = result.get("analysis_approach", "Curve fitting")
+            state["physical_model"] = result.get("physical_model", "Appropriate model")
+            state["parameters_to_extract"] = result.get("parameters_to_extract", [])
+            state["fitting_strategy"] = result.get("fitting_strategy", "Standard fitting")
+            state["literature_query"] = result.get("literature_query")
+
+            self.logger.info(f"  Approach: {state['analysis_approach']}")
+            self.logger.info(f"  Model: {state['physical_model']}")
+
+        except Exception as e:
+            self.logger.warning(f"⚠️ Planning failed: {e}, using fallback")
+            state["observations"] = ""
+            state["analysis_approach"] = "Fit the data with an appropriate model"
+            state["physical_model"] = "To be determined"
+            state["parameters_to_extract"] = []
+            state["fitting_strategy"] = "Standard curve fitting"
+            state["literature_query"] = None
+
+        return state
+
+
+class LiteratureSearchController:
+    """Search literature if enabled and query provided."""
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        literature_agent: Any | None,
+        output_dir: str,
+    ):
+        self.logger = logger
+        self.literature_agent = literature_agent
+        self.output_dir = output_dir
+
+    def _save_results(self, query: str, report: str) -> dict:
+        saved_files = {}
+        try:
+            lit_dir = os.path.join(self.output_dir, "literature")
+            os.makedirs(lit_dir, exist_ok=True)
+
+            query_path = os.path.join(lit_dir, "search_query.txt")
+            with open(query_path, "w") as f:
+                f.write(query)
+            saved_files["query_file"] = query_path
+
+            report_path = os.path.join(lit_dir, "literature_report.md")
+            with open(report_path, "w") as f:
+                f.write(report)
+            saved_files["report_file"] = report_path
+        except Exception as e:
+            self.logger.warning(f"Failed to save literature: {e}")
+        return saved_files
+
+    def execute(self, state: dict) -> dict:
+        if state.get("error_dict"):
+            return state
+
+        # Skip if no agent or no query
+        if self.literature_agent is None:
+            self.logger.info("\n📚 --- Skipping Literature (disabled) ---\n")
+            state["literature_context"] = None
+            state["literature_files"] = None
+            return state
+
+        query = state.get("literature_query")
+        if not query:
+            self.logger.info("\n📚 --- Skipping Literature (no query needed) ---\n")
+            state["literature_context"] = None
+            state["literature_files"] = None
+            return state
+
+        self.logger.info("\n📚 --- Searching Literature ---\n")
+        self.logger.info(f"  Query: {query}")
+
+        try:
+            result = self.literature_agent.query_for_models(query)
+            if result.get("status") == "success":
+                state["literature_context"] = result["formatted_answer"]
+                self.logger.info("  ✅ Success")
+            else:
+                state["literature_context"] = None
+                self.logger.warning(f"  ⚠️ No results")
+
+            state["literature_files"] = self._save_results(
+                query, state["literature_context"] or f"No results: {result.get('message')}"
+            )
+        except Exception as e:
+            self.logger.error(f"  ❌ Failed: {e}")
+            state["literature_context"] = None
+            state["literature_files"] = self._save_results(query, f"Error: {e}")
+
+        return state
+
+
+class ExecuteFittingController:
+    """Generate and execute fitting script with self-correction."""
+
+    MAX_ATTEMPTS = 3
+
+    def __init__(
+        self,
+        model,
+        logger: logging.Logger,
+        generation_config,
+        safety_settings,
+        parse_fn: Callable,
+        executor: Any,
+        script_instructions: str,
+        correction_instructions: str,
+        quality_instructions: str,
+        output_dir: str,
+    ):
+        self.model = model
+        self.logger = logger
+        self.generation_config = generation_config
+        self.safety_settings = safety_settings
+        self._parse = parse_fn
+        self.executor = executor
+        self.script_instructions = script_instructions
+        self.correction_instructions = correction_instructions
+        self.quality_instructions = quality_instructions
+        self.output_dir = output_dir
+
+    def _generate_script(self, state: dict) -> str:
+        stats = state["data_statistics"]
+
+        context_parts = []
+        if state.get("literature_context"):
+            context_parts.append(state["literature_context"])
+
+        prompt = self.script_instructions.format(
+            analysis_approach=state.get("analysis_approach", "Fit the data"),
+            physical_model=state.get("physical_model", "Appropriate model"),
+            parameters_to_extract=", ".join(state.get("parameters_to_extract", [])) or "relevant parameters",
+            fitting_strategy=state.get("fitting_strategy", "Standard fitting"),
+            context="\n".join(context_parts) or "Use your expertise.",
+            data_path=state.get("processed_data_path") or state["data_path"],
+            n_points=stats["n_points"],
+            x_min=stats["x_range"][0],
+            x_max=stats["x_range"][1],
+            y_min=stats["y_range"][0],
+            y_max=stats["y_range"][1],
+        )
+
+        response = self.model.generate_content(prompt)
+        result, error = self._parse(response)
+
+        if error or not result or "script" not in result:
+            raise ValueError(f"Script generation failed: {error or 'no script'}")
+
+        return result["script"]
+
+    def _correct_script(self, state: dict, script: str, error_msg: str) -> str:
+        prompt = self.correction_instructions.format(
+            analysis_approach=state.get("analysis_approach", ""),
+            physical_model=state.get("physical_model", ""),
+            failed_script=script,
+            error_message=error_msg,
+        )
+
+        response = self.model.generate_content(prompt)
+        result, error = self._parse(response)
+
+        if error or not result or "script" not in result:
+            raise ValueError(f"Correction failed: {error or 'no script'}")
+
+        if "diagnosis" in result:
+            self.logger.info(f"  Diagnosis: {result['diagnosis']}")
+
+        return result["script"]
+
+    def _assess_quality(self, state: dict, plot_bytes: bytes, metrics: dict) -> dict:
+        prompt = [
+            self.quality_instructions.format(
+                analysis_approach=state.get("analysis_approach", ""),
+                physical_model=state.get("physical_model", ""),
+                metrics=json.dumps(metrics, indent=2),
+            ),
+            "\n## Original Data",
+            {"mime_type": "image/png", "data": state["original_plot_bytes"]},
+            "\n## Fit Result",
+            {"mime_type": "image/png", "data": plot_bytes},
+        ]
+
+        response = self.model.generate_content(prompt, generation_config=self.generation_config)
+        result, _ = self._parse(response)
+
+        if not result:
+            return {"is_acceptable": True, "quality_score": 0.5}
+
+        is_ok = result.get("is_acceptable", True)
+        if isinstance(is_ok, str):
+            is_ok = is_ok.lower() == "true"
+        result["is_acceptable"] = bool(is_ok)
+
+        return result
+
+    def execute(self, state: dict) -> dict:
+        if state.get("error_dict"):
+            return state
+
+        self.logger.info("\n⚙️ --- Executing Fitting ---\n")
+
+        script = None
+        last_error = ""
+        exec_result = None
+
+        for attempt in range(1, self.MAX_ATTEMPTS + 1):
+            self.logger.info(f"  Attempt {attempt}/{self.MAX_ATTEMPTS}")
+
+            try:
+                if attempt == 1:
+                    script = self._generate_script(state)
+                else:
+                    script = self._correct_script(state, script, last_error)
+
+                exec_result = self.executor.execute_script(script, working_dir=self.output_dir)
+
+                if exec_result.get("status") == "success":
+                    self.logger.info("  ✅ Script executed")
+                    break
+                else:
+                    last_error = exec_result.get("message", "Unknown error")
+                    self.logger.warning(f"  ❌ Failed: {last_error[:150]}")
+
+            except Exception as e:
+                last_error = str(e)
+                self.logger.error(f"  ❌ Error: {e}")
+        else:
+            state["error_dict"] = {"error": "Script generation failed", "details": last_error}
+            return state
+
+        # Parse results
+        fit_results = {}
+        for line in (exec_result.get("stdout") or "").splitlines():
+            if line.startswith("FIT_RESULTS_JSON:"):
+                try:
+                    fit_results = json.loads(line.replace("FIT_RESULTS_JSON:", "").strip())
+                except json.JSONDecodeError as e:
+                    self.logger.warning(f"  Could not parse results: {e}")
+                break
+
+        # Load visualization
+        viz_path = os.path.join(self.output_dir, "fit_visualization.png")
+        if not os.path.exists(viz_path):
+            state["error_dict"] = {"error": "No fit_visualization.png generated"}
+            return state
+
+        with open(viz_path, "rb") as f:
+            plot_bytes = f.read()
+
+        # Assess quality
+        quality = self._assess_quality(state, plot_bytes, fit_results.get("fit_quality", {}))
+        self.logger.info(f"  Quality: {quality.get('quality_score', 'N/A')}, OK: {quality.get('is_acceptable')}")
+
+        # Store results
+        state["final_script"] = script
+        state["final_plot_bytes"] = plot_bytes
+        state["fit_results"] = fit_results
+        state["quality_assessment"] = quality
+        state["analysis_images"].append({
+            "label": fit_results.get("model_type", "Fit"),
+            "data": plot_bytes,
+        })
+
+        state["result_json"] = {
+            "model_type": fit_results.get("model_type"),
+            "fitting_parameters": fit_results.get("parameters", {}),
+            "fit_quality": fit_results.get("fit_quality", {}),
+            "summary": fit_results.get("summary"),
+            "literature_files": state.get("literature_files"),
+        }
+
+        return state
+
+
+class BuildInterpretationPromptController:
+    """Assemble prompt for final interpretation."""
+
+    def __init__(self, logger: logging.Logger, instructions: str):
+        self.logger = logger
+        self.instructions = instructions
+
+    def execute(self, state: dict) -> dict:
+        if state.get("error_dict"):
+            return state
+
+        self.logger.info("\n📝 --- Building Interpretation Prompt ---\n")
+
+        fit_results = state.get("fit_results", {})
+
+        formatted = self.instructions.format(
+            model_type=fit_results.get("model_type", "Curve fit"),
+            summary=fit_results.get("summary", "Fitting complete"),
+        )
+
+        state["instruction_prompt"] = formatted
+        state["final_prompt_parts"] = [
+            formatted,
+            "\n## Original Data",
+            {"mime_type": "image/png", "data": state["original_plot_bytes"]},
+            "\n## Fit Result",
+            {"mime_type": "image/png", "data": state["final_plot_bytes"]},
+            "\n## Parameters\n" + json.dumps(fit_results.get("parameters", {}), indent=2),
+            "\n## Fit Quality\n" + json.dumps(fit_results.get("fit_quality", {}), indent=2),
+            "\n## Metadata\n" + json.dumps(state.get("system_info", {}), indent=2),
+        ]
+
+        if state.get("literature_context"):
+            state["final_prompt_parts"].extend(["\n## Literature", state["literature_context"]])
+
+        return state
+
 
 class RunCurvePreprocessingController:
-    """
-    [🛠️ Tool Step]
-    Runs the CurvePreprocessingAgent on the initial data.
-    """
-    def __init__(self, logger: logging.Logger, preprocessor: CurvePreprocessingAgent, output_dir: str):
+    """Optional data preprocessing."""
+
+    def __init__(self, logger: logging.Logger, preprocessor: Any, output_dir: str):
         self.logger = logger
         self.preprocessor = preprocessor
         self.output_dir = output_dir
 
     def execute(self, state: dict) -> dict:
-        if state.get("error_dict"): return state
-        self.logger.info("\n\n🛠️ --- CALLING TOOL: Curve Preprocessing --- 🛠️\n")
-        
-        try:
-            # The preprocessor is already refactored and handles its own logic
-            processed_data, data_quality = self.preprocessor.run_preprocessing(
-                state["curve_data"], state["system_info"]
-            )
-            
-            # Overwrite with processed data
-            state["curve_data"] = processed_data
-            state["data_quality"] = data_quality
-            
-            # Save processed data to a temp file for the script executor
-            # Use PID to avoid conflicts in concurrent runs
-            pid = os.getpid()
-            processed_data_path = os.path.join(self.output_dir, f"temp_processed_curve_data_{pid}.npy")
-            np.save(processed_data_path, processed_data)
-            state["processed_data_path"] = processed_data_path
-            
-            self.logger.info(f"✅ Tool Complete: Curve preprocessing finished. Temp data at {processed_data_path}")
-        
-        except Exception as e:
-            self.logger.error(f"❌ Tool Failed: Curve preprocessing: {e}", exc_info=True)
-            state["error_dict"] = {"error": "Curve preprocessing failed", "details": str(e)}
-        return state
-
-class CreateInitialPlotController:
-    """
-    [🛠️ Tool Step]
-    Plots the (potentially processed) curve to provide context for later steps.
-    """
-    def __init__(self, logger: logging.Logger):
-        self.logger = logger
-
-    def execute(self, state: dict) -> dict:
-        if state.get("error_dict"): return state
-        self.logger.info("\n\n🛠️ --- CALLING TOOL: Create Initial Plot --- 🛠️\n")
-        try:
-            plot_bytes = plot_curve_to_bytes(
-                state["curve_data"], state["system_info"], " (Processed Data)"
-            )
-            state["original_plot_bytes"] = plot_bytes
-            # This is the first image, so it replaces any previous
-            state["analysis_images"] = [
-                {'label': 'Processed Data', 'data': plot_bytes}
-            ]
-            self.logger.info("✅ Tool Complete: Initial data plot created.")
-        except Exception as e:
-            self.logger.error(f"❌ Tool Failed: Plotting initial curve: {e}", exc_info=True)
-            state["error_dict"] = {"error": "Failed to plot initial curve", "details": str(e)}
-        return state
-
-class RunLiteratureSearchController:
-    """
-    [🛠️ Tool Step]
-    Runs the literature search using the query from the state.
-    """
-    def __init__(self, logger: logging.Logger, literature_agent: FittingModelLiteratureAgent | None, output_dir: str):
-        self.logger = logger
-        self.literature_agent = literature_agent
-        self.output_dir = output_dir
-
-    def _save_literature_step_results(self, query: str, report: str) -> dict:
-        """Saves the literature search query and the resulting report to files."""
-        saved_files = {}
-        try:
-            lit_dir = os.path.join(self.output_dir, "literature_step")
-            os.makedirs(lit_dir, exist_ok=True)
-
-            query_path = os.path.join(lit_dir, "search_query.txt")
-            with open(query_path, 'w') as f:
-                f.write(query)
-            saved_files["query_file"] = query_path
-
-            report_path = os.path.join(lit_dir, "literature_report.md")
-            with open(report_path, 'w') as f:
-                f.write(report)
-            saved_files["report_file"] = report_path
-            
-            self.logger.info(f"Saved literature results to: {lit_dir}")
-        except Exception as e:
-            self.logger.error(f"Failed to save literature step results: {e}")
-        return saved_files
-
-    def execute(self, state: dict) -> dict:
-        if state.get("error_dict"): return state
-        self.logger.info("\n\n🛠️ --- CALLING TOOL: Literature Search --- 🛠️\n")
-        
-        lit_query = state.get("literature_query", "N/A (Query generation failed)")
-        
-        if self.literature_agent is None:
-            self.logger.warning("Literature agent not available. Using LLM's internal knowledge.")
-            state["literature_context"] = "Literature agent not available. Using LLM's internal knowledge for model selection."
-            state["result_json"] = {"literature_files": self._save_literature_step_results(lit_query, state["literature_context"])}
+        if state.get("error_dict"):
             return state
 
+        if self.preprocessor is None:
+            return state
+
+        self.logger.info("\n🛠️ --- Preprocessing ---\n")
+
         try:
-            lit_result = self.literature_agent.query_for_models(lit_query)
+            processed_data, data_quality = self.preprocessor.run_preprocessing(
+                state["curve_data"], state.get("system_info", {})
+            )
 
-            if lit_result["status"] == "success":
-                literature_context = lit_result["formatted_answer"]
-                self.logger.info("✅ Literature search successful.")
-            else:
-                warning_message = f"Literature search failed ({lit_result['message']}). Falling back to LLM's internal knowledge."
-                self.logger.warning(warning_message)
-                literature_context = "The external literature search failed. Fall back to your internal knowledge to propose a suitable physical fitting model."
-            
-            saved_files = self._save_literature_step_results(lit_query, literature_context)
-            state["literature_context"] = literature_context
-            state["result_json"] = {"literature_files": saved_files} # Per user request
-        
-        except Exception as lit_e:
-            self.logger.error(f"Error during literature search step: {lit_e}", exc_info=True)
-            literature_context = "An error occurred during the literature search. Fall back to your internal knowledge to propose a suitable physical fitting model."
-            saved_files = self._save_literature_step_results(lit_query, f"Search Error: {lit_e}")
-            state["literature_context"] = literature_context
-            state["result_json"] = {"literature_files": saved_files}
+            state["curve_data"] = processed_data
+            state["data_quality"] = data_quality
 
-        return state
+            pid = os.getpid()
+            processed_path = os.path.join(self.output_dir, f"temp_processed_{pid}.npy")
+            np.save(processed_path, processed_data)
+            state["processed_data_path"] = processed_path
 
-class RunFittingLoopController:
-    """
-    [🛠️/🧠 Meta-Controller]
-    Runs the entire multi-attempt fitting loop, including script generation,
-    execution, error correction, and fit validation.
-    """
-    MAX_SCRIPT_ATTEMPTS = 3
-    MAX_MODEL_ATTEMPTS = 3
-
-    def __init__(self, model, logger, generation_config, safety_settings, parse_fn: Callable, executor: ScriptExecutor):
-        self.model = model
-        self.logger = logger
-        self.generation_config = generation_config
-        self.safety_settings = safety_settings
-        self._parse_llm_response = parse_fn
-        self.executor = executor
-
-    def _generate_fitting_script(self, state: dict, context: str) -> str:
-        """
-        Asks the LLM to generate a fitting script. Returns Python code.
-        """
-        self.logger.info("Generating initial fitting script...")
-        
-        data_preview = np.array2string(state["curve_data"][:10], precision=4, separator=', ')
-        
-        prompt = (
-            f"{FITTING_SCRIPT_GENERATION_INSTRUCTIONS}\n"
-            f"## Literature Context\n{context}\n"
-            f"## Curve Data Preview\n{data_preview}\n"
-            f"## Data File Path\n"
-            f"The script should load data from this absolute path: '{os.path.abspath(state['processed_data_path'])}'"
-        )
-        
-        response = self.model.generate_content(prompt)
-        
-        # Parse as JSON
-        result, parse_error = self._parse_llm_response(response)
-        
-        if parse_error:
-            self.logger.error(f"Failed to parse generation response as JSON: {parse_error}")
-            self.logger.debug(f"Raw response: {response.text[:1000]}")
-            raise ValueError(f"LLM generation response was not valid JSON: {parse_error}")
-        
-        if not result:
-            raise ValueError("LLM returned empty JSON for script generation")
-        
-        if "script" not in result:
-            self.logger.error(f"LLM response missing 'script' key. Got: {list(result.keys())}")
-            raise ValueError(f"LLM response missing 'script' key. Available keys: {list(result.keys())}")
-        
-        script = result["script"]
-        
-        # Log reasoning if available
-        if "reasoning" in result:
-            self.logger.info(f"LLM Reasoning: {result['reasoning']}...")
-        
-        # Basic validation
-        if not script or len(script.strip()) < 50:
-            raise ValueError("LLM returned an empty or too-short script")
-        
-        if "import" not in script:
-            raise ValueError("Generated script appears invalid (no imports found)")
-        
-        return script
-
-    def _correct_fitting_script(self, state: dict, context: str, old_script: str, error: str) -> str:
-        """
-        Asks the LLM to fix a broken script. Returns the corrected Python code.
-        """
-        self.logger.warning("Requesting script correction from LLM...")
-        
-        correction_prompt = FITTING_SCRIPT_CORRECTION_INSTRUCTIONS.format(
-            literature_context=context,
-            failed_script=old_script,
-            error_message=error
-        )
-        
-        response = self.model.generate_content(correction_prompt)
-        
-        # Parse as JSON (same pattern as ScalarizerAgent)
-        result, parse_error = self._parse_llm_response(response)
-        
-        if parse_error:
-            self.logger.error(f"Failed to parse correction response as JSON: {parse_error}")
-            self.logger.debug(f"Raw response: {response.text[:1000]}")
-            raise ValueError(f"LLM correction response was not valid JSON: {parse_error}")
-        
-        if not result:
-            raise ValueError("LLM returned empty JSON for script correction")
-        
-        if "script" not in result:
-            self.logger.error(f"LLM response missing 'script' key. Got: {list(result.keys())}")
-            raise ValueError(f"LLM response missing 'script' key. Available keys: {list(result.keys())}")
-        
-        script = result["script"]
-        
-        # Log the diagnosis for debugging
-        if "diagnosis" in result:
-            self.logger.info(f"LLM Diagnosis: {result['diagnosis']}")
-        
-        if "import" not in script:
-            raise ValueError("Corrected script appears invalid (no imports found)")
-        
-        return script
-
-    def _evaluate_fit_quality(self, state: dict, plot_bytes: bytes, context: str) -> dict:
-        self.logger.info("🤖 Assessing the quality of the curve fit...")
-        
-        # Get computed metrics
-        fit_params = state.get("result_json", {}).get("fitting_parameters", {})
-        fit_quality = fit_params.get("fit_quality", {})
-        metrics_str = json.dumps(fit_quality, indent=2) if fit_quality else "Metrics not available"
-        
-        prompt = [
-            FITTING_QUALITY_ASSESSMENT_INSTRUCTIONS,
-            "## Original Data Plot", {"mime_type": "image/jpeg", "data": state["original_plot_bytes"]},
-            "## Fit Visualization", {"mime_type": "image/png", "data": plot_bytes},
-            f"## Computed Fit Quality Metrics\n{metrics_str}",
-            "## Literature Context\n" + context
-        ]
-        
-        response = self.model.generate_content(prompt, generation_config=self.generation_config)
-        result_json, error = self._parse_llm_response(response)
-        
-        if error or not result_json:
-            self.logger.warning("Failed to get fit quality assessment. Assuming acceptable.")
-            return {"is_good_fit": True, "critique": "Assessment failed.", "suggestion": "N/A"}
-        
-        # Normalize is_good_fit to boolean
-        is_good_fit = result_json.get("is_good_fit", True)
-        if isinstance(is_good_fit, str):
-            is_good_fit = is_good_fit.lower() == "true"
-        result_json["is_good_fit"] = bool(is_good_fit)
-        
-        return result_json
-
-    def _correct_fitting_model(self, state: dict, old_script: str, plot_bytes: bytes, critique: str, suggestion: str, context: str) -> str:
-        """
-        Asks the LLM to propose a different/better model and generate a new script.
-        """
-        self.logger.warning("⚠️ Fit was inadequate. Requesting a new model and script from LLM...")
-        
-        prompt = [
-            FITTING_MODEL_CORRECTION_INSTRUCTIONS,
-            "## Critique of Previous Attempt\n" + critique,
-            "## Suggestion for Improvement\n" + suggestion,
-            "## Plot of the Bad Fit", {"mime_type": "image/png", "data": plot_bytes},
-            "## Original Literature Context\n" + context,
-            "## Old Script That Produced the Bad Fit\n```python\n" + old_script + "\n```"
-        ]
-        
-        response = self.model.generate_content(prompt)
-        
-        # Parse as JSON (consistent with other methods)
-        result, parse_error = self._parse_llm_response(response)
-        
-        if parse_error:
-            self.logger.error(f"Failed to parse model correction response as JSON: {parse_error}")
-            self.logger.debug(f"Raw response: {response.text[:1000]}")
-            raise ValueError(f"LLM model correction response was not valid JSON: {parse_error}")
-        
-        if not result:
-            raise ValueError("LLM returned empty JSON for model correction")
-        
-        if "script" not in result:
-            self.logger.error(f"LLM response missing 'script' key. Got: {list(result.keys())}")
-            raise ValueError(f"LLM response missing 'script' key. Available keys: {list(result.keys())}")
-        
-        script = result["script"]
-        
-        # Log the rationale for debugging
-        if "revised_model_rationale" in result:
-            self.logger.info(f"LLM Model Revision Rationale: {result['revised_model_rationale']}")
-        
-        # Basic validation
-        if "import" not in script:
-            raise ValueError("Model correction script appears invalid (no imports found)")
-        
-        return script
-
-    def execute(self, state: dict) -> dict:
-        if state.get("error_dict"): return state
-        self.logger.info("\n\n🛠️/🧠 --- META-CONTROLLER: Running Fitting Loop --- 🛠️/🧠\n")
-        
-        literature_context = state["literature_context"]
-        fit_data_path = state["processed_data_path"]
-        output_dir = os.path.dirname(fit_data_path)
-        
-        fitting_script = None
-        exec_result = None
-        fit_plot_bytes = None
-
-        for model_attempt in range(1, self.MAX_MODEL_ATTEMPTS + 1):
-            self.logger.info(f"--- Fitting Model Attempt {model_attempt}/{self.MAX_MODEL_ATTEMPTS} ---")
-            
-            last_script_error = "No script generated yet."
-            script_success = False
-            
-            for script_attempt in range(1, self.MAX_SCRIPT_ATTEMPTS + 1):
-                self.logger.info(f"--- Script Execution Attempt {script_attempt}/{self.MAX_SCRIPT_ATTEMPTS} ---")
-                try:
-                    if script_attempt == 1:
-                        if model_attempt == 1:
-                            fitting_script = self._generate_fitting_script(state, literature_context)
-                    else:
-                        fitting_script = self._correct_fitting_script(state, literature_context, fitting_script, last_script_error)
-
-                    exec_result = self.executor.execute_script(fitting_script, working_dir=output_dir)
-                    
-                    if exec_result.get("status") == "success":
-                        self.logger.info("✅ Script executed successfully.")
-                        script_success = True
-                        break
-                    else:
-                        last_script_error = exec_result.get("message", "Unknown error")
-                        self.logger.warning(f"Script failed: {last_script_error}")
-                
-                except Exception as e:
-                    last_script_error = str(e)
-                    self.logger.error(f"Script generation/execution failed: {e}", exc_info=True)
-
-            if not script_success:
-                state["error_dict"] = {"error": f"Failed to generate a working script after {self.MAX_SCRIPT_ATTEMPTS} attempts.", "details": last_script_error}
-                return state
-            
-            # --- Parse FIT_RESULTS_JSON immediately ---
-            fit_params = {}
-            if exec_result and exec_result.get("stdout"):
-                for line in exec_result.get("stdout", "").splitlines():
-                    if line.startswith("FIT_RESULTS_JSON:"):
-                        try:
-                            fit_params = json.loads(line.replace("FIT_RESULTS_JSON:", "").strip())
-                            r_sq = fit_params.get("fit_quality", {}).get("r_squared")
-                            self.logger.info(f"✅ Parsed fit results. R² = {r_sq}")
-                        except json.JSONDecodeError as e:
-                            self.logger.error(f"Failed to parse FIT_RESULTS_JSON: {e}")
-                        break
-            
-            # Store in state for _evaluate_fit_quality
-            if "result_json" not in state:
-                state["result_json"] = {}
-            state["result_json"]["fitting_parameters"] = fit_params
-            
-            # --- Check plot exists ---
-            fit_plot_path = os.path.join(output_dir, "fit_visualization.png")
-            if not os.path.exists(fit_plot_path):
-                self.logger.warning("Script ran but 'fit_visualization.png' is missing.")
-                state["error_dict"] = {"error": "Script succeeded but did not create 'fit_visualization.png'."}
-                return state
-                
-            with open(fit_plot_path, "rb") as f:
-                fit_plot_bytes = f.read()
-            
-            # --- Fit Quality Assessment (now has metrics) ---
-            assessment = self._evaluate_fit_quality(state, fit_plot_bytes, literature_context)
-            self.logger.info(f"Fit Assessment: is_good_fit={assessment.get('is_good_fit')}, critique={assessment['critique']}...")
-
-            if assessment.get("is_good_fit", False):
-                self.logger.info("✅ Fit quality is acceptable. Exiting loop.")
-                break
-            
-            # --- Model Correction ---
-            if model_attempt < self.MAX_MODEL_ATTEMPTS:
-                literature_context += f"\n\n--- CRITIQUE OF ATTEMPT {model_attempt} ---\nCritique: {assessment['critique']}\nSuggestion: {assessment.get('suggestion', 'N/A')}"
-                try:
-                    fitting_script = self._correct_fitting_model(
-                        state, fitting_script, fit_plot_bytes, 
-                        assessment['critique'], assessment.get('suggestion', 'N/A'), literature_context
-                    )
-                except Exception as e:
-                    self.logger.error(f"Model correction script generation failed: {e}")
-                    state["error_dict"] = {"error": "Failed to generate correction script", "details": str(e)}
-                    return state
-            else:
-                self.logger.warning("⚠️ Max model attempts reached. Using last fit despite imperfections.")
-                break
-
-        # --- Store Final Results ---
-        state["final_fitting_script"] = fitting_script
-        state["final_fit_plot_bytes"] = fit_plot_bytes
-        state["analysis_images"].append({'label': 'Final Fit Visualization', 'data': fit_plot_bytes})
-            
-        return state
-
-# --- LLM Controllers ---
-
-class GetLiteratureQueryController:
-    """
-    [🧠 LLM Step]
-    Uses an LLM to formulate a query for the literature agent.
-    """
-    def __init__(self, model, logger, generation_config, safety_settings, parse_fn: Callable):
-        self.model = model
-        self.logger = logger
-        self.generation_config = generation_config
-        self.safety_settings = safety_settings
-        self._parse_llm_response = parse_fn
-
-    def execute(self, state: dict) -> dict:
-        if state.get("error_dict"): return state
-        self.logger.info("\n\n🧠 --- LLM STEP: Generate Literature Query --- 🧠\n")
-        
-        try:
-            prompt = [
-                LITERATURE_QUERY_GENERATION_INSTRUCTIONS,
-                "## Data Plot", {"mime_type": "image/jpeg", "data": state["original_plot_bytes"]},
-                "\n\nAdditional System Information (Metadata):\n" + json.dumps(state["system_info"], indent=2)
-            ]
-            response = self.model.generate_content(prompt, generation_config=self.generation_config)
-            result_json, error = self._parse_llm_response(response)
-            
-            if error or "search_query" not in result_json:
-                self.logger.error(f"Failed to generate literature query: {error or 'No search_query key'}")
-                state["literature_query"] = "N/A (Query generation failed)"
-            else:
-                state["literature_query"] = result_json["search_query"]
-                self.logger.info(f"✅ LLM Step Complete: Generated query: {state['literature_query']}")
+            self.logger.info(f"  ✅ Saved to {processed_path}")
 
         except Exception as e:
-            self.logger.error(f"❌ LLM Step Failed: Generate literature query: {e}", exc_info=True)
-            state["literature_query"] = "N/A (Exception)"
-            
-        return state
+            self.logger.error(f"  ❌ Failed: {e}", exc_info=True)
+            state["error_dict"] = {"error": "Preprocessing failed", "details": str(e)}
 
-# --- Prep Controllers ---
-
-class BuildCurveFittingPromptController:
-    """
-    [📝 Prep Step]
-    Gathers all analysis results into the final prompt for interpretation.
-    """
-    def __init__(self, logger: logging.Logger):
-        self.logger = logger
-
-    def execute(self, state: dict) -> dict:
-        if state.get("error_dict"): return state
-        self.logger.info("\n\n📝 --- PREP STEP: Building Final Interpretation Prompt --- 📝\n")
-        
-        try:
-            prompt_parts = [
-                state["instruction_prompt"],
-                "\n## Original Data Plot", {"mime_type": "image/jpeg", "data": state["original_plot_bytes"]},
-                "\n## Final Fit Visualization", {"mime_type": "image/png", "data": state["final_fit_plot_bytes"]},
-                "\n## Final Fitted Parameters\n" + json.dumps(state["result_json"].get("fitting_parameters", {}), indent=2),
-                "\n## Final Literature Context\n" + state["literature_context"],
-                "\n\nAdditional System Information (Metadata):\n" + json.dumps(state["system_info"], indent=2),
-                "\n\nProvide your interpretation in the requested JSON format."
-            ]
-            
-            state["final_prompt_parts"] = prompt_parts
-            self.logger.info("✅ Prep Step Complete: Final prompt is ready.")
-        
-        except Exception as e:
-            self.logger.error(f"❌ Prep Step Failed: Prompt building failed: {e}", exc_info=True)
-            state["error_dict"] = {"error": "Failed to build final prompt", "details": str(e)}
-            
         return state
