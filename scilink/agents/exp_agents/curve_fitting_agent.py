@@ -1,5 +1,3 @@
-# curve_fitting_agent.py
-
 """
 CurveFittingAgent - LLM-driven spectroscopic curve fitting.
 """
@@ -7,8 +5,10 @@ CurveFittingAgent - LLM-driven spectroscopic curve fitting.
 import os
 import logging
 from pathlib import Path
+from typing import Dict, Any, List, Union
+import numpy as np 
 
-from .base_agent import BaseAnalysisAgent
+from .base_agent import BaseAnalysisAgent, AnalysisInput
 from .human_feedback import SimpleFeedbackMixin
 from ...executors import ScriptExecutor
 from ..lit_agents.literature_agent import FittingModelLiteratureAgent
@@ -38,11 +38,19 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
     Example:
         agent = CurveFittingAgent(api_key="...", use_literature=True)
+        
+        # Single file
+        result = agent.analyze("spectrum.csv")
+        
+        # With metadata
         result = agent.analyze(
             "spectrum.csv",
             system_info={"sample": "TiO2"},
             hints="Focus on the band gap"
         )
+        
+        # Get measurement recommendations
+        recommendations = agent.recommend_measurements(analysis_result=result)
     """
 
     def __init__(
@@ -173,23 +181,71 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
     def analyze(
         self,
-        data_path: str,
-        system_info: dict | None = None,
+        data: AnalysisInput,
+        system_info: Dict[str, Any] | str | None = None,
+        # Curve fitting specific
         hints: str | None = None,
         **kwargs,
-    ) -> dict:
+    ) -> Dict[str, Any]:
         """
         Analyze spectroscopic data.
 
         Args:
-            data_path: Path to data file (.npy, .csv, .txt)
+            data: Input data. Can be:
+                - str: Path to data file (.npy, .csv, .txt)
+                - List[str]: Batch processing (not supported)
+                - np.ndarray: Direct array (not supported)
             system_info: Sample/experiment metadata
             hints: Optional guidance for the analysis
 
         Returns:
-            Dict with status, model_type, fitting_parameters, fit_quality,
-            detailed_analysis, scientific_claims, literature_files
+            Dict with status, detailed_analysis, scientific_claims,
+            model_type, fitting_parameters, fit_quality, output_directory
+        
+        Examples:
+            # Single file
+            result = agent.analyze("spectrum.csv")
+            
+            # With metadata and hints
+            result = agent.analyze(
+                "raman_spectrum.npy",
+                system_info={"sample": "Graphene"},
+                hints="Look for D and G bands"
+            )
         """
+        # Parse input
+        data_path, data_paths, data_array, error = self._parse_data_input(data)
+        
+        if error:
+            return {
+                "status": "error",
+                "error": error,
+                "output_directory": str(self.output_dir)
+            }
+        
+        # Batch processing not supported
+        if data_paths is not None:
+            return {
+                "status": "error",
+                "error": {
+                    "error": "Batch processing not supported",
+                    "details": "CurveFittingAgent processes one file at a time. Pass a single file path."
+                },
+                "output_directory": str(self.output_dir)
+            }
+        
+        # Direct array not supported
+        if data_array is not None:
+            return {
+                "status": "error",
+                "error": {
+                    "error": "Direct array input not supported",
+                    "details": "Save array to file and pass the file path."
+                },
+                "output_directory": str(self.output_dir)
+            }
+
+        # Run analysis
         self._init_state(data_path=data_path, system_info=system_info)
         self.logger.info(f"Analyzing: {data_path}")
 
@@ -199,10 +255,18 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         if error_dict:
             self._log_action("curve_fit", {"data": data_path}, {"error": error_dict})
-            return {"status": "error", "message": error_dict.get("error"), "details": error_dict}
+            return {
+                "status": "error",
+                "error": error_dict,
+                "output_directory": str(self.output_dir)
+            }
 
         if not result_json:
-            return {"status": "error", "message": "No results returned"}
+            return {
+                "status": "error",
+                "error": {"error": "No results returned", "details": "Pipeline returned empty result"},
+                "output_directory": str(self.output_dir)
+            }
 
         initial_result = {
             "detailed_analysis": result_json.get("detailed_analysis"),
@@ -215,24 +279,25 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         final_result = self._apply_feedback_if_enabled(initial_result, system_info=system_info)
 
-        final_result["status"] = "success"
-        final_result["model_type"] = result_json.get("model_type")
-        final_result["fitting_parameters"] = result_json.get("fitting_parameters")
-        final_result["fit_quality"] = result_json.get("fit_quality")
-        final_result["literature_files"] = result_json.get("literature_files")
+        response = {
+            "status": "success",
+            "detailed_analysis": final_result.get("detailed_analysis"),
+            "scientific_claims": final_result.get("scientific_claims", []),
+            "model_type": result_json.get("model_type"),
+            "fitting_parameters": result_json.get("fitting_parameters"),
+            "fit_quality": result_json.get("fit_quality"),
+            "literature_files": result_json.get("literature_files"),
+            "output_directory": str(self.output_dir)
+        }
 
         self._log_action(
             "curve_fit",
             {"data": data_path},
-            final_result,
+            response,
             rationale=f"Model: {result_json.get('model_type', 'unknown')}",
         )
 
-        return final_result
-
-    def analyze_for_claims(self, data_path: str, system_info: dict | None = None, **kwargs) -> dict:
-        """Backwards-compatible alias for analyze()."""
-        return self.analyze(data_path, system_info, **kwargs)
+        return response
 
     def _get_claims_instruction_prompt(self) -> str:
         from .instruct import FITTING_INTERPRETATION_INSTRUCTIONS

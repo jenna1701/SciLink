@@ -1,16 +1,5 @@
 """
-SAM Microscopy Analysis Agent - Unified Batch-First Architecture
-
-This module implements a unified SAM analysis agent where ALL analysis
-follows the batch processing pattern. Single image analysis is simply
-a batch of 1.
-
-Key Design Principles:
-1. Single image = Batch of 1 (same pipeline, same controllers)
-2. Model caching for all cases (loads SAM once per analysis call)
-3. Consistent output structure regardless of batch size
-4. Human feedback loop available for all cases
-5. Conditional trend analysis (skipped for n < 2)
+SAM Microscopy Analysis Agent
 """
 
 import warnings
@@ -19,9 +8,9 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 import json
 from pathlib import Path
 import numpy as np
-from typing import List, Optional, Union
+from typing import Dict, Any, List, Optional, Union
 
-from .base_agent import BaseAnalysisAgent
+from .base_agent import BaseAnalysisAgent, AnalysisInput
 from .human_feedback import SimpleFeedbackMixin
 from .instruct import (
     SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS,
@@ -44,36 +33,27 @@ from ...tools.sam import (
 
 class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
-    Unified Segment Anything Model Analysis Agent.
+    Segment Anything Model Analysis Agent.
     
     ALL analysis follows the batch processing pattern:
     - Single image analysis = batch of 1
     - Multiple images = standard batch processing
     - Numpy array stack = batch processing
     
-    This eliminates code duplication and ensures consistent behavior.
-    
-    Features:
-    - Human-in-the-loop parameter refinement (optional)
-    - SAM model caching (loaded once per analysis call)
-    - Conditional trend analysis (for n >= 2 images)
-    - Consistent output structure for all cases
-    - HTML report generation
-    
-    Configuration (`sam_settings`):
-    ---------------------------------
-    - SAM_ENABLED (bool): Master switch.
-    - enable_human_feedback (bool): Enable interactive parameter refinement.
-    - max_feedback_iterations (int): Max refinement iterations.
-    - max_script_corrections (int): Max attempts to fix custom analysis script.
-    - save_visualizations (bool): Whether to save plots.
-    - model_type (str): 'vit_h', 'vit_l', 'vit_b'
-    - checkpoint_path (str): Path to the SAM .pth model file.
-    
-    Backward Compatibility:
-    -----------------------
-    The legacy methods `analyze_for_claims()` and `analyze_for_recommendations()`
-    are preserved but now internally use the unified batch pipeline.
+    Example:
+        agent = SAMMicroscopyAnalysisAgent(api_key="...")
+        
+        # Single image
+        result = agent.analyze("sample.tif")
+        
+        # Multiple images  
+        result = agent.analyze(["img1.tif", "img2.tif"])
+        
+        # Numpy stack
+        result = agent.analyze(my_stack)
+        
+        # Get measurement recommendations
+        recommendations = agent.recommend_measurements(analysis_result=result)
     """
     
     def __init__(
@@ -153,76 +133,76 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "pruning_iou_threshold": self.settings.get('pruning_iou_threshold', 0.5)
         }
     
-    # =========================================================================
-    # UNIFIED ANALYSIS METHOD
-    # =========================================================================
-    
     def analyze(
         self,
-        image_path: Optional[str] = None,
-        image_paths: Optional[List[str]] = None,
-        image_stack: Optional[np.ndarray] = None,
-        system_info: Optional[Union[dict, str]] = None,
+        data: AnalysisInput,
+        system_info: Optional[Union[Dict[str, Any], str]] = None,
+        # SAM-specific options
         series_metadata: Optional[dict] = None,
-        analysis_mode: str = "claims"
-    ) -> dict:
+        **kwargs
+    ) -> Dict[str, Any]:
         """
         Unified analysis method - handles single images and batches identically.
         
         Single image analysis is internally converted to a batch of 1.
         
         Args:
-            image_path: Single image path (convenience parameter)
-            image_paths: List of image paths
-            image_stack: 3D numpy array (n, h, w)
+            data: Input data. Can be:
+                - str: Single image path
+                - List[str]: Multiple image paths
+                - np.ndarray: 2D (single) or 3D (stack) array
             system_info: System/sample information
             series_metadata: Optional metadata about the series
-            analysis_mode: "claims" or "recommendations" (for output formatting)
         
         Returns:
-            Dictionary containing analysis results with consistent structure
+            Dict with status, detailed_analysis, scientific_claims,
+            summary, output_directory, and SAM-specific fields
         
         Examples:
             # Single image
-            result = agent.analyze(image_path="sample.tif")
+            result = agent.analyze("sample.tif")
             
             # Multiple images
-            result = agent.analyze(image_paths=["img1.tif", "img2.tif"])
+            result = agent.analyze(["img1.tif", "img2.tif"])
             
             # Numpy stack
-            result = agent.analyze(image_stack=my_stack)
+            result = agent.analyze(my_stack)
         """
-        # ============================================================
-        # Input Normalization: Convert single image to batch of 1
-        # ============================================================
+        # Parse input
+        data_path, data_paths, data_array, error = self._parse_data_input(data)
+        
+        if error:
+            return {
+                "status": "error",
+                "error": error,
+                "output_directory": str(self.output_dir)
+            }
+        
+        # Normalize to internal variables
+        image_path = data_path
+        image_paths = data_paths
+        image_stack = data_array
+        
+        # Convert single image to batch of 1
         if image_path is not None:
-            if image_paths is not None or image_stack is not None:
-                return {"error": "Provide only one of: image_path, image_paths, or image_stack"}
             image_paths = [image_path]
             self.logger.info(f"Single image mode: treating as batch of 1")
         
-        # Validate inputs
-        if image_paths is None and image_stack is None:
-            return {"error": "Must provide image_path, image_paths, or image_stack"}
-        
-        if image_paths is not None and image_stack is not None:
-            return {"error": "Provide either image_paths OR image_stack, not both"}
-        
         # Determine input type and count
         if image_stack is not None:
-            if not isinstance(image_stack, np.ndarray):
-                return {"error": "image_stack must be a numpy array"}
             if image_stack.ndim == 2:
                 # Single 2D image provided as array - convert to 3D
                 image_stack = image_stack[np.newaxis, :, :]
                 self.logger.info("Single 2D array provided, converted to shape (1, h, w)")
             if image_stack.ndim != 3:
-                return {"error": f"image_stack must be 2D or 3D, got {image_stack.ndim}D"}
+                return {
+                    "status": "error",
+                    "error": {"error": "Invalid shape", "details": f"Array must be 2D or 3D, got {image_stack.ndim}D"},
+                    "output_directory": str(self.output_dir)
+                }
             num_images = image_stack.shape[0]
             input_type = "numpy_array"
         else:
-            if not image_paths:
-                return {"error": "image_paths list is empty"}
             num_images = len(image_paths)
             input_type = "file_paths"
         
@@ -232,17 +212,20 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.logger.info(f"🔬 SAM ANALYSIS - {num_images} image{'s' if num_images > 1 else ''}")
         self.logger.info(f"{'='*80}\n")
         
-        # ============================================================
-        # Initialize State
-        # ============================================================
-        
         # Load and preprocess first image for initial analysis
         if image_stack is not None:
             first_image = image_stack[0]
             first_image_name = "frame_0000"
         else:
-            first_image = load_image(image_paths[0])
-            first_image_name = Path(image_paths[0]).stem
+            try:
+                first_image = load_image(image_paths[0])
+                first_image_name = Path(image_paths[0]).stem
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "error": {"error": "Failed to load image", "details": str(e)},
+                    "output_directory": str(self.output_dir)
+                }
         
         preprocessed_img, _ = preprocess_image(first_image)
         image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img)
@@ -259,9 +242,6 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "input_type": input_type,
             "num_images": num_images,
             "is_single_image": is_single_image,
-            
-            # Analysis mode
-            "analysis_mode": analysis_mode,
             
             # System info
             "system_info": self._handle_system_info(system_info),
@@ -288,11 +268,10 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "analysis_images": [
                 {"label": "Primary Microscopy Image", "data": image_bytes}
             ],
+            "error_dict": None,
         }
         
-        # ============================================================
         # Run Initial SAM Analysis on First Image
-        # ============================================================
         self.logger.info("📍 Running initial SAM analysis on first image...\n")
         
         try:
@@ -311,11 +290,13 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             
         except Exception as e:
             self.logger.error(f"Initial SAM analysis failed: {e}")
-            return {"error": f"Initial SAM analysis failed: {e}"}
+            return {
+                "status": "error",
+                "error": {"error": "Initial SAM analysis failed", "details": str(e)},
+                "output_directory": str(self.output_dir)
+            }
         
-        # ============================================================
         # Create and Execute Unified Pipeline
-        # ============================================================
         pipeline = create_unified_sam_pipeline(
             model=self.model,
             logger=self.logger,
@@ -344,9 +325,13 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 state["error_dict"] = {"error": f"Pipeline step failed: {step_name}", "details": str(e)}
                 break
         
-        # ============================================================
-        # Compile Final Results
-        # ============================================================
+        if state.get("error_dict"):
+            return {
+                "status": "error",
+                "error": state["error_dict"],
+                "output_directory": str(self.output_dir)
+            }
+        
         final_results = self._compile_results(state)
         
         # Save final results JSON
@@ -365,7 +350,6 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             input_ctx={
                 "num_images": num_images,
                 "input_type": input_type,
-                "analysis_mode": analysis_mode,
                 "series_metadata": series_metadata
             },
             result=final_results.get("summary"),
@@ -374,19 +358,16 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         return final_results
     
-    def _compile_results(self, state: dict) -> dict:
+    def _compile_results(self, state: dict) -> Dict[str, Any]:
         """
         Compile results into a consistent output structure.
-        
-        For single images, provides backward-compatible structure.
-        For batches, provides full batch results.
         """
         is_single = state.get("is_single_image", False)
         num_images = state.get("num_images", 1)
         batch_results = state.get("batch_results", [])
         
-        # Common structure
         results = {
+            "status": "success",
             "summary": {
                 "total_images": num_images,
                 "successful": sum(1 for r in batch_results if r.get("success", False)),
@@ -416,7 +397,11 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Batch: full structure
             results["individual_results"] = batch_results
             results["custom_analysis"] = state.get("custom_analysis_results", {})
-            results["synthesis"] = state.get("synthesis_result", {})
+            
+            synthesis = state.get("synthesis_result", {})
+            results["detailed_analysis"] = synthesis.get("detailed_analysis", "")
+            results["scientific_claims"] = synthesis.get("scientific_claims", [])
+            results["synthesis"] = synthesis
         
         return results
     
@@ -424,124 +409,36 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     # BACKWARD COMPATIBLE METHODS
     # =========================================================================
     
-    def analyze_for_claims(
-        self, 
-        image_path: str, 
-        system_info: Optional[Union[dict, str]] = None
-    ) -> dict:
-        """
-        Analyze a single microscopy image to generate scientific claims.
-        
-        BACKWARD COMPATIBLE: This method now uses the unified pipeline internally.
-        
-        Args:
-            image_path: Path to the image file
-            system_info: System/sample information
-        
-        Returns:
-            Dictionary with 'detailed_analysis' and 'scientific_claims'
-        """
-        self._init_state(current_image=image_path, system_info=system_info)
-        
-        result = self.analyze(
-            image_path=image_path,
-            system_info=system_info,
-            analysis_mode="claims"
-        )
-        
-        if "error" in result:
-            self._log_action("analyze_for_claims", {"image": image_path}, {"error": result})
-            return result
-        
-        # Extract backward-compatible structure
-        claims_result = {
-            "detailed_analysis": result.get("detailed_analysis", ""),
-            "scientific_claims": result.get("scientific_claims", [])
-        }
-        
-        # Validate claims
-        valid_claims = self._validate_scientific_claims(claims_result.get("scientific_claims", []))
-        claims_result["scientific_claims"] = valid_claims
-        
-        self._log_action(
-            action="analyze_for_claims",
-            input_ctx={"image": image_path, "system_info": system_info},
-            result=claims_result,
-            rationale="SAM microscopy analysis completed (unified pipeline)."
-        )
-        
-        return claims_result
-    
-    def analyze_for_recommendations(
-        self, 
-        image_path: str, 
-        system_info: Optional[Union[dict, str]] = None
-    ) -> dict:
-        """
-        Analyze a single microscopy image to generate measurement recommendations.
-        
-        BACKWARD COMPATIBLE: This method now uses the unified pipeline internally.
-        
-        Args:
-            image_path: Path to the image file
-            system_info: System/sample information
-        
-        Returns:
-            Dictionary with recommendations
-        """
-        self._init_state(current_image=image_path, system_info=system_info)
-        
-        result = self.analyze(
-            image_path=image_path,
-            system_info=system_info,
-            analysis_mode="recommendations"
-        )
-        
-        if "error" in result:
-            self._log_action("analyze_for_recommendations", {"image": image_path}, {"error": result})
-            return result
-        
-        self._log_action(
-            action="analyze_for_recommendations",
-            input_ctx={"image": image_path, "system_info": system_info},
-            result=result,
-            rationale="SAM measurement recommendations completed (unified pipeline)."
-        )
-        
-        return result
-    
     def analyze_image_series(
         self,
         image_paths: Optional[List[str]] = None,
         image_stack: Optional[np.ndarray] = None,
         system_info: Optional[Union[dict, str]] = None,
         series_metadata: Optional[dict] = None
-    ) -> dict:
+    ) -> Dict[str, Any]:
         """
         Analyze a series of images.
         
         BACKWARD COMPATIBLE: Delegates to unified analyze() method.
-        
-        Args:
-            image_paths: List of paths to images
-            image_stack: 3D numpy array (n, h, w)
-            system_info: System/sample information
-            series_metadata: Optional metadata about the series
-        
-        Returns:
-            Dictionary containing batch results
         """
-        return self.analyze(
-            image_paths=image_paths,
-            image_stack=image_stack,
-            system_info=system_info,
-            series_metadata=series_metadata,
-            analysis_mode="claims"
-        )
-    
-    # =========================================================================
-    # INSTRUCTION PROMPTS (for pipeline compatibility)
-    # =========================================================================
+        if image_paths is not None:
+            return self.analyze(
+                image_paths,
+                system_info=system_info,
+                series_metadata=series_metadata
+            )
+        elif image_stack is not None:
+            return self.analyze(
+                image_stack,
+                system_info=system_info,
+                series_metadata=series_metadata
+            )
+        else:
+            return {
+                "status": "error",
+                "error": {"error": "No input", "details": "Must provide image_paths or image_stack"},
+                "output_directory": str(self.output_dir)
+            }
     
     def _get_claims_instruction_prompt(self) -> str:
         return SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS

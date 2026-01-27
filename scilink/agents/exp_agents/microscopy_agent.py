@@ -1,35 +1,15 @@
 """
-Microscopy Analysis Agent - Unified Batch-First Architecture
-
-This module implements a unified microscopy analysis agent where ALL analysis
-follows the batch processing pattern. Single image analysis is simply
-a batch of 1.
-
-Key Design Principles:
-1. Single image = Batch of 1 (same pipeline, same controllers)
-2. Model caching for all cases (loads FFT/NMF analyzer once per analysis call)
-3. Consistent output structure regardless of batch size
-4. Human feedback loop available for all cases
-5. Conditional trend analysis (skipped for n < 2)
-
-BACKWARD COMPATIBILITY:
-- All existing methods work exactly as before
-- Same constructor signature  
-- Same return formats
-
-NEW CAPABILITIES:
-- Unified analyze() method that auto-detects single vs series
-- Consistent pipeline for all input types
+Microscopy Analysis Agent
 """
 
 import os
 import json
 import numpy as np
 from pathlib import Path
-from typing import Callable, List, Optional, Union
+from typing import Callable, Dict, Any, List, Optional, Union
 from datetime import datetime
 
-from .base_agent import BaseAnalysisAgent
+from .base_agent import BaseAnalysisAgent, AnalysisInput
 from .recommendation_agent import RecommendationAgent
 from .human_feedback import SimpleFeedbackMixin
 from .instruct import (
@@ -57,29 +37,20 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     - Multiple images = standard batch processing
     - Numpy array stack = batch processing
     
-    This eliminates code duplication and ensures consistent behavior.
-    
-    Features:
-    - Human-in-the-loop parameter refinement (optional)
-    - FFT/NMF analyzer caching (loaded once per analysis call)
-    - Conditional trend analysis (for n >= 2 images)
-    - Consistent output structure for all cases
-    - HTML report generation
-    
-    Configuration (`fft_nmf_settings`):
-    ---------------------------------
-    - FFT_NMF_ENABLED (bool): Master switch for Sliding FFT/NMF.
-    - enable_human_feedback (bool): Enable interactive parameter refinement.
-    - max_feedback_iterations (int): Max refinement iterations.
-    - max_script_corrections (int): Max attempts to fix custom analysis script.
-    - save_visualizations (bool): Whether to save plots.
-    - output_dir (str): Where to save NMF numpy arrays.
-    - visualization_dir (str): Where to save NMF plots.
-    
-    Backward Compatibility:
-    -----------------------
-    The legacy methods `analyze_for_claims()` and `analyze_for_recommendations()`
-    are preserved but now internally use the unified batch pipeline.
+    Example:
+        agent = MicroscopyAnalysisAgent(api_key="...")
+        
+        # Single image
+        result = agent.analyze("sample.tif")
+        
+        # Multiple images
+        result = agent.analyze(["img1.tif", "img2.tif"])
+        
+        # Numpy stack
+        result = agent.analyze(my_stack)
+        
+        # Get measurement recommendations
+        recommendations = agent.recommend_measurements(analysis_result=result)
     """
     
     def __init__(
@@ -158,86 +129,86 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "use_clahe": self.settings.get('use_clahe', False),
         }
     
-    # =========================================================================
-    # UNIFIED ANALYSIS METHOD
-    # =========================================================================
-    
     def analyze(
         self,
-        image_path: Optional[str] = None,
-        image_paths: Optional[List[str]] = None,
-        image_stack: Optional[np.ndarray] = None,
-        system_info: Optional[Union[dict, str]] = None,
+        data: AnalysisInput,
+        system_info: Optional[Union[Dict[str, Any], str]] = None,
+        # Microscopy-specific options
         series_metadata: Optional[dict] = None,
-        analysis_mode: str = "claims",
         preset_params: Optional[dict] = None,
-        feedback_callback: Optional[Callable] = None
-    ) -> dict:
+        feedback_callback: Optional[Callable] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
         """
         Unified analysis method - handles single images and batches identically.
         
         Single image analysis is internally converted to a batch of 1.
         
         Args:
-            image_path: Single image path (convenience parameter)
-            image_paths: List of image paths
-            image_stack: 3D numpy array (n, h, w)
+            data: Input data. Can be:
+                - str: Single image path
+                - List[str]: Multiple image paths
+                - np.ndarray: 2D (single) or 3D (stack) array
             system_info: System/sample information
             series_metadata: Optional metadata about the series
-            analysis_mode: "claims" or "recommendations" (for output formatting)
             preset_params: Skip first-frame analysis, use these params directly
             feedback_callback: Optional function for custom feedback
         
         Returns:
-            Dictionary containing analysis results with consistent structure
+            Dict with status, detailed_analysis, scientific_claims,
+            summary, output_directory, and microscopy-specific fields
         
         Examples:
             # Single image
-            result = agent.analyze(image_path="sample.tif")
+            result = agent.analyze("sample.tif")
             
             # Multiple images
-            result = agent.analyze(image_paths=["img1.tif", "img2.tif"])
+            result = agent.analyze(["img1.tif", "img2.tif"])
             
             # Numpy stack
-            result = agent.analyze(image_stack=my_stack)
+            result = agent.analyze(my_stack)
             
             # With preset parameters (skip feedback)
             result = agent.analyze(
-                image_paths=paths, 
+                ["img1.tif", "img2.tif"], 
                 preset_params={"window_size_nm": 10.0, "n_components": 4}
             )
         """
-        # ============================================================
-        # Input Normalization: Convert single image to batch of 1
-        # ============================================================
+        # Parse input
+        data_path, data_paths, data_array, error = self._parse_data_input(data)
+        
+        if error:
+            return {
+                "status": "error",
+                "error": error,
+                "output_directory": str(self.output_dir)
+            }
+        
+        # Normalize to internal variables
+        image_path = data_path
+        image_paths = data_paths
+        image_stack = data_array
+        
+        # Convert single image to batch of 1
         if image_path is not None:
-            if image_paths is not None or image_stack is not None:
-                return {"error": "Provide only one of: image_path, image_paths, or image_stack"}
             image_paths = [image_path]
             self.logger.info(f"Single image mode: treating as batch of 1")
         
-        # Validate inputs
-        if image_paths is None and image_stack is None:
-            return {"error": "Must provide image_path, image_paths, or image_stack"}
-        
-        if image_paths is not None and image_stack is not None:
-            return {"error": "Provide either image_paths OR image_stack, not both"}
-        
         # Determine input type and count
         if image_stack is not None:
-            if not isinstance(image_stack, np.ndarray):
-                return {"error": "image_stack must be a numpy array"}
             if image_stack.ndim == 2:
                 # Single 2D image provided as array - convert to 3D
                 image_stack = image_stack[np.newaxis, :, :]
                 self.logger.info("Single 2D array provided, converted to shape (1, h, w)")
             if image_stack.ndim != 3:
-                return {"error": f"image_stack must be 2D or 3D, got {image_stack.ndim}D"}
+                return {
+                    "status": "error",
+                    "error": {"error": "Invalid shape", "details": f"Array must be 2D or 3D, got {image_stack.ndim}D"},
+                    "output_directory": str(self.output_dir)
+                }
             num_images = image_stack.shape[0]
             input_type = "numpy_array"
         else:
-            if not image_paths:
-                return {"error": "image_paths list is empty"}
             num_images = len(image_paths)
             input_type = "file_paths"
         
@@ -247,17 +218,20 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.logger.info(f"🔬 MICROSCOPY ANALYSIS - {num_images} image{'s' if num_images > 1 else ''}")
         self.logger.info(f"{'='*80}\n")
         
-        # ============================================================
-        # Initialize State
-        # ============================================================
-        
         # Load and preprocess first image for initial analysis
         if image_stack is not None:
             first_image = image_stack[0]
             first_image_name = "frame_0000"
         else:
-            first_image = load_image(image_paths[0])
-            first_image_name = Path(image_paths[0]).stem
+            try:
+                first_image = load_image(image_paths[0])
+                first_image_name = Path(image_paths[0]).stem
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "error": {"error": "Failed to load image", "details": str(e)},
+                    "output_directory": str(self.output_dir)
+                }
         
         # Normalize float images
         if first_image.dtype in [np.float32, np.float64, float]:
@@ -290,9 +264,6 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "n_frames": num_images,
             "first_frame": first_image,
             
-            # Analysis mode
-            "analysis_mode": analysis_mode,
-            
             # System info
             "system_info": self._handle_system_info(system_info),
             "series_metadata": series_metadata or {},
@@ -321,6 +292,7 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "analysis_images": [
                 {"label": "Primary Microscopy Image", "data": image_bytes}
             ],
+            "error_dict": None,
         }
         
         # If preset params provided, inject them
@@ -328,9 +300,7 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             state["locked_params"] = preset_params
             state["first_frame_results"] = {"llm_params": preset_params}
         
-        # ============================================================
         # Create and Execute Unified Pipeline
-        # ============================================================
         pipeline = create_unified_microscopy_pipeline(
             model=self.model,
             logger=self.logger,
@@ -360,7 +330,8 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     self.logger.info("Analysis cancelled by user.")
                     return {
                         "status": "cancelled",
-                        "first_frame_results": state.get("first_frame_results")
+                        "first_frame_results": state.get("first_frame_results"),
+                        "output_directory": str(self.output_dir)
                     }
                     
             except Exception as e:
@@ -368,9 +339,14 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 state["error_dict"] = {"error": f"Pipeline step failed: {step_name}", "details": str(e)}
                 break
         
-        # ============================================================
-        # Compile Final Results
-        # ============================================================
+        if state.get("error_dict"):
+            return {
+                "status": "error",
+                "error": state["error_dict"],
+                "output_directory": str(self.output_dir)
+            }
+        
+        # Compile final results
         final_results = self._compile_results(state)
         
         # Save final results JSON
@@ -389,7 +365,6 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             input_ctx={
                 "num_images": num_images,
                 "input_type": input_type,
-                "analysis_mode": analysis_mode,
                 "series_metadata": series_metadata
             },
             result=final_results.get("summary"),
@@ -398,20 +373,16 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         return final_results
     
-    def _compile_results(self, state: dict) -> dict:
+    def _compile_results(self, state: dict) -> Dict[str, Any]:
         """
         Compile results into a consistent output structure.
-        
-        For single images, provides backward-compatible structure.
-        For batches, provides full batch results.
         """
         is_single = state.get("is_single_image", False)
         num_images = state.get("num_images", 1)
         batch_results = state.get("batch_results", [])
         
-        # Common structure
         results = {
-            "status": "success" if not state.get("error_dict") else "error",
+            "status": "success",
             "summary": {
                 "total_images": num_images,
                 "successful": sum(1 for r in batch_results if r.get("success", False)) if batch_results else (1 if not state.get("error_dict") else 0),
@@ -422,16 +393,11 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "output_directory": str(self.output_dir)
         }
         
-        if state.get("error_dict"):
-            results["error"] = state["error_dict"]
-            return results
-        
         if is_single:
             # Single image: provide simplified structure for backward compatibility
             synthesis = state.get("synthesis_result", {})
             result_json = state.get("result_json", {})
             
-            # Use synthesis if available, else fall back to result_json
             results["detailed_analysis"] = (
                 synthesis.get("detailed_analysis") or 
                 result_json.get("detailed_analysis") or 
@@ -461,7 +427,11 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             results["abundances"] = state.get("series_abundances")
             results["individual_results"] = batch_results
             results["custom_analysis"] = state.get("custom_analysis_results", {})
-            results["synthesis"] = state.get("synthesis_result", {})
+            
+            synthesis = state.get("synthesis_result", {})
+            results["detailed_analysis"] = synthesis.get("detailed_analysis", "")
+            results["scientific_claims"] = synthesis.get("scientific_claims", [])
+            results["synthesis"] = synthesis
             results["analysis_script_path"] = state.get("analysis_script_path")
             results["locked_params"] = state.get("locked_params")
             results["first_frame_results"] = state.get("first_frame_results")
@@ -472,106 +442,13 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     # BACKWARD COMPATIBLE METHODS
     # =========================================================================
     
-    def analyze_for_claims(
-        self, 
-        image_path: str, 
-        system_info: Optional[Union[dict, str]] = None
-    ) -> dict:
-        """
-        Analyze a single microscopy image to generate scientific claims.
-        
-        BACKWARD COMPATIBLE: This method now uses the unified pipeline internally.
-        
-        Args:
-            image_path: Path to the image file
-            system_info: System/sample information
-        
-        Returns:
-            Dictionary with 'detailed_analysis' and 'scientific_claims'
-        """
-        self._init_state(current_image=image_path, system_info=system_info)
-        
-        result = self.analyze(
-            image_path=image_path,
-            system_info=system_info,
-            analysis_mode="claims"
-        )
-        
-        if result.get("status") == "error" or "error" in result:
-            self._log_action("analyze_for_claims", {"image": image_path}, {"error": result})
-            return result.get("error", result)
-        
-        # Extract backward-compatible structure
-        claims_result = {
-            "detailed_analysis": result.get("detailed_analysis", ""),
-            "scientific_claims": result.get("scientific_claims", [])
-        }
-        
-        # Validate claims
-        valid_claims = self._validate_scientific_claims(claims_result.get("scientific_claims", []))
-        claims_result["scientific_claims"] = valid_claims
-        
-        # Apply feedback if enabled
-        final_result = self._apply_feedback_if_enabled(
-            claims_result,
-            image_path=image_path,
-            system_info=system_info
-        )
-        
-        self._log_action(
-            action="analyze_for_claims",
-            input_ctx={"image": image_path, "system_info": system_info},
-            result=final_result,
-            rationale="Microscopy analysis completed (unified pipeline)."
-        )
-        
-        return final_result
-    
-    def analyze_for_recommendations(
-        self, 
-        image_path: str, 
-        system_info: Optional[Union[dict, str]] = None
-    ) -> dict:
-        """
-        Analyze a single microscopy image to generate measurement recommendations.
-        
-        BACKWARD COMPATIBLE: This method now uses the unified pipeline internally.
-        
-        Args:
-            image_path: Path to the image file
-            system_info: System/sample information
-        
-        Returns:
-            Dictionary with recommendations
-        """
-        self._init_state(current_image=image_path, system_info=system_info)
-        
-        result = self.analyze(
-            image_path=image_path,
-            system_info=system_info,
-            analysis_mode="recommendations"
-        )
-        
-        if result.get("status") == "error" or "error" in result:
-            self._log_action("analyze_for_recommendations", {"image": image_path}, {"error": result})
-            return result.get("error", result)
-        
-        self._log_action(
-            action="analyze_for_recommendations",
-            input_ctx={"image": image_path, "system_info": system_info},
-            result=result,
-            rationale="Microscopy recommendations completed (unified pipeline)."
-        )
-        
-        return result
-    
     def analyze_microscopy_image_for_structure_recommendations(
         self,
         image_path: str | None = None,
         system_info: dict | str | None = None,
         additional_prompt_context: str | None = None,
         cached_detailed_analysis: str | None = None
-    ):
+    ) -> Dict[str, Any]:
         """
         Analyze microscopy image for DFT structure recommendations.
         (BACKWARD COMPATIBLE)
@@ -592,11 +469,7 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         elif image_path:
             self.logger.info("Generating DFT recommendations via unified pipeline.")
-            result = self.analyze(
-                image_path=image_path, 
-                system_info=system_info,
-                analysis_mode="recommendations"
-            )
+            result = self.analyze(image_path, system_info=system_info)
             
             if result.get("status") == "error":
                 return result.get("error", result)
@@ -618,40 +491,29 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         system_info: Optional[dict] = None,
         feedback_callback: Optional[Callable] = None,
         preset_params: Optional[dict] = None,
-    ) -> dict:
+    ) -> Dict[str, Any]:
         """
         Analyze an image series with interactive parameter tuning.
         
         BACKWARD COMPATIBLE: Delegates to unified analyze() method.
-        
-        Args:
-            series_input: Directory path, TIFF path, or 3D numpy array
-            system_info: Metadata dictionary
-            feedback_callback: Optional function for custom feedback
-            preset_params: Skip first-frame analysis, use these params
-        
-        Returns:
-            Dictionary containing batch results
         """
         # Convert series_input to appropriate format
         if isinstance(series_input, np.ndarray):
             return self.analyze(
-                image_stack=series_input,
+                series_input,
                 system_info=system_info,
                 preset_params=preset_params,
-                feedback_callback=feedback_callback,
-                analysis_mode="claims"
+                feedback_callback=feedback_callback
             )
         elif isinstance(series_input, str):
             if os.path.isdir(series_input):
                 # Load directory
                 image_paths = self._load_image_paths_from_directory(series_input)
                 return self.analyze(
-                    image_paths=image_paths,
+                    image_paths,
                     system_info=system_info,
                     preset_params=preset_params,
-                    feedback_callback=feedback_callback,
-                    analysis_mode="claims"
+                    feedback_callback=feedback_callback
                 )
             elif series_input.lower().endswith(('.tif', '.tiff')):
                 # Load TIFF stack
@@ -660,43 +522,37 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 if stack.ndim == 2:
                     stack = stack[np.newaxis, :, :]
                 return self.analyze(
-                    image_stack=stack,
+                    stack,
                     system_info=system_info,
                     preset_params=preset_params,
-                    feedback_callback=feedback_callback,
-                    analysis_mode="claims"
+                    feedback_callback=feedback_callback
                 )
             else:
-                return {"error": f"Unsupported file type: {series_input}"}
+                return {
+                    "status": "error",
+                    "error": {"error": "Unsupported file type", "details": series_input},
+                    "output_directory": str(self.output_dir)
+                }
         else:
-            return {"error": f"Unsupported input type: {type(series_input)}"}
+            return {
+                "status": "error",
+                "error": {"error": "Unsupported input type", "details": str(type(series_input))},
+                "output_directory": str(self.output_dir)
+            }
     
     def analyze_image(
         self,
         image_input: Union[str, np.ndarray],
         system_info: Optional[dict] = None,
         **kwargs
-    ) -> dict:
+    ) -> Dict[str, Any]:
         """
         Unified analysis method - auto-detects single image vs series.
         
         BACKWARD COMPATIBLE: Convenience wrapper.
-        
-        Args:
-            image_input: Image path, directory, or numpy array
-            system_info: Metadata dictionary
-            **kwargs: Additional arguments
-        
-        Returns:
-            Analysis results dictionary
         """
         if isinstance(image_input, np.ndarray):
-            if image_input.ndim == 2:
-                return self.analyze(image_stack=image_input, system_info=system_info, **kwargs)
-            elif image_input.ndim == 3:
-                return self.analyze(image_stack=image_input, system_info=system_info, **kwargs)
-            else:
-                return {"status": "error", "error": f"Invalid array dimensions: {image_input.ndim}"}
+            return self.analyze(image_input, system_info=system_info, **kwargs)
         
         elif isinstance(image_input, str):
             if os.path.isdir(image_input):
@@ -707,11 +563,15 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 if test_load.ndim == 3 and test_load.shape[0] > 1:
                     return self.analyze_series(image_input, system_info, **kwargs)
                 else:
-                    return self.analyze(image_path=image_input, system_info=system_info, **kwargs)
+                    return self.analyze(image_input, system_info=system_info, **kwargs)
             else:
-                return self.analyze(image_path=image_input, system_info=system_info, **kwargs)
+                return self.analyze(image_input, system_info=system_info, **kwargs)
         
-        return {"status": "error", "error": f"Unsupported input type: {type(image_input)}"}
+        return {
+            "status": "error",
+            "error": {"error": "Unsupported input type", "details": str(type(image_input))},
+            "output_directory": str(self.output_dir)
+        }
     
     def analyze_series_with_preset(
         self,
@@ -719,7 +579,7 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         window_size_nm: float,
         n_components: int = 4,
         system_info: Optional[dict] = None
-    ) -> dict:
+    ) -> Dict[str, Any]:
         """
         Analyze series with preset parameters (no feedback loop).
         
@@ -749,10 +609,6 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         self.logger.warning("No saved series results found")
         return None, None
-    
-    # =========================================================================
-    # HELPER METHODS
-    # =========================================================================
     
     def _load_image_paths_from_directory(self, directory: str) -> List[str]:
         """Load image paths from a directory."""
