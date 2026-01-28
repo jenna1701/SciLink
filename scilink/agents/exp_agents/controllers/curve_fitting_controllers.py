@@ -861,20 +861,37 @@ class UnifiedSeriesProcessingController:
 
     def _adapt_script_for_spectrum(self, base_script: str, data_path: str, output_prefix: str) -> str:
         """Adapt the base fitting script for a specific spectrum."""
+        import re
+        
         adapted = base_script
         
-        # Replace output filename
+        # Replace output filename patterns
         adapted = adapted.replace('fit_visualization.png', f'{output_prefix}_fit.png')
+        adapted = re.sub(r'spectrum_\d{4}_fit\.png', f'{output_prefix}_fit.png', adapted)
         
-        # Inject the new data path at the start
-        data_load_injection = f'\n# Data path for this spectrum\nDATA_PATH = "{data_path}"\n'
+        # Find and replace the data path in np.load() calls
+        # Match patterns like: np.load("...temp_spectrum_0.npy") or np.load('...temp_spectrum_0.npy')
+        adapted = re.sub(
+            r'np\.load\s*\(\s*["\'].*?temp_spectrum_\d+\.npy["\']\s*\)',
+            f'np.load("{data_path}")',
+            adapted
+        )
         
-        if 'import numpy' in adapted:
-            adapted = adapted.replace('import numpy as np', 
-                                     f'import numpy as np{data_load_injection}')
-        else:
-            adapted = data_load_injection + adapted
-            
+        # Also replace any standalone path string assignments
+        # Match: data_path = "...temp_spectrum_0.npy" or similar variable assignments
+        adapted = re.sub(
+            r'(["\']).*?temp_spectrum_\d+\.npy\1',
+            f'"{data_path}"',
+            adapted
+        )
+        
+        # Replace any DATA_PATH or data_path variable assignments with the new path
+        adapted = re.sub(
+            r'(DATA_PATH|data_path)\s*=\s*["\'].*?["\']',
+            f'DATA_PATH = "{data_path}"',
+            adapted
+        )
+        
         return adapted
 
     def _compute_statistics(self, curve_data: np.ndarray) -> dict:
