@@ -1,21 +1,40 @@
+# agents/curve_fitting_agent_unified.py
+
 """
-CurveFittingAgent - LLM-driven spectroscopic curve fitting.
+CurveFittingAgent - Unified Architecture for Single and Series Analysis
+
+This module provides a curve fitting agent that handles both single spectrum
+analysis and spectral series analysis using the same unified architecture.
+
+Key principle: Single spectrum = Series of 1
+
+For series analysis:
+1. Carefully fit the first spectrum with full LLM planning
+2. Lock the fitting model and strategy for remaining spectra
+3. Generate custom analysis code for trend visualization
+4. Synthesize findings across the series
 """
 
 import os
+import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, List, Union
-import numpy as np 
+from typing import Dict, Any, List, Optional, Union
+import numpy as np
 
 from .base_agent import BaseAnalysisAgent, AnalysisInput
 from .human_feedback import SimpleFeedbackMixin
 from ...executors import ScriptExecutor
 from ..lit_agents.literature_agent import FittingModelLiteratureAgent
 from .preprocess import CurvePreprocessingAgent
-from .pipelines.curve_fitting_pipelines import create_curve_fitting_pipeline
+from .pipelines.curve_fitting_pipelines import create_unified_curve_fitting_pipeline
 from ...tools.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
 from ._deprecation import normalize_params
+
+from .instruct import (
+    FITTING_INTERPRETATION_INSTRUCTIONS,
+    CURVE_FITTING_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -23,7 +42,15 @@ logger = logging.getLogger(__name__)
 
 class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
-    Agent for spectroscopic curve fitting.
+    Unified Curve Fitting Agent for spectroscopic analysis.
+    
+    ALL analysis follows the series processing pattern:
+    - Single spectrum analysis = series of 1
+    - Multiple spectra = standard series processing
+    - Numpy array stack = series processing
+    
+    For series analysis, the fitting model is carefully selected on the
+    first spectrum and then LOCKED for consistent analysis across all spectra.
 
     Args:
         api_key: LLM API key
@@ -39,14 +66,30 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     Example:
         agent = CurveFittingAgent(api_key="...", use_literature=True)
         
-        # Single file
+        # Single spectrum
         result = agent.analyze("spectrum.csv")
         
-        # With metadata
+        # Multiple spectra (series)
+        result = agent.analyze(["spec1.csv", "spec2.csv", "spec3.csv"])
+        
+        # Numpy stack
+        result = agent.analyze(my_spectra_stack)
+        
+        # With metadata and hints
         result = agent.analyze(
             "spectrum.csv",
             system_info={"sample": "TiO2"},
             hints="Focus on the band gap"
+        )
+        
+        # Series with metadata
+        result = agent.analyze(
+            spectra_paths,
+            series_metadata={
+                "series_type": "temperature",
+                "values": [300, 350, 400, 450, 500],
+                "unit": "K"
+            }
         )
         
         # Get measurement recommendations
@@ -116,68 +159,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             else:
                 logger.warning("use_literature=True but no API key provided")
 
-        # Create pipeline
-        self.pipeline = create_curve_fitting_pipeline(
-            model=self.model,
-            logger=self.logger,
-            generation_config=self.generation_config,
-            safety_settings=self.safety_settings,
-            parse_fn=self._parse_llm_response,
-            store_fn=self._store_analysis_images,
-            plot_fn=plot_curve_to_bytes,
-            executor=self.executor,
-            output_dir=str(self.output_dir),
-            preprocessor=self.preprocessor,
-            literature_agent=self.literature_agent,
-            enable_human_feedback=enable_human_feedback
-        )
-
-    def _run_analysis_pipeline(
-        self, data_path: str, system_info: dict, analysis_hints: str | None = None
-    ) -> tuple[dict | None, dict | None]:
-        """Run the analysis pipeline."""
-        processed_data_path = None
-
-        try:
-            self.logger.info(f"--- Starting analysis: {data_path} ---")
-            self._clear_stored_images()
-            system_info = self._handle_system_info(system_info)
-
-            curve_data = load_curve_data(data_path)
-
-            state = {
-                "data_path": data_path,
-                "system_info": system_info,
-                "curve_data": curve_data,
-                "analysis_hints": analysis_hints,
-                "analysis_images": [],
-                "result_json": {},
-                "error_dict": None,
-            }
-
-            for controller in self.pipeline:
-                state = controller.execute(state)
-                if state.get("error_dict"):
-                    self.logger.error(f"Failed at {controller.__class__.__name__}")
-                    break
-
-            processed_data_path = state.get("processed_data_path")
-            self.logger.info("--- Analysis complete ---")
-            return state.get("result_json"), state.get("error_dict")
-
-        except FileNotFoundError:
-            self._clear_stored_images()
-            return None, {"error": "File not found", "details": data_path}
-        except Exception as e:
-            self._clear_stored_images()
-            self.logger.exception(f"Unexpected error: {e}")
-            return None, {"error": "Unexpected error", "details": str(e)}
-        finally:
-            if processed_data_path and os.path.exists(processed_data_path):
-                try:
-                    os.remove(processed_data_path)
-                except Exception:
-                    pass
+    def _get_initial_state_fields(self) -> dict:
+        """Return initial state fields for the agent."""
+        return {
+            "current_spectrum": None,
+            "pipeline_type": "curve_fitting_unified",
+            "is_series": False
+        }
 
     def analyze(
         self,
@@ -185,33 +173,50 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         system_info: Dict[str, Any] | str | None = None,
         # Curve fitting specific
         hints: str | None = None,
+        series_metadata: Optional[dict] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
-        Analyze spectroscopic data.
+        Unified analysis method - handles single spectra and series identically.
+        
+        Single spectrum analysis is internally converted to a series of 1.
+        For series, the fitting model is locked after the first spectrum.
 
         Args:
             data: Input data. Can be:
-                - str: Path to data file (.npy, .csv, .txt)
-                - List[str]: Batch processing (not supported)
-                - np.ndarray: Direct array (not supported)
+                - str: Single spectrum path (.npy, .csv, .txt)
+                - List[str]: Multiple spectrum paths (series)
+                - np.ndarray: 1D/2D (single) or 3D (series stack) array
             system_info: Sample/experiment metadata
             hints: Optional guidance for the analysis
+            series_metadata: Optional metadata about the series, e.g.:
+                {
+                    "series_type": "temperature",  # or "time", "concentration", etc.
+                    "values": [300, 350, 400],     # x-axis values
+                    "unit": "K"                     # unit for values
+                }
 
         Returns:
             Dict with status, detailed_analysis, scientific_claims,
-            model_type, fitting_parameters, fit_quality, output_directory
+            model_type, fitting_parameters, fit_quality, output_directory,
+            and for series: individual_results, trend_analysis, parameter_evolution
         
         Examples:
-            # Single file
+            # Single spectrum
             result = agent.analyze("spectrum.csv")
             
-            # With metadata and hints
+            # Series of spectra
             result = agent.analyze(
-                "raman_spectrum.npy",
-                system_info={"sample": "Graphene"},
-                hints="Look for D and G bands"
+                ["temp_300K.csv", "temp_350K.csv", "temp_400K.csv"],
+                series_metadata={
+                    "series_type": "temperature",
+                    "values": [300, 350, 400],
+                    "unit": "K"
+                }
             )
+            
+            # Numpy stack (3D array: n_spectra x 2 x n_points)
+            result = agent.analyze(my_spectra_stack)
         """
         # Parse input
         data_path, data_paths, data_array, error = self._parse_data_input(data)
@@ -223,86 +228,350 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "output_directory": str(self.output_dir)
             }
         
-        # Batch processing not supported
-        if data_paths is not None:
+        # Normalize to internal variables
+        spectrum_path = data_path
+        spectrum_paths = data_paths
+        spectrum_stack = data_array
+        
+        # Convert single spectrum to series of 1
+        if spectrum_path is not None:
+            spectrum_paths = [spectrum_path]
+            self.logger.info("Single spectrum mode: treating as series of 1")
+        
+        # Determine input type and count
+        if spectrum_stack is not None:
+            # Handle numpy array input
+            if spectrum_stack.ndim == 1:
+                # 1D array: single spectrum y-values
+                spectrum_stack = spectrum_stack[np.newaxis, np.newaxis, :]
+                self.logger.info("1D array provided, converted to shape (1, 1, n)")
+            elif spectrum_stack.ndim == 2:
+                # 2D array: single spectrum [x, y] or [y] with multiple points
+                if spectrum_stack.shape[0] == 2:
+                    # Shape (2, n): single spectrum with x and y
+                    spectrum_stack = spectrum_stack[np.newaxis, :, :]
+                else:
+                    # Shape (n, 2): single spectrum, transpose
+                    spectrum_stack = spectrum_stack.T[np.newaxis, :, :]
+                self.logger.info(f"2D array provided, converted to shape {spectrum_stack.shape}")
+            elif spectrum_stack.ndim != 3:
+                return {
+                    "status": "error",
+                    "error": {"error": "Invalid shape", "details": f"Array must be 1D, 2D, or 3D, got {spectrum_stack.ndim}D"},
+                    "output_directory": str(self.output_dir)
+                }
+            
+            num_spectra = spectrum_stack.shape[0]
+            input_type = "numpy_array"
+        else:
+            num_spectra = len(spectrum_paths)
+            input_type = "file_paths"
+        
+        is_single_spectrum = (num_spectra == 1)
+        
+        self.logger.info(f"\n{'='*80}")
+        self.logger.info(f"📈 CURVE FITTING ANALYSIS - {num_spectra} spectrum{'s' if num_spectra > 1 else ''}")
+        self.logger.info(f"{'='*80}\n")
+        
+        # Load first spectrum for initial analysis
+        if spectrum_stack is not None:
+            first_spectrum = spectrum_stack[0]
+            first_spectrum_name = "spectrum_0000"
+        else:
+            try:
+                first_spectrum = load_curve_data(spectrum_paths[0])
+                first_spectrum_name = Path(spectrum_paths[0]).stem
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "error": {"error": "Failed to load spectrum", "details": str(e)},
+                    "output_directory": str(self.output_dir)
+                }
+        
+        # Optional preprocessing of first spectrum
+        processed_first_spectrum = first_spectrum
+        if self.preprocessor is not None:
+            try:
+                processed_first_spectrum, _ = self.preprocessor.run_preprocessing(
+                    first_spectrum, self._handle_system_info(system_info)
+                )
+            except Exception as e:
+                self.logger.warning(f"Preprocessing failed: {e}, using raw data")
+        
+        # Generate initial plot
+        original_plot_bytes = plot_curve_to_bytes(
+            processed_first_spectrum, 
+            self._handle_system_info(system_info)
+        )
+        
+        # Compute statistics for first spectrum
+        data_statistics = self._compute_statistics(processed_first_spectrum)
+        
+        # Build initial state
+        state = {
+            # Input data
+            "spectrum_paths": spectrum_paths,
+            "spectrum_stack": spectrum_stack,
+            "input_type": input_type,
+            "num_spectra": num_spectra,
+            "is_single_spectrum": is_single_spectrum,
+            
+            # System info
+            "system_info": self._handle_system_info(system_info),
+            "series_metadata": series_metadata or {},
+            "analysis_hints": hints,
+            
+            # First spectrum (for planning)
+            "data_path": spectrum_paths[0] if spectrum_paths else first_spectrum_name,
+            "curve_data": processed_first_spectrum,
+            "original_plot_bytes": original_plot_bytes,
+            "data_statistics": data_statistics,
+            
+            # Pipeline state
+            "analysis_images": [{"label": "First Spectrum", "data": original_plot_bytes}],
+            "result_json": {},
+            "error_dict": None,
+        }
+        
+        # Create unified pipeline
+        pipeline = create_unified_curve_fitting_pipeline(
+            model=self.model,
+            logger=self.logger,
+            generation_config=self.generation_config,
+            safety_settings=self.safety_settings,
+            parse_fn=self._parse_llm_response,
+            store_fn=self._store_analysis_images,
+            plot_fn=plot_curve_to_bytes,
+            executor=self.executor,
+            output_dir=str(self.output_dir),
+            preprocessor=self.preprocessor,
+            literature_agent=self.literature_agent,
+            enable_human_feedback=self.enable_human_feedback
+        )
+        
+        # Execute pipeline
+        for i, controller in enumerate(pipeline, 1):
+            step_name = controller.__class__.__name__
+            self.logger.info(f"\n📍 STEP {i}: {step_name}\n")
+            
+            try:
+                state = controller.execute(state)
+                
+                if state.get("error_dict"):
+                    self.logger.error(f"Pipeline failed at {step_name}: {state['error_dict']}")
+                    break
+                    
+            except Exception as e:
+                self.logger.error(f"Pipeline step {step_name} raised exception: {e}")
+                state["error_dict"] = {"error": f"Pipeline step failed: {step_name}", "details": str(e)}
+                break
+        
+        # Handle errors
+        if state.get("error_dict"):
             return {
                 "status": "error",
-                "error": {
-                    "error": "Batch processing not supported",
-                    "details": "CurveFittingAgent processes one file at a time. Pass a single file path."
-                },
+                "error": state["error_dict"],
                 "output_directory": str(self.output_dir)
             }
         
-        # Direct array not supported
-        if data_array is not None:
-            return {
-                "status": "error",
-                "error": {
-                    "error": "Direct array input not supported",
-                    "details": "Save array to file and pass the file path."
-                },
-                "output_directory": str(self.output_dir)
-            }
-
-        # Run analysis
-        self._init_state(data_path=data_path, system_info=system_info)
-        self.logger.info(f"Analyzing: {data_path}")
-
-        result_json, error_dict = self._run_analysis_pipeline(
-            data_path, system_info or {}, analysis_hints=hints
+        # Compile results
+        final_results = self._compile_results(state)
+        
+        # Save final results
+        results_path = self.output_dir / "analysis_results.json"
+        with open(results_path, 'w') as f:
+            # Make serializable
+            serializable = self._make_serializable(final_results)
+            json.dump(serializable, f, indent=2, default=str)
+        
+        self.logger.info(f"\n{'='*80}")
+        self.logger.info(f"✅ ANALYSIS COMPLETE")
+        self.logger.info(f"   Results saved to: {results_path}")
+        self.logger.info(f"{'='*80}\n")
+        
+        # Log action
+        self._log_action(
+            action="curve_fit",
+            input_ctx={
+                "num_spectra": num_spectra,
+                "input_type": input_type,
+                "series_metadata": series_metadata
+            },
+            result=final_results.get("summary") if not is_single_spectrum else final_results,
+            rationale=f"Model: {final_results.get('model_type', 'unknown')}"
         )
+        
+        return final_results
 
-        if error_dict:
-            self._log_action("curve_fit", {"data": data_path}, {"error": error_dict})
-            return {
-                "status": "error",
-                "error": error_dict,
-                "output_directory": str(self.output_dir)
-            }
+    def _compute_statistics(self, curve_data: np.ndarray) -> dict:
+        """Compute statistics for a spectrum."""
+        if curve_data.ndim == 1:
+            x = np.arange(len(curve_data))
+            y = curve_data
+        elif curve_data.shape[0] == 2:
+            x, y = curve_data[0], curve_data[1]
+        elif curve_data.shape[1] == 2:
+            x, y = curve_data[:, 0], curve_data[:, 1]
+        else:
+            raise ValueError(f"Unexpected data shape: {curve_data.shape}")
 
-        if not result_json:
-            return {
-                "status": "error",
-                "error": {"error": "No results returned", "details": "Pipeline returned empty result"},
-                "output_directory": str(self.output_dir)
-            }
-
-        initial_result = {
-            "detailed_analysis": result_json.get("detailed_analysis"),
-            "scientific_claims": self._validate_scientific_claims(
-                result_json.get("scientific_claims", [])
-            ),
-            "fitting_parameters": result_json.get("fitting_parameters"),
-            "literature_files": result_json.get("literature_files"),
+        return {
+            "n_points": len(x),
+            "x_range": [float(np.nanmin(x)), float(np.nanmax(x))],
+            "y_range": [float(np.nanmin(y)), float(np.nanmax(y))],
+            "y_mean": float(np.nanmean(y)),
+            "y_std": float(np.nanstd(y)),
+            "has_nans": bool(np.any(np.isnan(curve_data))),
         }
 
-        final_result = self._apply_feedback_if_enabled(initial_result, system_info=system_info)
-
-        response = {
+    def _compile_results(self, state: dict) -> Dict[str, Any]:
+        """Compile results into a consistent output structure."""
+        is_single = state.get("is_single_spectrum", True)
+        num_spectra = state.get("num_spectra", 1)
+        series_results = state.get("series_results", [])
+        synthesis = state.get("synthesis_result", {})
+        
+        # Base result structure
+        results = {
             "status": "success",
-            "detailed_analysis": final_result.get("detailed_analysis"),
-            "scientific_claims": final_result.get("scientific_claims", []),
-            "model_type": result_json.get("model_type"),
-            "fitting_parameters": result_json.get("fitting_parameters"),
-            "fit_quality": result_json.get("fit_quality"),
-            "literature_files": result_json.get("literature_files"),
             "output_directory": str(self.output_dir)
         }
+        
+        if is_single:
+            # Single spectrum: backward-compatible structure
+            fit_results = state.get("fit_results", {})
+            
+            results["detailed_analysis"] = synthesis.get("detailed_analysis")
+            results["scientific_claims"] = self._validate_scientific_claims(
+                synthesis.get("scientific_claims", [])
+            )
+            results["model_type"] = fit_results.get("model_type")
+            results["fitting_parameters"] = fit_results.get("parameters", {})
+            results["fit_quality"] = fit_results.get("fit_quality", {})
+            results["literature_files"] = state.get("literature_files")
+            
+            # Apply feedback if enabled
+            initial_result = {
+                "detailed_analysis": results["detailed_analysis"],
+                "scientific_claims": results["scientific_claims"],
+                "fitting_parameters": results["fitting_parameters"],
+                "literature_files": results["literature_files"],
+            }
+            final_result = self._apply_feedback_if_enabled(
+                initial_result, 
+                system_info=state.get("system_info")
+            )
+            
+            results["detailed_analysis"] = final_result.get("detailed_analysis")
+            results["scientific_claims"] = final_result.get("scientific_claims", [])
+            
+        else:
+            # Series: full structure with trends
+            successful = sum(1 for r in series_results if r.get("success", False))
+            
+            results["summary"] = {
+                "total_spectra": num_spectra,
+                "successful_fits": successful,
+                "input_type": state.get("input_type"),
+                "locked_model": state.get("locked_fitting_config", {}).get("physical_model"),
+                "is_single_spectrum": False
+            }
+            
+            results["detailed_analysis"] = synthesis.get("detailed_analysis", "")
+            results["scientific_claims"] = self._validate_scientific_claims(
+                synthesis.get("scientific_claims", [])
+            )
+            
+            # Series-specific results
+            results["individual_results"] = [
+                {
+                    "index": r["index"],
+                    "name": r["name"],
+                    "success": r["success"],
+                    "model_type": r.get("model_type"),
+                    "parameters": r.get("parameters", {}),
+                    "fit_quality": r.get("fit_quality", {}),
+                    "visualization_path": r.get("visualization_path"),
+                    "error": r.get("error")
+                }
+                for r in series_results
+            ]
+            
+            results["trend_analysis"] = state.get("trend_analysis_results", {})
+            results["parameter_trends"] = synthesis.get("parameter_trends", {})
+            results["caveats"] = synthesis.get("caveats", "")
+            results["literature_files"] = state.get("literature_files")
+            results["locked_fitting_config"] = state.get("locked_fitting_config")
+        
+        return results
 
-        self._log_action(
-            "curve_fit",
-            {"data": data_path},
-            response,
-            rationale=f"Model: {result_json.get('model_type', 'unknown')}",
-        )
+    def _make_serializable(self, obj: Any) -> Any:
+        """Convert object to JSON-serializable form."""
+        if isinstance(obj, dict):
+            return {k: self._make_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._make_serializable(v) for v in obj]
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (np.integer, np.floating)):
+            return obj.item()
+        elif isinstance(obj, bytes):
+            return None  # Skip bytes
+        elif isinstance(obj, Path):
+            return str(obj)
+        else:
+            return obj
 
-        return response
+    # =========================================================================
+    # BACKWARD COMPATIBLE METHODS
+    # =========================================================================
+
+    def analyze_spectrum_series(
+        self,
+        spectrum_paths: Optional[List[str]] = None,
+        spectrum_stack: Optional[np.ndarray] = None,
+        system_info: Optional[Union[dict, str]] = None,
+        series_metadata: Optional[dict] = None,
+        hints: str | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Analyze a series of spectra.
+        
+        BACKWARD COMPATIBLE: Delegates to unified analyze() method.
+        
+        Args:
+            spectrum_paths: List of file paths to spectra
+            spectrum_stack: 3D numpy array (n_spectra x 2 x n_points)
+            system_info: System/sample metadata
+            series_metadata: Metadata about the series
+            hints: Analysis guidance
+        
+        Returns:
+            Analysis results dictionary
+        """
+        if spectrum_paths is not None:
+            return self.analyze(
+                spectrum_paths,
+                system_info=system_info,
+                series_metadata=series_metadata,
+                hints=hints
+            )
+        elif spectrum_stack is not None:
+            return self.analyze(
+                spectrum_stack,
+                system_info=system_info,
+                series_metadata=series_metadata,
+                hints=hints
+            )
+        else:
+            return {
+                "status": "error",
+                "error": {"error": "No input", "details": "Must provide spectrum_paths or spectrum_stack"},
+                "output_directory": str(self.output_dir)
+            }
 
     def _get_claims_instruction_prompt(self) -> str:
-        from .instruct import FITTING_INTERPRETATION_INSTRUCTIONS
         return FITTING_INTERPRETATION_INSTRUCTIONS
 
     def _get_measurement_recommendations_prompt(self) -> str:
-        from .instruct import CURVE_FITTING_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS
         return CURVE_FITTING_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS
