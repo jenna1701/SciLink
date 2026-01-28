@@ -1168,7 +1168,7 @@ class ConditionalTrendAnalysisController:
     - For n=1: Skipped (no trends to analyze)
     """
     
-    TREND_ANALYSIS_INSTRUCTIONS = '''You are analyzing a series of fitted spectra to identify trends.
+    TREND_ANALYSIS_INSTRUCTIONS = '''You are analyzing a series of fitted spectra/curves to identify trends.
 
 **SERIES SUMMARY:**
 {series_summary}
@@ -1190,15 +1190,8 @@ The file 'series_fit_results.json' has this exact structure:
             "index": 0,
             "name": "spectrum_0000_T300K",
             "success": true,
-            "model_type": "Sum of Lorentzian peaks",
-            "parameters": {{
-                "peak_0_center": 720.5,
-                "peak_0_amplitude": 0.25,
-                "peak_0_sigma": 12.3,
-                "peak_1_center": 1100.2,
-                "peak_1_amplitude": 0.55,
-                ...
-            }},
+            "model_type": "...",
+            "parameters": {{...extracted parameters...}},
             "fit_quality": {{"r_squared": 0.95, "rmse": 0.02}},
             ...
         }},
@@ -1207,7 +1200,16 @@ The file 'series_fit_results.json' has this exact structure:
 }}
 ```
 
-**CRITICAL: USE THIS EXACT DATA EXTRACTION PATTERN:**
+**VISUALIZATION PHILOSOPHY - LESS IS MORE:**
+Create clean, publication-quality figures that highlight the most important findings:
+- Select only the **4-6 most physically meaningful parameters** to visualize
+- Use a simple **2x2 subplot layout** (4 panels maximum)
+- Focus on parameters that show clear trends or have physical significance
+- Always include fit quality (R²) as one panel to validate the analysis
+- Avoid redundant plots (e.g., don't show both raw and normalized versions)
+- Don't overcrowd - if there are many similar parameters, pick representative ones
+
+**DATA EXTRACTION PATTERN:**
 ```python
 import json
 import numpy as np
@@ -1218,67 +1220,50 @@ from scipy import stats
 with open('series_fit_results.json', 'r') as f:
     data = json.load(f)
 
-results = data['results']  # This is a LIST of dictionaries
+results = data['results']  # LIST of dictionaries
 
-# Extract temperatures from spectrum names (e.g., "spectrum_0000_T300K" -> 300)
-temperatures = []
+# Extract series variable (temperature, time, etc.) from names or metadata
+series_values = []
 for r in results:
     name = r['name']
-    # Extract temperature from name like "spectrum_0000_T300K"
-    if '_T' in name and 'K' in name:
-        temp_str = name.split('_T')[-1].replace('K', '')
-        temperatures.append(float(temp_str))
+    # Try to extract numeric value from name (e.g., "spectrum_0000_T300K" -> 300)
+    import re
+    match = re.search(r'[_-]T?(\\d+\\.?\\d*)K?(?:[_.]|$)', name)
+    if match:
+        series_values.append(float(match.group(1)))
     else:
-        temperatures.append(r['index'])  # fallback to index
+        series_values.append(r['index'])
+series_values = np.array(series_values)
 
-temperatures = np.array(temperatures)
-
-# Extract parameters - collect all parameter names first
-all_params = set()
+# Extract all parameters
+param_data = {{}}
 for r in results:
     if r['success'] and 'parameters' in r:
-        all_params.update(r['parameters'].keys())
+        for key, val in r['parameters'].items():
+            if key not in param_data:
+                param_data[key] = []
+            param_data[key].append(val)
 
-# Build parameter arrays
-param_data = {{param: [] for param in all_params}}
-for r in results:
-    params = r.get('parameters', {{}})
-    for param in all_params:
-        param_data[param].append(params.get(param, np.nan))
+# Convert to arrays and identify key parameters
+for key in param_data:
+    param_data[key] = np.array(param_data[key])
 
-# Convert to numpy arrays
-for param in param_data:
-    param_data[param] = np.array(param_data[param])
-
-# Now plot - MAKE SURE TO ACTUALLY PLOT DATA
-fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-# ... use axes[i,j].plot(temperatures, param_data['param_name'], 'o-') ...
+# Extract fit quality
+r_squared = [r.get('fit_quality', {{}}).get('r_squared', np.nan) for r in results]
 ```
 
-Generate a complete Python script that:
-1. Loads the fit results using the EXACT pattern shown above
-2. Extracts ALL parameters across the series
-3. Creates publication-quality visualizations with ACTUAL DATA POINTS
-4. For each subplot, call ax.plot() or ax.scatter() with real data
-5. Identifies and quantifies trends (linear fits with scipy.stats.linregress)
-6. Saves visualizations as PNG files
-7. Prints a summary of findings
-
-IMPORTANT REQUIREMENTS:
-- Use the exact data loading pattern shown above
-- Always verify data is not empty before plotting: `if len(data) > 0:`
-- Actually call plot/scatter functions with real arrays, not empty lists
-- Include error handling for missing parameters
-- Print debug info: `print(f"Found {{len(results)}} results, {{len(temperatures)}} temperatures")`
-
-Output files to save:
-- 'parameter_trends.png' - Main parameter evolution plots
-- 'correlation_matrix.png' - Parameter correlations (optional)
+**FIGURE REQUIREMENTS:**
+- 2x2 layout maximum (fig, axes = plt.subplots(2, 2, figsize=(10, 8)))
+- Clear axis labels with units
+- Legend only if needed (≤5 items)
+- Linear regression with slope annotation for significant trends
+- Use colorblind-friendly colors
+- Title should reflect the series variable (e.g., "Temperature-Dependent Evolution")
 
 Return JSON with:
 {{
-    "analysis_approach": "description of trend analysis approach",
-    "key_metrics": ["list", "of", "metrics", "tracked"],
+    "analysis_approach": "brief description of what parameters were selected and why",
+    "key_metrics": ["list", "of", "parameters", "plotted"],
     "expected_outputs": ["parameter_trends.png"],
     "script": "full python script"
 }}
@@ -1450,7 +1435,7 @@ Return JSON with: {{"diagnosis": "...", "script": "corrected script"}}
         generated_files = []
         for ext in ['*.png', '*.csv', '*.json']:
             for f in self.output_dir.glob(ext):
-                if f.name not in ['series_fit_results.json']:
+                if f.name not in ['series_fit_results.json'] and '_fit.png' not in f.name:
                     generated_files.append(str(f))
         
         state["trend_analysis_results"] = {
@@ -1690,6 +1675,101 @@ class UnifiedCurveReportController:
         """Convert bytes to base64 string for HTML embedding."""
         return base64.b64encode(image_bytes).decode('utf-8')
 
+    def _generate_individual_fits_section(self, series_results: List[dict], num_spectra: int) -> str:
+        """
+        Generate HTML section for individual fit visualizations with smart scaling.
+        
+        Strategy based on series size:
+        - Small (≤10): Show all fits
+        - Medium (11-30): Show first 3, last 3, any failures, evenly spaced samples
+        - Large (>30): Show first 2, last 2, failures only + note about separate files
+        """
+        html = ""
+        
+        # Collect results with visualizations
+        results_with_viz = [
+            (i, r) for i, r in enumerate(series_results) 
+            if r.get("visualization_path") and Path(r["visualization_path"]).exists()
+        ]
+        
+        if not results_with_viz:
+            return html
+        
+        # Identify failed fits (always show these)
+        failed_indices = {i for i, r in enumerate(series_results) if not r["success"]}
+        
+        # Determine which fits to display based on series size
+        if num_spectra <= 10:
+            # Small series: show all
+            indices_to_show = set(range(num_spectra))
+            section_note = ""
+        elif num_spectra <= 30:
+            # Medium series: show representative subset
+            indices_to_show = set()
+            # First 3
+            indices_to_show.update(range(min(3, num_spectra)))
+            # Last 3
+            indices_to_show.update(range(max(0, num_spectra - 3), num_spectra))
+            # Evenly spaced middle samples (up to 4 more)
+            if num_spectra > 6:
+                step = (num_spectra - 6) // 5
+                for i in range(3, num_spectra - 3, max(1, step)):
+                    if len(indices_to_show) < 10:
+                        indices_to_show.add(i)
+            # Always include failures
+            indices_to_show.update(failed_indices)
+            
+            not_shown = num_spectra - len(indices_to_show)
+            section_note = f"<p><em>Showing {len(indices_to_show)} of {num_spectra} fits (representative subset). {not_shown} fits not displayed. All fit images saved to output directory.</em></p>"
+        else:
+            # Large series: minimal display
+            indices_to_show = set()
+            # First 2 and last 2
+            indices_to_show.update([0, 1])
+            indices_to_show.update([num_spectra - 2, num_spectra - 1])
+            # Always include failures (up to 5)
+            failure_sample = list(failed_indices)[:5]
+            indices_to_show.update(failure_sample)
+            
+            section_note = f"<p><em>Large series ({num_spectra} spectra): Showing only boundary fits and failures. All {num_spectra} fit images are saved as individual files in the output directory.</em></p>"
+        
+        # Sort indices for display order
+        indices_to_show = sorted(indices_to_show)
+        
+        # Generate HTML
+        html += f"\n        <h2>Individual Fit Results</h2>\n{section_note}"
+        html += "        <div class=\"image-grid\" style=\"grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));\">\n"
+        
+        for idx in indices_to_show:
+            if idx >= len(series_results):
+                continue
+            r = series_results[idx]
+            viz_path = r.get("visualization_path")
+            
+            if viz_path and Path(viz_path).exists():
+                with open(viz_path, 'rb') as f:
+                    b64 = self._image_to_base64(f.read())
+                
+                # Status indicator
+                status = "✓" if r["success"] else "✗ FAILED"
+                status_color = "#27ae60" if r["success"] else "#e74c3c"
+                r_squared = r.get("fit_quality", {}).get("r_squared", 0)
+                r2_str = f"R² = {r_squared:.4f}" if isinstance(r_squared, float) else ""
+                
+                html += f"""
+            <div class="image-card" style="border-left: 4px solid {status_color};">
+                <img src="data:image/png;base64,{b64}" alt="{r['name']}">
+                <div style="margin-top: 8px;">
+                    <strong>{r['name']}</strong><br>
+                    <span style="color: {status_color};">{status}</span> {r2_str}
+                </div>
+            </div>
+"""
+        
+        html += "        </div>\n"
+        
+        return html
+
     def _extract_parameter_evolution(self, series_results: List[dict]) -> List[dict]:
         """Extract parameter values across the series for tabulation."""
         evolution = []
@@ -1805,10 +1885,13 @@ class UnifiedCurveReportController:
                     html += f"""
             <div class="image-card">
                 <img src="data:image/png;base64,{b64}" alt="{name}">
-                <p>{name}</p>
+                <div class="image-label">{name}</div>
             </div>
 """
             html += "        </div>\n"
+
+        # Individual fit visualizations (smart scaling based on series size)
+        html += self._generate_individual_fits_section(series_results, num_spectra)
 
         # Parameter evolution table
         if param_evolution:
