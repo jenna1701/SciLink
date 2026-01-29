@@ -8,6 +8,11 @@ All analysis now uses a single unified pipeline that handles both
 single spectra (n=1) and series (n>1) identically.
 
 Key principle: Single spectrum = Series of 1
+
+Quality control features:
+- Automatic model retry when R² is inadequate
+- Statistical outlier detection for series
+- Human feedback integration for unresolved quality issues
 """
 
 import logging
@@ -50,11 +55,14 @@ def create_unified_curve_fitting_pipeline(
     preprocessor: Any | None = None,
     literature_agent: Any | None = None,
     enable_human_feedback: bool = False,
+    r2_threshold: float = 0.95,
+    max_model_retries: int = 3,
+    outlier_sigma: float = 2.0,
 ) -> List:
     """
     Factory function to create the unified curve fitting pipeline.
     
-    This pipeline handles BOTH single spectra and series:
+    This pipeline handles BOTH single spectra and series with quality control:
     
     1. Analyze First Spectrum Data
        - Compute statistics, create initial visualization
@@ -68,17 +76,20 @@ def create_unified_curve_fitting_pipeline(
        - Search for relevant fitting models
        - Runs only once (on first spectrum context)
        
-    4. Unified Series Processing
+    4. Unified Series Processing with Quality Control
        - Fits ALL spectra using locked configuration
        - Single spectrum = series of 1
-       - Reuses fitting script across series
+       - Automatic model retry if R² below threshold
+       - Human feedback for unresolved quality issues
+       - Statistical outlier detection for series
        
     5. Conditional Trend Analysis
        - For n>=2: Generates and executes trend analysis
+       - Highlights flagged spectra in visualizations
        - For n=1: Skipped
        
     6. Synthesis
-       - For n>=2: Cross-spectrum synthesis
+       - For n>=2: Cross-spectrum synthesis with outlier analysis
        - For n=1: Single-spectrum interpretation
        
     7. Store Results
@@ -86,6 +97,7 @@ def create_unified_curve_fitting_pipeline(
        
     8. Report Generation
        - Adapts format based on single vs series
+       - Includes flagged spectra section for series
     
     Args:
         model: LLM model instance
@@ -100,6 +112,9 @@ def create_unified_curve_fitting_pipeline(
         preprocessor: Optional preprocessor agent
         literature_agent: Optional literature search agent
         enable_human_feedback: Enable human-in-the-loop refinement
+        r2_threshold: Minimum acceptable R² value (default: 0.95)
+        max_model_retries: Max alternative models to try if R² inadequate (default: 3)
+        outlier_sigma: Sigma threshold for outlier detection in series (default: 2.0)
     
     Returns:
         List of controller instances to execute in sequence
@@ -107,13 +122,9 @@ def create_unified_curve_fitting_pipeline(
     pipeline = []
 
     # Step 1: Analyze first spectrum data (compute stats, initial plot)
-    # Note: For series, this runs on the FIRST spectrum only
-    # (The agent pre-processes the first spectrum before calling the pipeline)
     pipeline.append(AnalyzeDataController(logger, plot_fn))
 
     # Step 2: Human feedback refinement on fitting approach
-    # This plans the analysis and optionally allows human refinement
-    # The fitting configuration is LOCKED after this step
     pipeline.append(
         HumanFeedbackRefinementController(
             model=model,
@@ -137,9 +148,7 @@ def create_unified_curve_fitting_pipeline(
         )
     )
 
-    # Step 4: Unified series processing
-    # Fits ALL spectra using the locked configuration
-    # For single spectrum, this is effectively a "series of 1"
+    # Step 4: Unified series processing with quality control
     pipeline.append(
         UnifiedSeriesProcessingController(
             model=model,
@@ -152,7 +161,11 @@ def create_unified_curve_fitting_pipeline(
             correction_instructions=FITTING_SCRIPT_CORRECTION_INSTRUCTIONS,
             quality_instructions=FIT_QUALITY_ASSESSMENT_INSTRUCTIONS,
             output_dir=output_dir,
-            plot_fn=plot_fn
+            plot_fn=plot_fn,
+            r2_threshold=r2_threshold,
+            max_model_retries=max_model_retries,
+            enable_human_feedback=enable_human_feedback,
+            outlier_sigma=outlier_sigma,
         )
     )
 
@@ -188,8 +201,7 @@ def create_unified_curve_fitting_pipeline(
         StoreAnalysisResultsController(logger, store_fn)
     )
 
-    # Step 8a: Single spectrum report (uses existing controller)
-    # This only generates output for single spectra
+    # Step 8a: Single spectrum report
     pipeline.append(
         GenerateCurveFittingReportController(logger, output_dir)
     )
@@ -200,6 +212,8 @@ def create_unified_curve_fitting_pipeline(
     )
 
     logger.info(f"Unified curve fitting pipeline created: {len(pipeline)} steps")
+    logger.info(f"  Quality settings: R² threshold={r2_threshold}, max_retries={max_model_retries}, outlier_sigma={outlier_sigma}")
+    
     return pipeline
 
 
@@ -221,12 +235,15 @@ def create_curve_fitting_pipeline(
     literature_agent: Any | None = None,
     enable_human_feedback: bool = False,
     settings: dict | None = None,  # Deprecated
+    r2_threshold: float = 0.95,
+    max_model_retries: int = 3,
+    outlier_sigma: float = 2.0,
 ) -> List:
     """
     BACKWARD COMPATIBLE: Creates curve fitting pipeline.
     
     Now returns the unified pipeline that handles both single spectra
-    and series analysis.
+    and series analysis with quality control.
     
     For explicit series analysis, use create_unified_curve_fitting_pipeline().
     """
@@ -249,5 +266,8 @@ def create_curve_fitting_pipeline(
         output_dir=output_dir,
         preprocessor=preprocessor,
         literature_agent=literature_agent,
-        enable_human_feedback=enable_human_feedback
+        enable_human_feedback=enable_human_feedback,
+        r2_threshold=r2_threshold,
+        max_model_retries=max_model_retries,
+        outlier_sigma=outlier_sigma,
     )

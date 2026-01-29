@@ -8,11 +8,17 @@ analysis and spectral series analysis using the same unified architecture.
 
 Key principle: Single spectrum = Series of 1
 
+Quality control features:
+- Automatic model retry when R² is inadequate (configurable threshold)
+- Statistical outlier detection for series (may indicate interesting physics)
+- Human feedback integration for unresolved quality issues
+
 For series analysis:
-1. Carefully fit the first spectrum with full LLM planning
+1. Carefully fit the first spectrum with full LLM planning and quality control
 2. Lock the fitting model and strategy for remaining spectra
-3. Generate custom analysis code for trend visualization
-4. Synthesize findings across the series
+3. Detect and flag statistical outliers
+4. Generate custom analysis code for trend visualization
+5. Synthesize findings across the series
 """
 
 import os
@@ -49,6 +55,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     - Multiple spectra = standard series processing
     - Numpy array stack = series processing
     
+    Quality control:
+    - Automatic model retry when R² < threshold
+    - Human feedback for unresolved quality issues
+    - Statistical outlier detection for series (may indicate interesting physics)
+    
     For series analysis, the fitting model is carefully selected on the
     first spectrum and then LOCKED for consistent analysis across all spectra.
 
@@ -62,6 +73,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         run_preprocessing: Enable data preprocessing
         enable_human_feedback: Enable feedback loop
         executor_timeout: Script timeout in seconds
+        r2_threshold: Minimum acceptable R² value (default: 0.95)
+        max_model_retries: Max alternative models to try (default: 3)
+        outlier_sigma: Sigma threshold for outlier detection (default: 2.0)
 
     Example:
         agent = CurveFittingAgent(api_key="...", use_literature=True)
@@ -92,6 +106,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             }
         )
         
+        # Custom quality settings
+        agent = CurveFittingAgent(
+            api_key="...",
+            r2_threshold=0.90,      # Accept lower quality fits
+            max_model_retries=5,    # Try more alternatives
+            outlier_sigma=3.0       # Less aggressive outlier detection
+        )
+        
         # Get measurement recommendations
         recommendations = agent.recommend_measurements(analysis_result=result)
     """
@@ -112,6 +134,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         enable_human_feedback: bool = True,
         executor_timeout: int = 60,
         max_wait_time: int = 1000,
+        # Quality control settings
+        r2_threshold: float = 0.95,
+        max_model_retries: int = 3,
+        outlier_sigma: float = 2.0,
         **kwargs,
     ):
         self.api_key, self.base_url = normalize_params(
@@ -129,6 +155,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.agent_type = "curve_fitting"
         self.use_literature = use_literature
         self.output_dir = Path(self.output_dir).resolve()
+
+        # Quality control settings
+        self.r2_threshold = r2_threshold
+        self.max_model_retries = max_model_retries
+        self.outlier_sigma = outlier_sigma
 
         self.executor = ScriptExecutor(timeout=executor_timeout, enforce_sandbox=False)
 
@@ -174,6 +205,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Curve fitting specific
         hints: str | None = None,
         series_metadata: Optional[dict] = None,
+        # Quality control overrides (optional)
+        r2_threshold: Optional[float] = None,
+        max_model_retries: Optional[int] = None,
+        outlier_sigma: Optional[float] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -195,11 +230,15 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "values": [300, 350, 400],     # x-axis values
                     "unit": "K"                     # unit for values
                 }
+            r2_threshold: Override default R² threshold for this analysis
+            max_model_retries: Override default max retries for this analysis
+            outlier_sigma: Override default outlier sigma for this analysis
 
         Returns:
             Dict with status, detailed_analysis, scientific_claims,
             model_type, fitting_parameters, fit_quality, output_directory,
-            and for series: individual_results, trend_analysis, parameter_evolution
+            and for series: individual_results, trend_analysis, parameter_evolution,
+            flagged_spectra (outliers that may indicate interesting physics)
         
         Examples:
             # Single spectrum
@@ -215,9 +254,17 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 }
             )
             
+            # With relaxed quality threshold
+            result = agent.analyze("noisy_spectrum.csv", r2_threshold=0.85)
+            
             # Numpy stack (3D array: n_spectra x 2 x n_points)
             result = agent.analyze(my_spectra_stack)
         """
+        # Use provided overrides or fall back to instance defaults
+        effective_r2_threshold = r2_threshold if r2_threshold is not None else self.r2_threshold
+        effective_max_retries = max_model_retries if max_model_retries is not None else self.max_model_retries
+        effective_outlier_sigma = outlier_sigma if outlier_sigma is not None else self.outlier_sigma
+        
         # Parse input
         data_path, data_paths, data_array, error = self._parse_data_input(data)
         
@@ -271,6 +318,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         self.logger.info(f"\n{'='*80}")
         self.logger.info(f"📈 CURVE FITTING ANALYSIS - {num_spectra} spectrum{'s' if num_spectra > 1 else ''}")
+        self.logger.info(f"   Quality settings: R² threshold={effective_r2_threshold}, max_retries={effective_max_retries}")
+        if not is_single_spectrum:
+            self.logger.info(f"   Outlier detection: {effective_outlier_sigma}σ")
         self.logger.info(f"{'='*80}\n")
         
         # Load first spectrum for initial analysis
@@ -333,7 +383,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "error_dict": None,
         }
         
-        # Create unified pipeline
+        # Create unified pipeline with quality settings
         pipeline = create_unified_curve_fitting_pipeline(
             model=self.model,
             logger=self.logger,
@@ -346,7 +396,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             output_dir=str(self.output_dir),
             preprocessor=self.preprocessor,
             literature_agent=self.literature_agent,
-            enable_human_feedback=self.enable_human_feedback
+            enable_human_feedback=self.enable_human_feedback,
+            r2_threshold=effective_r2_threshold,
+            max_model_retries=effective_max_retries,
+            outlier_sigma=effective_outlier_sigma,
         )
         
         # Execute pipeline
@@ -387,6 +440,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.logger.info(f"\n{'='*80}")
         self.logger.info(f"✅ ANALYSIS COMPLETE")
         self.logger.info(f"   Results saved to: {results_path}")
+        
+        # Log flagged spectra summary
+        flagged = final_results.get("flagged_spectra", [])
+        if flagged:
+            self.logger.warning(f"   ⚠️ {len(flagged)} spectra flagged for review (see report)")
+        
         self.logger.info(f"{'='*80}\n")
         
         # Log action
@@ -395,7 +454,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             input_ctx={
                 "num_spectra": num_spectra,
                 "input_type": input_type,
-                "series_metadata": series_metadata
+                "series_metadata": series_metadata,
+                "r2_threshold": effective_r2_threshold,
             },
             result=final_results.get("summary") if not is_single_spectrum else final_results,
             rationale=f"Model: {final_results.get('model_type', 'unknown')}"
@@ -430,6 +490,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         num_spectra = state.get("num_spectra", 1)
         series_results = state.get("series_results", [])
         synthesis = state.get("synthesis_result", {})
+        flagged_spectra = state.get("flagged_spectra", [])
         
         # Base result structure
         results = {
@@ -450,6 +511,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             results["fit_quality"] = fit_results.get("fit_quality", {})
             results["literature_files"] = state.get("literature_files")
             
+            # Include quality warning if present
+            if series_results and series_results[0].get("quality_warning"):
+                results["quality_warning"] = series_results[0]["quality_warning"]
+                results["attempted_models"] = series_results[0].get("attempted_models", [])
+            
             # Apply feedback if enabled
             initial_result = {
                 "detailed_analysis": results["detailed_analysis"],
@@ -466,12 +532,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             results["scientific_claims"] = final_result.get("scientific_claims", [])
             
         else:
-            # Series: full structure with trends
+            # Series: full structure with trends and flagged spectra
             successful = sum(1 for r in series_results if r.get("success", False))
             
             results["summary"] = {
                 "total_spectra": num_spectra,
                 "successful_fits": successful,
+                "flagged_count": len(flagged_spectra),
                 "input_type": state.get("input_type"),
                 "locked_model": state.get("locked_fitting_config", {}).get("physical_model"),
                 "is_single_spectrum": False
@@ -492,11 +559,16 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "parameters": r.get("parameters", {}),
                     "fit_quality": r.get("fit_quality", {}),
                     "visualization_path": r.get("visualization_path"),
-                    "error": r.get("error")
+                    "error": r.get("error"),
+                    "flagged": r.get("flagged", False),
+                    "flag_reason": r.get("flag_reason"),
+                    "flag_recommendation": r.get("flag_recommendation"),
                 }
                 for r in series_results
             ]
             
+            results["flagged_spectra"] = flagged_spectra
+            results["flagged_spectra_analysis"] = synthesis.get("flagged_spectra_analysis", {})
             results["trend_analysis"] = state.get("trend_analysis_results", {})
             results["parameter_trends"] = synthesis.get("parameter_trends", {})
             results["caveats"] = synthesis.get("caveats", "")
