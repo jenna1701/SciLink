@@ -18,7 +18,7 @@ from .instruct import (
     MICROSCOPY_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS
 )
 
-from .pipelines.microscopy_pipelines import create_unified_microscopy_pipeline
+from .pipelines.fft_microscopy_pipelines import create_unified_microscopy_pipeline
 from ._deprecation import normalize_params
 
 from ...tools.image_processor import (

@@ -1,5 +1,5 @@
 """
-Microscopy Analysis Controllers
+FFT Microscopy Analysis Controllers
 
 This module contains unified controllers that handle both single image (n=1)
 and batch (n>1) analysis identically. The key principle is:
