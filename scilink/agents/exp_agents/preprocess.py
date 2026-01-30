@@ -9,7 +9,8 @@ import re
 import matplotlib.pyplot as plt 
 from io import BytesIO
 
-from .base_agent import BaseAnalysisAgent
+from .base_agent import BaseUtilityAgent
+
 from .instruct import (
     PRE_PROCESSING_STRATEGY_INSTRUCTIONS,
     CUSTOM_PREPROCESSING_SCRIPT_INSTRUCTIONS,
@@ -25,7 +26,7 @@ from ...executors import ScriptExecutor
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 
-class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
+class HyperspectralPreprocessingAgent(BaseUtilityAgent):
     """
     An agent that uses an LLM to determine the optimal pre-processing strategy
     AND can run custom Python scripts for non-standard processing.
@@ -59,30 +60,6 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
             "strategies_used": []
         }
 
-    def analyze_for_claims(self, data_path: str, system_info: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
-        """
-        Implementation of abstract method to satisfy BaseAnalysisAgent.
-        Redirects to run_preprocessing logic.
-        """
-        self.logger.info(f"analyze_for_claims called on Preprocessor. Redirecting to run_preprocessing.")
-        
-        try:
-            # Assuming data_path points to an .npy file
-            data = np.load(data_path)
-            processed_data, mask, quality = self.run_preprocessing(data, system_info or {})
-            
-            return {
-                "detailed_analysis": f"Preprocessing complete. SNR Estimate: {quality.get('snr_estimate', 'N/A')}",
-                "scientific_claims": [], # Preprocessors don't make scientific claims
-                "data_quality": quality,
-                "status": "success",
-                # Note: Actual processed arrays are usually handled via return values or temp files 
-                # in the pipeline controller, not directly in this state dict to save memory.
-            }
-        except Exception as e:
-            self.logger.error(f"Analysis failed: {e}")
-            return {"error": str(e)}
-        
     def _calculate_statistics(self, hspy_data: np.ndarray) -> Dict[str, Any]:
         """Calculates robust statistics for the LLM and for deterministic SNR."""
         self.logger.debug("Calculating robust statistics...")
@@ -432,7 +409,7 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
         return processed_data, mask_2d, script_save_path
     
 
-class CurvePreprocessingAgent(BaseAnalysisAgent):
+class CurvePreprocessingAgent(BaseUtilityAgent):
     """
     An agent that pre-processes 1D (X, Y) curve data.
     """
@@ -462,31 +439,6 @@ class CurvePreprocessingAgent(BaseAnalysisAgent):
             "processed_curves": [],
             "custom_scripts": []
         }
-
-    def analyze_for_claims(self, data_path: str, system_info: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
-        """
-        Implementation of abstract method to satisfy BaseAnalysisAgent.
-        Redirects to run_preprocessing.
-        """
-        self.logger.info(f"analyze_for_claims called on CurvePreprocessor. Redirecting to run_preprocessing.")
-        try:
-            # Handle loading: standard flow expects numpy array
-            if isinstance(data_path, str) and os.path.exists(data_path):
-                data = np.load(data_path)
-            else:
-                data = data_path # Assumed to be array if not path
-
-            processed_data, quality = self.run_preprocessing(data, system_info or {})
-            
-            return {
-                "detailed_analysis": f"1D Preprocessing complete. {quality.get('reasoning')}",
-                "scientific_claims": [], # Preprocessors don't make scientific claims
-                "data_quality": quality,
-                "status": "success",
-            }
-        except Exception as e:
-            self.logger.error(f"Curve analysis failed: {e}")
-            return {"error": str(e)}
 
     def run_preprocessing(self, curve_data: np.ndarray, system_info: Dict[str, Any]) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
