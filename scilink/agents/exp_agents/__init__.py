@@ -4,17 +4,27 @@ from .atomistic_microscopy_agent import AtomisticMicroscopyAnalysisAgent
 from .hyperspectral_analysis_agent import HyperspectralAnalysisAgent
 from .orchestrator_agent import OrchestratorAgent, AGENT_MAP
 from .curve_fitting_agent import CurveFittingAgent
+from .experimental_orchestrator import (
+    ExperimentalAnalysisOrchestrator,
+    AgentType,
+    AGENT_REGISTRY,
+    MicroscopyAgentSelector
+)
 
 
 __all__ = [
-    # Original agents
+    # Analysis agents
     'FFTMicroscopyAnalysisAgent',
     'SAMMicroscopyAnalysisAgent',
     'AtomisticMicroscopyAnalysisAgent',
     'HyperspectralAnalysisAgent',
     'CurveFittingAgent',
+    # Original orchestrator (for agent selection only)
     'OrchestratorAgent',
-    'CentralMicroscopyAgent',
-    # Orchestrator
     'AGENT_MAP',
+    # New experimental orchestrator (unified analysis interface)
+    'ExperimentalAnalysisOrchestrator',
+    'AgentType',
+    'AGENT_REGISTRY',
+    'MicroscopyAgentSelector',
 ]
