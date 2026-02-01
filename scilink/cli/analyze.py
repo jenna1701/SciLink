@@ -58,11 +58,13 @@ Environment Variables:
         """
     )
     
-    # Required argument
+    # Data path - optional (can be provided in interactive chat)
     parser.add_argument(
         'data_path',
         type=str,
-        help='Path to the data file to analyze'
+        nargs='?',
+        default=None,
+        help='Path to the data file to analyze (optional - can provide in chat)'
     )
     
     # Metadata options (mutually exclusive group)
@@ -190,8 +192,8 @@ Environment Variables:
         print()
         return 0
     
-    # Validate data path
-    if not Path(args.data_path).exists():
+    # Validate data path if provided
+    if args.data_path and not Path(args.data_path).exists():
         print(f"❌ Error: Data file not found: {args.data_path}")
         return 1
     
@@ -218,12 +220,13 @@ Environment Variables:
     print("\n" + "="*60)
     print("🔬 SCILINK EXPERIMENTAL ANALYSIS")
     print("="*60)
-    print(f"\nData: {args.data_path}")
+    if args.data_path:
+        print(f"\nData: {args.data_path}")
+    else:
+        print(f"\nData: (provide in chat)")
     print(f"Output: {args.output_dir}")
     if args.agent:
         print(f"Agent: {args.agent} (user-specified)")
-    if not metadata_path and not metadata_text and not args.interactive:
-        print("Metadata: Will prompt interactively")
     print()
     
     try:
@@ -240,8 +243,18 @@ Environment Variables:
     
     # Run analysis
     try:
-        if args.interactive or (not metadata_path and not metadata_text):
-            # Interactive chat mode - this is the default when no metadata provided
+        # Enter interactive mode if:
+        # - No data_path provided, OR
+        # - --interactive flag set, OR  
+        # - No metadata provided (need to get it in chat)
+        use_interactive = (
+            args.data_path is None or 
+            args.interactive or 
+            (not metadata_path and not metadata_text)
+        )
+        
+        if use_interactive:
+            # Interactive chat mode
             print("\n📝 Starting interactive chat session...")
             print("   (Provide your data file and experiment description in the chat)\n")
             
@@ -259,7 +272,7 @@ Environment Variables:
             orchestrator.start_chat_session()
             result = {"status": "session_ended", "output_directory": str(orchestrator.output_dir)}
         else:
-            # Single-shot analysis mode (metadata provided)
+            # Single-shot analysis mode (data_path AND metadata provided)
             result = orchestrator.analyze(
                 data_path=args.data_path,
                 metadata_path=metadata_path,
