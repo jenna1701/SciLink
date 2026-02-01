@@ -257,21 +257,34 @@ Environment Variables:
             if not api_key:
                 print(f"\n⚠️  No SCILINK_API_KEY found in environment.")
                 print(f"   When using --base-url, set SCILINK_API_KEY for authentication.")
-                api_key = input(f"Enter your proxy API key (SCILINK_API_KEY): ").strip()
+                try:
+                    api_key = input(f"Enter your proxy API key (SCILINK_API_KEY): ").strip()
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Cancelled.")
+                    return 1
                 if not api_key:
                     print("❌ Cannot proceed without API key for internal proxy.")
                     return 1
         else:
-            # Public deployment - check provider-specific keys
+            # Public deployment - check provider-specific keys ONLY
+            # Don't fall back to other providers' keys
             provider_name, env_var_hint, env_vars = _infer_provider(model_name)
             api_key = _get_api_key_from_env(env_vars)
             
             if not api_key:
                 print(f"\n⚠️  No {env_var_hint} found in environment.")
-                print(f"   LiteLLM will attempt to auto-detect credentials.")
-                user_key = input(f"Enter your {provider_name} API key (or Enter to auto-detect): ").strip()
+                print(f"   Required for {provider_name} model: {model_name}")
+                try:
+                    user_key = input(f"\nEnter your {provider_name} API key: ").strip()
+                except (KeyboardInterrupt, EOFError):
+                    print("\n❌ Cancelled.")
+                    return 1
                 if user_key:
                     api_key = user_key
+                else:
+                    print(f"❌ Cannot proceed without {provider_name} API key.")
+                    print(f"   Set {env_vars[0]} environment variable or use --api-key flag.")
+                    return 1
     
     # Create orchestrator
     print("\n" + "="*60)
