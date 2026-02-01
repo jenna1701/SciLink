@@ -28,10 +28,10 @@ class AnalysisOrchestratorTools:
     }
     
     AGENT_DESCRIPTIONS = {
-        0: "Microstructure analysis via FFT/NMF - for grains, phases, domains, and atomic-resolution images",
-        1: "Particle/object segmentation - for counting, size distributions",
-        2: "Spectroscopic/hyperspectral data analysis",
-        3: "1D curve/spectrum fitting - for peaks, band gaps, kinetics"
+        0: "Microstructure analysis via FFT/NMF - grains, phases, domains, atomic-resolution images. Handles single images or image series.",
+        1: "Particle/object segmentation - counting, size distributions, morphology. Handles single images or image series.",
+        2: "Hyperspectral/spectral imaging data - 3D datacubes (x, y, spectral). EELS-SI, EDS mapping, Raman imaging.",
+        3: "1D data fitting - curves, spectra, time series. DSC, TGA, XRD, UV-Vis, Raman, PL, IV curves, kinetics. Handles single files or series."
     }
     
     def __init__(self, orchestrator_instance):
@@ -60,7 +60,8 @@ class AnalysisOrchestratorTools:
         # =====================================================================
         def examine_data(data_path: str) -> str:
             """
-            Examine a data file to determine its type and characteristics.
+            Examine a data file or directory to determine its type and characteristics.
+            Supports single files and directories containing multiple spectra.
             """
             print(f"  ⚡ Tool: Examining data at {data_path}...")
             
@@ -71,19 +72,108 @@ class AnalysisOrchestratorTools:
                     "message": f"File not found: {data_path}"
                 })
             
-            # Get file info
-            file_size = path.stat().st_size
-            extension = path.suffix.lower()
-            
             result = {
                 "status": "success",
-                "file_path": str(path.absolute()),
-                "file_name": path.name,
-                "file_size_bytes": file_size,
-                "extension": extension
+                "path": str(path.absolute()),
             }
             
             try:
+                # ============================================================
+                # DIRECTORY: Multiple files (series)
+                # ============================================================
+                if path.is_dir():
+                    files = list(path.iterdir())
+                    files = [f for f in files if f.is_file() and not f.name.startswith('.')]
+                    
+                    result["is_directory"] = True
+                    result["file_count"] = len(files)
+                    
+                    if not files:
+                        result["status"] = "error"
+                        result["message"] = "Directory is empty"
+                        return json.dumps(result)
+                    
+                    # Look for metadata files first
+                    metadata_files = [f for f in files if f.suffix.lower() == '.json' or 
+                                      'metadata' in f.name.lower() or 
+                                      f.name.lower() in ['info.txt', 'description.txt', 'readme.txt']]
+                    
+                    if metadata_files:
+                        result["metadata_files"] = [f.name for f in metadata_files]
+                        result["metadata_hint"] = f"Found potential metadata file(s): {[f.name for f in metadata_files]}"
+                    
+                    # Get data file extensions (excluding metadata)
+                    data_files = [f for f in files if f not in metadata_files]
+                    extensions = set(f.suffix.lower() for f in data_files)
+                    result["extensions"] = list(extensions)
+                    
+                    # Categorize by extension
+                    csv_files = [f for f in data_files if f.suffix.lower() in ['.csv', '.txt', '.tsv'] 
+                                 and 'metadata' not in f.name.lower() 
+                                 and f.name.lower() not in ['info.txt', 'description.txt', 'readme.txt']]
+                    npy_files = [f for f in data_files if f.suffix.lower() == '.npy']
+                    image_files = [f for f in data_files if f.suffix.lower() in ['.tif', '.tiff', '.png', '.jpg', '.jpeg', '.bmp']]
+                    
+                    if csv_files:
+                        result["data_type"] = "tabular_series"
+                        result["series_count"] = len(csv_files)
+                        result["suggested_agents"] = [3]  # CurveFitting
+                        result["primary_suggestion"] = 3
+                        result["data_files"] = sorted([f.name for f in csv_files[:10]])
+                        if len(csv_files) > 10:
+                            result["data_files"].append(f"... and {len(csv_files) - 10} more")
+                        result["note"] = f"Directory contains {len(csv_files)} tabular data files (CSV/TXT) - curves, spectra, time series, etc."
+                        
+                    elif npy_files:
+                        # Check first NPY to determine type
+                        first_npy = np.load(str(npy_files[0]))
+                        if first_npy.ndim <= 2:
+                            result["data_type"] = "tabular_series"
+                            result["suggested_agents"] = [3]
+                            result["primary_suggestion"] = 3
+                            result["note"] = f"Directory contains {len(npy_files)} NPY files (1D/2D data)"
+                        else:
+                            result["data_type"] = "hyperspectral_series"
+                            result["suggested_agents"] = [2]
+                            result["primary_suggestion"] = 2
+                            result["note"] = f"Directory contains {len(npy_files)} NPY files (3D datacubes)"
+                        
+                        result["series_count"] = len(npy_files)
+                        result["data_files"] = sorted([f.name for f in npy_files[:10]])
+                        if len(npy_files) > 10:
+                            result["data_files"].append(f"... and {len(npy_files) - 10} more")
+                        
+                    elif image_files:
+                        result["data_type"] = "image_series"
+                        result["series_count"] = len(image_files)
+                        result["suggested_agents"] = [0, 1]  # FFT or SAM
+                        result["primary_suggestion"] = 0
+                        result["data_files"] = sorted([f.name for f in image_files[:10]])
+                        if len(image_files) > 10:
+                            result["data_files"].append(f"... and {len(image_files) - 10} more")
+                        result["note"] = f"Directory contains {len(image_files)} image files - microscopy, photos, etc."
+                    
+                    else:
+                        result["data_type"] = "unknown"
+                        result["message"] = f"Directory contains unsupported file types: {extensions}"
+                    
+                    # Store in orchestrator state
+                    self.orch.current_data_path = str(path.absolute())
+                    self.orch.current_data_type = result.get("data_type")
+                    
+                    return json.dumps(result)
+                
+                # ============================================================
+                # SINGLE FILE
+                # ============================================================
+                file_size = path.stat().st_size
+                extension = path.suffix.lower()
+                
+                result["is_directory"] = False
+                result["file_name"] = path.name
+                result["file_size_bytes"] = file_size
+                result["extension"] = extension
+                
                 # Determine data type based on extension and content
                 if extension in ['.tif', '.tiff', '.png', '.jpg', '.jpeg', '.bmp']:
                     result["data_type"] = "microscopy"
@@ -109,28 +199,72 @@ class AnalysisOrchestratorTools:
                         result["load_error"] = str(e)
                 
                 elif extension == '.npy':
-                    # Could be spectrum, hyperspectral, or curve data
+                    # Could be 1D data, 2D data/image, series, or hyperspectral
                     data = np.load(str(path))
                     result["shape"] = list(data.shape)
                     result["dtype"] = str(data.dtype)
                     
                     if data.ndim == 1:
-                        result["data_type"] = "curve"
+                        result["data_type"] = "1d_data"
                         result["suggested_agents"] = [3]  # CurveFitting
                         result["primary_suggestion"] = 3
                         result["n_points"] = data.shape[0]
+                        result["note"] = "Single 1D array - curve, spectrum, time series, etc."
                         
                     elif data.ndim == 2:
-                        if data.shape[1] == 2 or data.shape[0] == 2:
-                            result["data_type"] = "curve"
+                        # Check if it's a series (N x points) or single data (points x 2) or image
+                        if data.shape[1] == 2:
+                            # Single data with x,y columns
+                            result["data_type"] = "1d_data"
                             result["suggested_agents"] = [3]
                             result["primary_suggestion"] = 3
-                            result["n_points"] = max(data.shape)
-                        else:
-                            # Could be image or spectrum
-                            result["data_type"] = "microscopy_or_spectrum"
-                            result["suggested_agents"] = [0, 2]  # FFT or Hyperspectral
-                            result["primary_suggestion"] = 0
+                            result["n_points"] = data.shape[0]
+                            result["note"] = "Single dataset with (x, y) columns"
+                        elif data.shape[0] == 2:
+                            # Single data with x,y rows
+                            result["data_type"] = "1d_data"
+                            result["suggested_agents"] = [3]
+                            result["primary_suggestion"] = 3
+                            result["n_points"] = data.shape[1]
+                            result["note"] = "Single dataset with (x, y) rows"
+                        elif data.shape[0] > 2 and data.shape[1] > 2:
+                            # Could be series of 1D data OR 2D image
+                            # Heuristic: if one dimension is much smaller, likely a series
+                            if data.shape[0] < 100 and data.shape[1] > 100:
+                                # Likely N datasets of M points each
+                                result["data_type"] = "1d_series"
+                                result["suggested_agents"] = [3]
+                                result["primary_suggestion"] = 3
+                                result["series_count"] = data.shape[0]
+                                result["n_points"] = data.shape[1]
+                                result["note"] = f"Series of {data.shape[0]} datasets, each with {data.shape[1]} points"
+                            elif data.shape[1] < 100 and data.shape[0] > 100:
+                                # Likely M points x N datasets (transposed)
+                                result["data_type"] = "1d_series"
+                                result["suggested_agents"] = [3]
+                                result["primary_suggestion"] = 3
+                                result["series_count"] = data.shape[1]
+                                result["n_points"] = data.shape[0]
+                                result["note"] = f"Series of {data.shape[1]} datasets, each with {data.shape[0]} points (may need transpose)"
+                            else:
+                                # Ambiguous - could be image or data matrix
+                                # Try to infer from metadata if available
+                                result["data_type"] = "2d_data_ambiguous"
+                                result["suggested_agents"] = [0, 3]  # Most likely FFT (image) or CurveFitting (data matrix)
+                                result["primary_suggestion"] = None  # No clear suggestion
+                                result["note"] = (
+                                    f"Ambiguous 2D array ({data.shape[0]}x{data.shape[1]}). Could be:\n"
+                                    f"  - Microscopy image → Agent 0 (FFTMicroscopyAnalysisAgent)\n"
+                                    f"  - Series of 1D data (rows or columns) → Agent 3 (CurveFittingAgent)\n"
+                                    f"  - 2D spectral slice → Agent 2 (HyperspectralAnalysisAgent)\n"
+                                    f"Check metadata or ask user to clarify."
+                                )
+                                result["disambiguation_needed"] = True
+                                result["disambiguation_questions"] = [
+                                    "Is this a microscopy/image?",
+                                    "Is this a matrix where each row (or column) is a separate spectrum/curve?",
+                                    "What technique was used to acquire this data?"
+                                ]
                             
                     elif data.ndim == 3:
                         result["data_type"] = "hyperspectral"
@@ -138,17 +272,31 @@ class AnalysisOrchestratorTools:
                         result["primary_suggestion"] = 2
                         result["spatial_shape"] = list(data.shape[:2])
                         result["spectral_channels"] = data.shape[2]
+                        result["note"] = f"3D datacube: {data.shape[0]}x{data.shape[1]} spatial, {data.shape[2]} channels"
+                    
+                    else:
+                        result["data_type"] = "nd_data"
+                        result["note"] = f"{data.ndim}D array - may need custom handling"
+                        result["suggested_agents"] = []
                 
                 elif extension in ['.csv', '.txt', '.tsv']:
                     result["data_type"] = "tabular"
                     result["suggested_agents"] = [3]  # CurveFitting
                     result["primary_suggestion"] = 3
                     
-                    # Try to peek at the file
+                    # Try to peek at the file and count rows
                     try:
+                        import csv
                         with open(path, 'r') as f:
-                            first_lines = [f.readline() for _ in range(5)]
-                        result["preview"] = first_lines
+                            # Read first few lines for preview
+                            first_lines = [f.readline().strip() for _ in range(5)]
+                            result["preview"] = first_lines
+                            
+                            # Count total lines (approximate row count)
+                            f.seek(0)
+                            row_count = sum(1 for _ in f) - 1  # Subtract header
+                            result["n_points"] = row_count
+                            result["note"] = f"Tabular data with ~{row_count} data points"
                     except Exception as e:
                         result["preview_error"] = str(e)
                 
@@ -314,6 +462,8 @@ class AnalysisOrchestratorTools:
         def load_metadata(json_path: str) -> str:
             """
             Load existing JSON metadata file.
+            Can accept either a direct path to a JSON file, or a directory path
+            (will search for metadata.json or similar files in the directory).
             """
             print(f"  ⚡ Tool: Loading metadata from {json_path}...")
             
@@ -321,8 +471,55 @@ class AnalysisOrchestratorTools:
             if not path.exists():
                 return json.dumps({
                     "status": "error",
-                    "message": f"File not found: {json_path}"
+                    "message": f"File/directory not found: {json_path}"
                 })
+            
+            # If directory, search for metadata file
+            if path.is_dir():
+                # Look for common metadata file names
+                metadata_candidates = [
+                    path / "metadata.json",
+                    path / "meta.json",
+                    path / "info.json",
+                    path / "experiment.json",
+                ]
+                
+                # Also look for any .json file
+                json_files = list(path.glob("*.json"))
+                
+                # Find the first existing metadata file
+                metadata_path = None
+                for candidate in metadata_candidates:
+                    if candidate.exists():
+                        metadata_path = candidate
+                        break
+                
+                # If no standard name found, use first .json file
+                if metadata_path is None and json_files:
+                    metadata_path = json_files[0]
+                
+                if metadata_path is None:
+                    # Look for .txt description files
+                    txt_candidates = [
+                        path / "metadata.txt",
+                        path / "description.txt",
+                        path / "info.txt",
+                    ]
+                    for candidate in txt_candidates:
+                        if candidate.exists():
+                            return json.dumps({
+                                "status": "info",
+                                "message": f"Found text description file: {candidate.name}. Use convert_metadata to convert it to JSON.",
+                                "text_file": str(candidate)
+                            })
+                    
+                    return json.dumps({
+                        "status": "error",
+                        "message": f"No metadata file found in directory: {json_path}"
+                    })
+                
+                path = metadata_path
+                print(f"    Found metadata file: {path.name}")
             
             try:
                 with open(path, 'r') as f:
@@ -339,6 +536,7 @@ class AnalysisOrchestratorTools:
                     return json.dumps({
                         "status": "warning",
                         "message": f"Metadata loaded but missing recommended fields: {missing}",
+                        "metadata_file": path.name,
                         "metadata": metadata,
                         "experiment_type": metadata.get("experiment_type"),
                         "technique": metadata.get("experiment", {}).get("technique") if isinstance(metadata.get("experiment"), dict) else metadata.get("technique"),
@@ -347,6 +545,7 @@ class AnalysisOrchestratorTools:
                 
                 return json.dumps({
                     "status": "success",
+                    "metadata_file": path.name,
                     "metadata": metadata,
                     "experiment_type": metadata.get("experiment_type"),
                     "technique": metadata.get("experiment", {}).get("technique"),
@@ -369,12 +568,14 @@ class AnalysisOrchestratorTools:
             name="load_metadata",
             description=(
                 "Load existing JSON metadata file. "
-                "Use this when user provides a .json metadata file."
+                "Can accept a direct path to a .json file OR a directory path "
+                "(will automatically find metadata.json, meta.json, info.json, etc. in the directory). "
+                "Use this when analyzing a directory of spectra that contains a metadata file."
             ),
             parameters={
                 "json_path": {
                     "type": "string",
-                    "description": "Path to the JSON metadata file"
+                    "description": "Path to JSON metadata file OR directory containing metadata"
                 }
             },
             required=["json_path"]
