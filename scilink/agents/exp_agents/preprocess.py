@@ -173,7 +173,7 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         Asks an LLM to choose the best pre-processing steps based on data stats.
         Returns ONLY the strategy dictionary.
         """
-        self.logger.info("\n\n🤖 --- DATA AGENT STEP: PRE-PROCESSING STRATEGY SELECTION --- 🤖\n")
+        self.logger.info("\n\n🤖 --- DATA AGENT STEP: PRE-PROCESSING STRATEGY SELECTION --- 🤖")
         try:
             prompt_parts = [
                 PRE_PROCESSING_STRATEGY_INSTRUCTIONS,
@@ -227,7 +227,7 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         Applies a robust pre-processing pipeline.
         
         """
-        self.logger.info("\n\n🤖 --- DATA AGENT STEP: APPLYING PRE-PROCESSING --- 🤖\n")
+        self.logger.info("\n\n🤖 --- DATA AGENT STEP: APPLYING PRE-PROCESSING --- 🤖")
         data_to_process = hspy_data.copy()
         mask_2d = None
 
@@ -562,10 +562,10 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         """
         Applies the simple 1D processing strategy chosen by the LLM.
         """
-        self.logger.info("\n\n🤖 --- DATA AGENT STEP: Applying Standard 1D Strategy --- 🤖\n")
+        self.logger.info("\n\n🤖 --- DATA AGENT STEP: Applying Standard 1D Strategy --- 🤖")
         
         # Log the reasoning before taking action.
-        self.logger.info(f"LLM Strategy: {strategy.get('reasoning', 'No reasoning provided.')}")
+        self.logger.info(f"LLM Strategy: {strategy.get('reasoning', 'No reasoning provided.')}\n")
         
         processed_data = curve_data.copy()
         y_data = processed_data[:, 1] # Extract Y-data
