@@ -18,9 +18,9 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
 
-from ..auth import get_internal_proxy_key
-from ..wrappers.openai_wrapper import OpenAIAsGenerativeModel
-from ..wrappers.litellm_wrapper import LiteLLMGenerativeModel
+from ...auth import get_internal_proxy_key
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .analysis_orchestrator_tools import AnalysisOrchestratorTools
 from ._deprecation import normalize_params
 
@@ -346,7 +346,7 @@ class AnalysisOrchestratorAgent:
 
     def _should_enable_human_feedback(self) -> bool:
         """Determines if human feedback should be enabled based on analysis mode."""
-        return self.analysis_mode != AnalysisMode.AUTOMATIC
+        return self.analysis_mode != AnalysisMode.AUTONOMOUS
 
     def set_analysis_mode(self, mode: AnalysisMode) -> None:
         """Change the analysis mode at runtime."""
@@ -521,7 +521,8 @@ class AnalysisOrchestratorAgent:
         
         client = OpenAI(
             api_key=self.model.api_key,
-            base_url=self.model.base_url
+            base_url=self.model.base_url,
+            timeout=120.0  # 2 minute timeout
         )
         
         self.messages.append({"role": "user", "content": user_input})
@@ -537,6 +538,8 @@ class AnalysisOrchestratorAgent:
         
         while iteration < max_iterations:
             iteration += 1
+            
+            print(f"  ⏳ Waiting for LLM response (iteration {iteration})...")
             
             response = client.chat.completions.create(
                 model=self.model.model,
@@ -603,13 +606,16 @@ class AnalysisOrchestratorAgent:
         while iteration < max_iterations:
             iteration += 1
             
+            print(f"  ⏳ Waiting for LLM response (iteration {iteration})...")
+            
             response = litellm.completion(
                 model=self.model.model,
                 messages=self.messages,
                 tools=self.tools_for_model,
                 tool_choice="auto",
                 api_key=self.model.api_key,
-                api_base=self.model.base_url
+                api_base=self.model.base_url,
+                timeout=120.0  # 2 minute timeout
             )
             
             message = response.choices[0].message

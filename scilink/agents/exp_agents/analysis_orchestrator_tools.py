@@ -92,7 +92,7 @@ class AnalysisOrchestratorTools:
                     
                     # Try to load and get shape
                     try:
-                        from ..tools.image_processor import load_image
+                        from ...tools.image_processor import load_image
                         img = load_image(str(path))
                         result["shape"] = list(img.shape)
                         result["dtype"] = str(img.dtype)
