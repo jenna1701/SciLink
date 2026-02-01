@@ -317,12 +317,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         is_single_spectrum = (num_spectra == 1)
         
-        self.logger.info(f"\n{'='*80}")
+        self.logger.info("")
         self.logger.info(f"📈 CURVE FITTING ANALYSIS - {num_spectra} spectrum{'s' if num_spectra > 1 else ''}")
-        self.logger.info(f"   Quality settings: R² threshold={effective_r2_threshold}, max_retries={effective_max_retries}")
+        self.logger.info(f"   Quality: R² threshold={effective_r2_threshold}, max_retries={effective_max_retries}")
         if not is_single_spectrum:
             self.logger.info(f"   Outlier detection: {effective_outlier_sigma}σ")
-        self.logger.info(f"{'='*80}\n")
         
         # Load first spectrum for initial analysis
         if spectrum_stack is not None:
@@ -439,16 +438,15 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             serializable = self._make_serializable(final_results)
             json.dump(serializable, f, indent=2, default=str)
         
-        self.logger.info(f"\n{'='*80}")
-        self.logger.info(f"✅ ANALYSIS COMPLETE")
-        self.logger.info(f"   Results saved to: {results_path}")
-        
-        # Log flagged spectra summary
+        self.logger.info("")
+        self.logger.info("✅ ANALYSIS COMPLETE")
+        self.logger.info(f"   Results: {results_path}")
+        if state.get("report_path"):
+            self.logger.info(f"   Report: {state['report_path']}")
+
         flagged = final_results.get("flagged_spectra", [])
         if flagged:
-            self.logger.warning(f"   ⚠️ {len(flagged)} spectra flagged for review (see report)")
-        
-        self.logger.info(f"{'='*80}\n")
+            self.logger.warning(f"   ⚠️ {len(flagged)} spectra flagged for review")
         
         # Log action
         self._log_action(
