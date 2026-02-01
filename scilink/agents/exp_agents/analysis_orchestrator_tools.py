@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Dict, Any, Callable, Optional, List
 
 from .metadata_converter import generate_metadata_json_from_text, METADATA_SCHEMA_DICT
-from .orchestrator_agent import OrchestratorAgent, AGENT_MAP
 
 
 class AnalysisOrchestratorTools:
@@ -92,7 +91,7 @@ class AnalysisOrchestratorTools:
                     
                     # Try to load and get shape
                     try:
-                        from ...tools.image_processor import load_image
+                        from ..tools.image_processor import load_image
                         img = load_image(str(path))
                         result["shape"] = list(img.shape)
                         result["dtype"] = str(img.dtype)
@@ -381,85 +380,161 @@ class AnalysisOrchestratorTools:
         # 4. SELECT AGENT
         # =====================================================================
         def select_agent(
-            data_type: str = None,
-            analysis_goal: str = None,
-            image_path: str = None
+            agent_id: int,
+            reasoning: str = None
         ) -> str:
             """
-            Use LLM to select the most appropriate analysis agent.
-            """
-            print(f"  ⚡ Tool: Selecting analysis agent...")
+            Set the selected analysis agent. The chat LLM decides which agent to use
+            based on data type, metadata, and image preview (if applicable).
             
-            # Use current state if not provided
-            if data_type is None:
-                data_type = self.orch.current_data_type or "unknown"
+            Agent IDs:
+                0: FFTMicroscopyAnalysisAgent - microstructure, grains, phases, atomic-resolution
+                1: SAMMicroscopyAnalysisAgent - particle counting, segmentation
+                2: HyperspectralAnalysisAgent - spectral datacubes
+                3: CurveFittingAgent - 1D curves, spectra
+            """
+            print(f"  ⚡ Tool: Setting agent to {agent_id}...")
+            
+            if agent_id not in self.AGENT_NAMES:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Invalid agent_id: {agent_id}. Valid IDs: {list(self.AGENT_NAMES.keys())}"
+                })
+            
+            self.orch.selected_agent_id = agent_id
+            
+            return json.dumps({
+                "status": "success",
+                "agent_id": agent_id,
+                "agent_name": self.AGENT_NAMES.get(agent_id),
+                "description": self.AGENT_DESCRIPTIONS.get(agent_id),
+                "reasoning": reasoning or "Selected by user/LLM"
+            })
+        
+        self._register_tool(
+            func=select_agent,
+            name="select_agent",
+            description=(
+                "Set the analysis agent to use. Call this after examining data and metadata. "
+                "For microscopy images, use preview_image first to see the image and decide between "
+                "FFTMicroscopyAnalysisAgent (0) for microstructure/atomic vs SAMMicroscopyAnalysisAgent (1) for particles. "
+                "Agent IDs: 0=FFT/microstructure, 1=SAM/particles, 2=Hyperspectral, 3=CurveFitting"
+            ),
+            parameters={
+                "agent_id": {
+                    "type": "integer",
+                    "description": "Agent ID to use (0=FFT, 1=SAM, 2=Hyperspectral, 3=CurveFitting)"
+                },
+                "reasoning": {
+                    "type": "string",
+                    "description": "Brief explanation of why this agent was chosen"
+                }
+            },
+            required=["agent_id"]
+        )
+        
+        # =====================================================================
+        # 4b. PREVIEW IMAGE (for microscopy agent selection)
+        # =====================================================================
+        def preview_image(image_path: str = None) -> str:
+            """
+            Load and return a preview of a microscopy image for the LLM to analyze.
+            Use this to decide between FFTMicroscopyAnalysisAgent (microstructure) 
+            and SAMMicroscopyAnalysisAgent (particles).
+            """
+            print(f"  ⚡ Tool: Loading image preview...")
             
             if image_path is None:
                 image_path = self.orch.current_data_path
             
-            # Build system info for orchestrator
-            system_info = {}
-            if self.orch.current_metadata:
-                system_info = self.orch.current_metadata.copy()
-            if analysis_goal:
-                system_info["analysis_goal"] = analysis_goal
+            if image_path is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No image path provided. Use examine_data first."
+                })
             
-            # Use the existing OrchestratorAgent for selection
+            path = Path(image_path)
+            if not path.exists():
+                return json.dumps({
+                    "status": "error", 
+                    "message": f"File not found: {image_path}"
+                })
+            
+            # Check if it's an image file
+            image_extensions = ['.tif', '.tiff', '.png', '.jpg', '.jpeg', '.bmp']
+            if path.suffix.lower() not in image_extensions:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Not an image file: {path.suffix}. Use this tool only for microscopy images."
+                })
+            
             try:
-                selector = OrchestratorAgent(
-                    api_key=self.orch.api_key,
-                    model_name=self.orch.model_name,
-                    base_url=self.orch.base_url
-                )
+                from ...tools.image_processor import load_image
+                import base64
+                from io import BytesIO
+                from PIL import Image
                 
-                agent_id, reasoning = selector.select_agent(
-                    data_type=data_type,
-                    system_info=system_info,
-                    image_path=image_path
-                )
+                # Load image
+                img_array = load_image(str(path))
                 
-                if agent_id >= 0:
-                    self.orch.selected_agent_id = agent_id
-                    
-                    return json.dumps({
-                        "status": "success",
-                        "agent_id": agent_id,
-                        "agent_name": self.AGENT_NAMES.get(agent_id, "Unknown"),
-                        "description": self.AGENT_DESCRIPTIONS.get(agent_id, ""),
-                        "reasoning": reasoning
-                    })
+                # Get basic stats
+                shape = img_array.shape
+                dtype = str(img_array.dtype)
+                
+                # Convert to PIL for resizing and encoding
+                if len(shape) == 2:
+                    pil_img = Image.fromarray(img_array)
                 else:
-                    return json.dumps({
-                        "status": "error",
-                        "message": reasoning or "Failed to select agent"
-                    })
-                    
+                    pil_img = Image.fromarray(img_array)
+                
+                # Resize for preview (max 512px)
+                max_dim = 512
+                if max(pil_img.size) > max_dim:
+                    ratio = max_dim / max(pil_img.size)
+                    new_size = (int(pil_img.size[0] * ratio), int(pil_img.size[1] * ratio))
+                    pil_img = pil_img.resize(new_size, Image.Resampling.LANCZOS)
+                
+                # Convert to base64
+                buffer = BytesIO()
+                pil_img.convert('RGB').save(buffer, format='JPEG', quality=85)
+                img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                
+                return json.dumps({
+                    "status": "success",
+                    "image_path": str(path),
+                    "shape": list(shape),
+                    "dtype": dtype,
+                    "preview_size": list(pil_img.size),
+                    "image_base64": img_base64,
+                    "guidance": (
+                        "Examine this image to decide the appropriate agent:\n"
+                        "- FFTMicroscopyAnalysisAgent (ID: 0): For microstructure with grains, phases, "
+                        "domains, periodic patterns, or atomic-resolution lattices\n"
+                        "- SAMMicroscopyAnalysisAgent (ID: 1): For discrete particles, nanoparticles, "
+                        "cells, or objects that need to be counted/segmented"
+                    )
+                })
+                
             except Exception as e:
-                self.logger.error(f"Agent selection error: {e}", exc_info=True)
+                self.logger.error(f"Image preview error: {e}", exc_info=True)
                 return json.dumps({
                     "status": "error",
                     "message": str(e)
                 })
         
         self._register_tool(
-            func=select_agent,
-            name="select_agent",
+            func=preview_image,
+            name="preview_image",
             description=(
-                "Use LLM to select the most appropriate analysis agent based on data type, "
-                "metadata, and analysis goal. Returns agent ID and reasoning."
+                "Load a microscopy image preview for visual analysis. "
+                "Use this when you need to decide between FFTMicroscopyAnalysisAgent (microstructure, "
+                "grains, atomic-resolution) and SAMMicroscopyAnalysisAgent (particles, segmentation). "
+                "Returns the image as base64 for you to examine."
             ),
             parameters={
-                "data_type": {
-                    "type": "string",
-                    "description": "Type of data (microscopy, spectroscopy, curve, hyperspectral)"
-                },
-                "analysis_goal": {
-                    "type": "string",
-                    "description": "User's analysis objective (e.g., 'count particles', 'find defects')"
-                },
                 "image_path": {
                     "type": "string",
-                    "description": "Path to image for visual context (optional)"
+                    "description": "Path to image file (uses current data path if not specified)"
                 }
             },
             required=[]
