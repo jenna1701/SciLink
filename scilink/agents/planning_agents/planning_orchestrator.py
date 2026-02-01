@@ -294,6 +294,10 @@ class PlanningOrchestratorAgent:
                 )
             
             embedding_api_key = api_key
+        else:
+            # LiteLLM mode: ensure embedding_api_key is set
+            if embedding_api_key is None:
+                embedding_api_key = api_key
 
         # Store autonomy level
         self.autonomy_level = autonomy_level
