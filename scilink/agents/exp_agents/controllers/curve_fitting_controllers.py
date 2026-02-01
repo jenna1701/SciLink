@@ -657,6 +657,7 @@ Your guidance: '''
         enable_human_feedback: bool = False,
         outlier_sigma: float = None,
         max_verification_iterations: int = None,
+        preprocessor: Any = None,
     ):
         self.model = model
         self.logger = logger
@@ -674,6 +675,7 @@ Your guidance: '''
         self.enable_human_feedback = enable_human_feedback
         self.outlier_sigma = outlier_sigma if outlier_sigma is not None else self.DEFAULT_OUTLIER_SIGMA
         self.max_verification_iterations = max_verification_iterations if max_verification_iterations is not None else self.DEFAULT_MAX_VERIFICATION_ITERATIONS
+        self.preprocessor = preprocessor
 
     def _generate_fitting_script(self, state: dict, data_path: str, stats: dict) -> str:
         config = state.get("locked_fitting_config", {})
@@ -1738,6 +1740,15 @@ Return JSON with:
                 data_path = spectrum_paths[idx]
                 spectrum_name = Path(data_path).stem
                 curve_data = self._load_curve_data(data_path)
+
+            if self.preprocessor is not None:
+                try:
+                    curve_data, _ = self.preprocessor.run_preprocessing(
+                        curve_data, state.get("system_info", {})
+                    )
+                    self.logger.info(f"      Preprocessed: {spectrum_name}")
+                except Exception as e:
+                    self.logger.warning(f"      Preprocessing failed for {spectrum_name}: {e}, using raw data")
             
             if is_single:
                 self.logger.info(f"   Fitting: {spectrum_name}")
