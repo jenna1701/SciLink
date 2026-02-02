@@ -31,9 +31,43 @@ from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
 
-# ============================================================================
-# ORIGINAL CONTROLLERS (for single-spectrum pipeline steps)
-# ============================================================================
+def build_verification_prompt_with_history(
+    current_fit: dict,
+    previous_iterations: List[dict],
+) -> str:
+    """Build history context string for verification prompt."""
+    if not previous_iterations:
+        return ""
+    
+    lines = [
+        "\n\n## PREVIOUS VERIFICATION ATTEMPTS",
+        "Review what was tried before. Don't suggest fixes that already failed.\n"
+    ]
+    
+    for i, prev in enumerate(previous_iterations, 1):
+        lines.append(f"\n### Attempt {i}")
+        r2 = prev.get('r_squared')
+        lines.append(f"- R² = {r2:.4f}" if r2 is not None else "- R² = N/A")
+        lines.append(f"- Config: {prev.get('config_used', {}).get('physical_model', 'N/A')}")
+        lines.append(f"- Assessment: {prev.get('overall_assessment', 'N/A')}")
+        
+        issues = prev.get('issues_found', [])
+        if issues:
+            lines.append(f"- Issues ({len(issues)}):")
+            for issue in issues:
+                lines.append(f"  • {issue.get('location', '?')}: {issue.get('problem', '?')}")
+        
+        if prev.get('recommended_action'):
+            lines.append(f"- Action taken: {prev['recommended_action']}")
+    
+    lines.extend([
+        "\n\n## IMPORTANT",
+        "1. Check if previous issues were RESOLVED or still PERSIST",
+        "2. If a fix didn't work, suggest something DIFFERENT",
+    ])
+    
+    return "\n".join(lines)
+
 
 class AnalyzeDataController:
     """Compute data statistics and create initial visualization."""
@@ -1076,7 +1110,7 @@ Your guidance: '''
 If the fit is acceptable (residuals appear random, all features captured, no spurious components), set fit_acceptable=true and issues_found=[].
 '''
 
-    def _verify_fit_with_llm(self, state: dict, fit_result: dict) -> Optional[dict]:
+    def _verify_fit_with_llm(self, state: dict, fit_result: dict, history: List[dict] = None) -> Optional[dict]:
         """
         Use LLM to verify fit quality by examining the visualization.
         Returns verification result with any issues found, or None if verification fails.
@@ -1103,10 +1137,19 @@ If the fit is acceptable (residuals appear random, all features captured, no spu
             parameters=params_str
         )
         
+        # Add history context
+        history_context = build_verification_prompt_with_history(
+            current_fit={
+                "r_squared": r_squared,
+                "model_type": model_type,
+                "parameters": parameters,
+            },
+            previous_iterations=history or [],
+        )
+
         prompt_parts = [
-            prompt_text,
+            prompt_text + history_context,
             "\n\n**FIT VISUALIZATION (examine carefully, especially the residual plot):**",
-            {"mime_type": "image/png", "data": fit_result["visualization_bytes"]}
         ]
         
         # Also include original data if available for comparison
@@ -1392,12 +1435,13 @@ Return JSON with:
                 else:
                     # Track all verification attempts for potential judge review
                     verification_attempts = []
+                    verification_history = [] # track history for context
                     fit_was_approved = False
-                    
+
                     for verification_iter in range(self.max_verification_iterations):
                         self.logger.info(f"   Verification {verification_iter + 1}/{self.max_verification_iterations}...")
                         
-                        verification = self._verify_fit_with_llm(state, best_result)
+                        verification = self._verify_fit_with_llm(state, best_result, history=verification_history)  # Pass history
                         
                         if verification is None:
                             self.logger.warning(f"   Verification failed, skipping")
@@ -1411,6 +1455,15 @@ Return JSON with:
                             "r2": best_r2
                         })
                         
+                        # Store in history for next iteration's context
+                        verification_history.append({
+                            "r_squared": best_r2,
+                            "config_used": state.get("locked_fitting_config", {}),
+                            "issues_found": verification.get("issues_found", []),
+                            "overall_assessment": verification.get("overall_assessment", ""),
+                            "recommended_action": verification.get("recommended_action", ""),
+                        })
+
                         if verification.get("fit_acceptable", True):
                             self.logger.info(f"   ✅ Fit approved (R² = {best_r2:.4f})")
                             fit_was_approved = True
