@@ -1059,7 +1059,7 @@ Your guidance: '''
 
     FIT_VERIFICATION_PROMPT = '''You are a scientific data analysis expert reviewing a curve/spectral fit.
 
-**TASK:** Examine this fit visualization and identify any issues that should be corrected.
+**TASK:** Examine this fit visualization and determine if the fit is acceptable for scientific use.
 
 **FIT STATISTICS:**
 - R² = {r_squared:.4f}
@@ -1069,45 +1069,56 @@ Your guidance: '''
 **FITTED PARAMETERS:**
 {parameters}
 
-**CRITICAL: Examine the residual plot carefully.** Look for:
+## STEP 1: CHECK FOR BROKEN FITS (reject immediately if ANY are true)
 
-1. **Systematic patterns in residuals** (not random noise):
-   - S-shaped patterns (positive-negative-positive) suggest a single component is fitting what should be multiple
-   - Large localized residuals suggest missing components
-   - Oscillating residuals suggest wrong functional form
-   
-2. **Spurious components:**
-   - Components with very small amplitude fitting noise rather than real features
-   - Components in regions with no visible features in the data
-   
-3. **Poor component placement:**
-   - Components not centered on actual features
-   - Components too broad or too narrow for the features they fit
+- **Wrong x-range?** Does the plot show a completely different x-range than where the model components are defined? (e.g., plot shows 135-200 but components are at 300, 520, 860) → REJECT
+- **Featureless fit?** Is R² ≈ 1.0 but the plot shows only a simple line/curve with no actual data structure being fitted? → REJECT  
+- **RMSE ≈ 0 with trivial fit?** Near-zero error but no meaningful features captured suggests fitting wrong data subset → REJECT
+- **Model components outside plot?** Legend shows components at positions not visible in the plotted x-range? → REJECT
 
-4. **Baseline issues:**
-   - Systematic slope in residuals
-   - Curvature not captured
+If ANY box above is checked: set fit_acceptable: FALSE, explain the data range or data loading problem.
 
-**IMPORTANT:** This is a general curve fitting tool - features may be peaks, edges, steps, oscillations, or other shapes depending on the data type. Focus on whether the model captures the data structure, not on specific peak assignments.
+---
 
-**Return JSON:**
+## STEP 2: IF STEP 1 PASSED, evaluate fit quality
+
+**Accept if:**
+- R² ≥ 0.95 AND residuals are mostly random noise AND main data features are captured
+
+**Reject if:**
+- R² < 0.90
+- Major systematic residual pattern across ENTIRE spectrum  
+- A prominent data feature is completely missed by the model
+
+**Do NOT reject for:**
+- Ambiguous or subtle features
+- Minor position offsets (<5%)
+- Large parameter uncertainties (that's just uncertainty, not failure)
+- "Could try different model" suggestions
+
+---
+
+## RESPONSE FORMAT
+
+Return JSON:
 {{
     "fit_acceptable": true/false,
     "issues_found": [
         {{
-            "location": "description of where (e.g., 'around 2850-2950 region' or 'high-x region')",
-            "problem": "specific issue observed",
-            "evidence": "what you see in the residuals or fit",
-            "suggested_fix": "how to address it"
+            "location": "where in the data",
+            "problem": "what is wrong",
+            "evidence": "what you see in the plot/residuals",
+            "suggested_fix": "how to fix it"
         }}
     ],
-    "spurious_components": ["list of component names/indices that appear to be fitting noise"],
-    "missing_features": ["descriptions of data features not captured by the model"],
-    "overall_assessment": "brief summary of fit quality and main issues",
-    "recommended_action": "specific instruction for improving the fit (or 'none' if acceptable)"
+    "spurious_components": ["list of components fitting noise, not real features"],
+    "missing_features": ["list of obvious data features not captured by model"],
+    "overall_assessment": "one sentence summary",
+    "recommended_action": "specific fix OR 'none'"
 }}
 
-If the fit is acceptable (residuals appear random, all features captured, no spurious components), set fit_acceptable=true and issues_found=[].
+
+Remember: Rejecting a good fit (R² > 0.98) to chase marginal improvements often makes things WORSE through overfitting or convergence failures.
 '''
 
     def _verify_fit_with_llm(self, state: dict, fit_result: dict, history: List[dict] = None) -> Optional[dict]:
