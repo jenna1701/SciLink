@@ -137,7 +137,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         r2_threshold: float = 0.95,
         max_model_retries: int = 3,
         outlier_sigma: float = 2.0,
-        max_verification_iterations: int = 3,
+        max_verification_iterations: int = 5,
         **kwargs,
     ):
         self.api_key, self.base_url = normalize_params(
