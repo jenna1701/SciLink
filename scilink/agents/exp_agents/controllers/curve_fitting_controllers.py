@@ -1658,9 +1658,19 @@ Return JSON with:
                 
                 self.logger.info("")
                 self.logger.info(f"   [{i}] {location}")
-                self.logger.info(f"       Problem: {problem}")
+
+                # Wrap problem text
+                problem_lines = self._wrap_text(problem, width=65)
+                self.logger.info(f"       Problem: {problem_lines[0]}")
+                for line in problem_lines[1:]:
+                    self.logger.info(f"                {line}")
+
+                # Wrap fix text
                 if suggested_fix:
-                    self.logger.info(f"       Fix: {suggested_fix}")
+                    fix_lines = self._wrap_text(suggested_fix, width=65)
+                    self.logger.info(f"       Fix: {fix_lines[0]}")
+                    for line in fix_lines[1:]:
+                        self.logger.info(f"            {line}")
 
         recommended = verification.get("recommended_action", "")
         if recommended and recommended.lower() != "none":
