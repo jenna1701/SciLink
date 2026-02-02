@@ -606,7 +606,7 @@ class AnalysisOrchestratorAgent:
         while iteration < self.MAX_TOOL_ITERATIONS:
             iteration += 1
             
-            print(f"  ⏳ Waiting for LLM response (iteration {iteration})...")
+            print(f"  ⏳ Waiting for LLM response ...")
             
             try:
                 response = client.chat.completions.create(
@@ -679,7 +679,7 @@ class AnalysisOrchestratorAgent:
         while iteration < self.MAX_TOOL_ITERATIONS:
             iteration += 1
             
-            print(f"  ⏳ Waiting for LLM response (iteration {iteration})...")
+            print(f"  ⏳ Waiting for LLM response ...")
             
             try:
                 response = litellm.completion(
