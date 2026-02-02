@@ -1446,6 +1446,9 @@ Return JSON with:
                 best_r2 = r2
                 best_result = result
             
+            # Track if user explicitly accepted (only relevant for first spectrum)
+            user_accepted_fit = False
+
             # --- Verification loop (only for first spectrum) ---
             if spectrum_idx == 0:
                 if not best_result or not best_result.get("success") or best_r2 < 0.1:
@@ -1591,6 +1594,7 @@ Return JSON with:
                                 self.logger.warning(f"   ⚠️ Judge could not select any fit - keeping current best (R² = {best_r2:.4f})")
                     
                     # Human feedback opportunity (if enabled and we have a fit to show)
+                    user_accepted_fit = False  # Track if user explicitly accepted
                     if self.enable_human_feedback and best_result and best_result.get("visualization_bytes"):
                         user_feedback = self._get_user_feedback_on_fit(state, best_result, best_r2)
                         
@@ -1599,6 +1603,9 @@ Return JSON with:
                                 state, user_feedback, best_result, best_r2,
                                 curve_data, data_path, spectrum_name, spectrum_idx, all_attempts
                             )
+                        else:
+                            # User pressed Enter without feedback = explicit acceptance
+                            user_accepted_fit = True
             
             # --- Check if we meet threshold ---
             if best_r2 >= self.r2_threshold:
@@ -1606,9 +1613,17 @@ Return JSON with:
                 return best_result
             else:
                 self.logger.warning(f"⚠️ R² = {best_r2:.4f} (below threshold {self.r2_threshold})")
+                
+                # If user explicitly accepted, skip alternative model retries
+                if user_accepted_fit:
+                    self.logger.info(f"   User accepted fit - skipping alternative model attempts")
+                    best_result["user_accepted"] = True
+                    best_result["quality_warning"] = f"R² = {best_r2:.4f} below threshold {self.r2_threshold} (user accepted)"
+                    return best_result
         else:
             self.logger.error(f"   Initial fit failed: {result.get('error', 'Unknown')[:50]}")
             all_attempts.append({"model": initial_model, "r2": 0, "result": result})
+            user_accepted_fit = False
         
         # --- Alternative model retries ---
         current_config = state.get("locked_fitting_config", {}).copy()
