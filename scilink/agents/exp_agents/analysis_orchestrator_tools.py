@@ -1306,7 +1306,7 @@ class AnalysisOrchestratorTools:
 
             # 3. Initialize Lit Agents
             try:
-                owl_agent = OwlLiteratureAgent(api_key=self.orch.futurehouse_api_key)
+                owl_agent = OwlLiteratureAgent(api_key=self.orch.futurehouse_api_key, max_wait_time=600)
                 
                 # Use orchestrator's generic LLM config for the Scorer
                 scorer = NoveltyScorer(
