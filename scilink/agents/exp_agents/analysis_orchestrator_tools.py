@@ -1223,31 +1223,6 @@ class AnalysisOrchestratorTools:
             required=[]
         )
 
-    def _register_tool(
-        self,
-        func: Callable,
-        name: str,
-        description: str,
-        parameters: Dict[str, Any],
-        required: list = None
-    ):
-        """Register a tool in OpenAI format."""
-        self.functions_map[name] = func
-        
-        openai_schema = {
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": description,
-                "parameters": {
-                    "type": "object",
-                    "properties": parameters,
-                    "required": required or []
-                }
-            }
-        }
-        self.openai_schemas.append(openai_schema)
-
         def assess_novelty(analysis_id: str = None, analysis_index: int = -1) -> str:
             """
             Perform a literature search and novelty assessment on claims generated 
@@ -1403,6 +1378,31 @@ class AnalysisOrchestratorTools:
             },
             required=[]
         )
+
+    def _register_tool(
+        self,
+        func: Callable,
+        name: str,
+        description: str,
+        parameters: Dict[str, Any],
+        required: list = None
+    ):
+        """Register a tool in OpenAI format."""
+        self.functions_map[name] = func
+        
+        openai_schema = {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": parameters,
+                    "required": required or []
+                }
+            }
+        }
+        self.openai_schemas.append(openai_schema)
 
     def execute_tool(self, tool_name: str, **kwargs) -> str:
         """Execute a tool by name with given arguments."""
