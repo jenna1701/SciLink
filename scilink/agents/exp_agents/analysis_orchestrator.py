@@ -235,6 +235,7 @@ class AnalysisOrchestratorAgent:
         embedding_api_key: Optional[str] = None,
         restore_checkpoint: bool = False,
         analysis_mode: AnalysisMode = AnalysisMode.CO_PILOT,
+        futurehouse_api_key: Optional[str] = None,
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
@@ -281,6 +282,17 @@ class AnalysisOrchestratorAgent:
         # Store analysis mode
         self.analysis_mode = analysis_mode
         self._enable_human_feedback = self._should_enable_human_feedback()
+
+        self.futurehouse_api_key = futurehouse_api_key
+        if not self.futurehouse_api_key:
+            # Try env var
+            self.futurehouse_api_key = os.environ.get("FUTUREHOUSE_API_KEY")
+            
+        if self.futurehouse_api_key:
+             logging.info("📚 Literature Analysis enabled (API key found)")
+        else:
+             logging.warning("⚠️ Literature Analysis disabled (No FutureHouse API key)")
+
         logging.info(f"🎛️  Analysis Mode: {analysis_mode.value.upper()}")
         
         # Setup directories

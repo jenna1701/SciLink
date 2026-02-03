@@ -8,13 +8,14 @@ and prevent output collisions when analyzing multiple datasets.
 
 import json
 import logging
-import os
+import time
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Callable, Optional, List
+from typing import Dict, Any, Callable
 
 from .metadata_converter import generate_metadata_json_from_text, METADATA_SCHEMA_DICT
+from ..lit_agents import OwlLiteratureAgent, NoveltyScorer
 
 
 class AnalysisOrchestratorTools:
@@ -1246,6 +1247,162 @@ class AnalysisOrchestratorTools:
             }
         }
         self.openai_schemas.append(openai_schema)
+
+        def assess_novelty(analysis_id: str = None, analysis_index: int = -1) -> str:
+            """
+            Perform a literature search and novelty assessment on claims generated 
+            by a previous analysis run.
+            """
+            print(f"  ⚡ Tool: Assessing novelty for analysis...")
+
+            if not self.orch.futurehouse_api_key:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No FutureHouse/Edison API Key provided in Orchestrator initialization."
+                })
+
+            # 1. Retrieve the analysis record
+            record = None
+            if analysis_id:
+                for r in self.orch.analysis_results:
+                    if r.get("analysis_id") == analysis_id:
+                        record = r
+                        break
+                if record is None:
+                    return json.dumps({"status": "error", "message": f"Analysis ID not found: {analysis_id}"})
+            else:
+                if not self.orch.analysis_results:
+                    return json.dumps({"status": "error", "message": "No analysis history available."})
+                record = self.orch.analysis_results[analysis_index]
+
+            # 2. Extract Claims
+            full_result = record.get("full_result", {})
+            claims = full_result.get("scientific_claims", [])
+            
+            if not claims:
+                return json.dumps({
+                    "status": "warning",
+                    "message": "No scientific claims found in this analysis to assess."
+                })
+
+            print(f"    Found {len(claims)} claims to assess from {record.get('analysis_id')}")
+
+            # 3. Initialize Lit Agents
+            try:
+                owl_agent = OwlLiteratureAgent(api_key=self.orch.futurehouse_api_key)
+                
+                # Use orchestrator's generic LLM config for the Scorer
+                scorer = NoveltyScorer(
+                    api_key=self.orch.api_key,
+                    model_name=self.orch.model_name,
+                    base_url=self.orch.base_url
+                )
+            except Exception as e:
+                return json.dumps({"status": "error", "message": f"Failed to init Lit Agents: {e}"})
+
+            # 4. Process Claims
+            scored_results = []
+            
+            # Create a dedicated directory for lit results inside the analysis folder
+            analysis_dir = Path(record.get("output_directory", self.orch.results_dir))
+            lit_output_dir = analysis_dir / "literature_assessment"
+            lit_output_dir.mkdir(exist_ok=True)
+
+            print(f"    Output directory: {lit_output_dir}")
+
+            for i, claim_obj in enumerate(claims):
+                question = claim_obj.get("has_anyone_question")
+                claim_text = claim_obj.get("claim")
+                
+                if not question:
+                    continue
+
+                print(f"    🔍 Searching claim {i+1}/{len(claims)}: {question[:60]}...")
+                
+                # Search (Owl)
+                search_res = owl_agent.query_literature(question)
+                
+                if search_res.get("status") != "success":
+                    print(f"       ⚠️ Search failed for claim {i+1}")
+                    continue
+
+                formatted_answer = search_res.get("formatted_answer", "")
+
+                # Score (Scorer)
+                print(f"       ⚖️ Scoring novelty...")
+                score_res = scorer.score_novelty(question, formatted_answer)
+                
+                result_entry = {
+                    "claim_index": i,
+                    "original_claim": claim_text,
+                    "question": question,
+                    "search_answer": formatted_answer,
+                    "novelty_score": score_res.get("novelty_score"),
+                    "novelty_explanation": score_res.get("explanation"),
+                    "sources": [s.url for s in getattr(search_res, 'sources', []) if hasattr(s, 'url')]
+                }
+                scored_results.append(result_entry)
+                
+                # Pause briefly to be polite to APIs
+                time.sleep(1)
+
+            # 5. Save Results
+            output_file = lit_output_dir / "novelty_report.json"
+            with open(output_file, "w") as f:
+                json.dump({
+                    "analysis_id": record.get("analysis_id"),
+                    "timestamp": datetime.now().isoformat(),
+                    "assessments": scored_results
+                }, f, indent=2)
+
+            # 6. Summarize for Chat
+            summary_lines = []
+            high_novelty_count = 0
+            
+            for res in scored_results:
+                score = res['novelty_score']
+                if score >= 4:
+                    high_novelty_count += 1
+                    icon = "🌟"
+                elif score == 3:
+                    icon = "🤔"
+                else:
+                    icon = "📚"
+                
+                summary_lines.append(
+                    f"{icon} [Score {score}/5] {res['original_claim'][:50]}... "
+                    f"-> {res['novelty_explanation'][:80]}..."
+                )
+
+            return json.dumps({
+                "status": "success",
+                "total_assessed": len(scored_results),
+                "high_novelty_count": high_novelty_count,
+                "summary_text": "\n".join(summary_lines),
+                "report_path": str(output_file),
+                "note": "Full literature review and sources saved to JSON."
+            })
+
+        self._register_tool(
+            func=assess_novelty,
+            name="assess_novelty",
+            description=(
+                "Perform a literature search to assess the novelty of scientific claims "
+                "generated by a previous analysis. Requires an analysis_id (from run_analysis). "
+                "Returns novelty scores (1-5) and checks for prior art."
+            ),
+            parameters={
+                "analysis_id": {
+                    "type": "string",
+                    "description": "The ID of the analysis run to assess (e.g. 'sample1_FFT_2023...')"
+                },
+                "analysis_index": {
+                    "type": "integer",
+                    "description": "Alternatively, use the index of the analysis in memory (-1 for most recent)"
+                }
+            },
+            required=[]
+        )
 
     def execute_tool(self, tool_name: str, **kwargs) -> str:
         """Execute a tool by name with given arguments."""
