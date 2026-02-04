@@ -845,12 +845,12 @@ class AnalysisOrchestratorTools:
                             "agent_id": agent_id,
                             "agent_name": self.AGENT_NAMES.get(agent_id),
                             "recommendation": (
-                                "This agent executes AI-generated Python code and requires a secure environment. "
-                                "Please run in one of the following:\n"
+                                "This agent executes AI-generated Python code and requires a secure environment.\n\n"
+                                "Please run SciLink in one of the following:\n"
                                 "  1. Docker container (recommended)\n"
                                 "  2. Virtual machine (VMware, VirtualBox, cloud VM)\n"
-                                "  3. Google Colab\n"
-                                "  4. Set UNSAFE_EXECUTION_OK=true environment variable to bypass"
+                                "  3. Google Colab\n\n"
+                                "See the documentation for setup instructions."
                             )
                         })
                     else:

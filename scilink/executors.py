@@ -133,6 +133,8 @@ HOW TO RUN SAFELY:
   1. Docker (Recommended):  Run in a container using the provided Dockerfile
   2. Virtual Machine:       Use VMware, VirtualBox, or a cloud VM
   3. Google Colab:          Use Colab's free isolated environment
+
+If you understand the risks and want to proceed anyway, you may continue.
 """)
     print("=" * 74)
     
