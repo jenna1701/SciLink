@@ -431,6 +431,15 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                  **kwargs):
         """Initialize the 1D pre-processing agent."""
         # Pass output_dir to BaseAnalysisAgent for state management
+
+        if not require_sandbox_approval(
+            context="CurveFittingAgent (curve fitting analysis)"
+        ):
+            raise RuntimeError(
+                "CurveFittingAgent requires code execution but user declined. "
+                "Run in Docker, VM, or Colab for safe execution."
+            )
+        
         super().__init__(*args, output_dir=output_dir, **kwargs) 
         self.logger = logging.getLogger(self.__class__.__name__)
         self.agent_type = "curve_preprocessing"
@@ -438,7 +447,7 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         self.output_dir = self.output_dir.resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        self.executor = ScriptExecutor(timeout=executor_timeout, enforce_sandbox=False)
+        self.executor = ScriptExecutor(timeout=executor_timeout)
         self.logger.info(f"CurvePreprocessingAgent initialized. Custom script output dir: {self.output_dir}")
 
     def _get_initial_state_fields(self) -> Dict[str, Any]:
