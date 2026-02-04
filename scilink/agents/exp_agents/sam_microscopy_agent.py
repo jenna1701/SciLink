@@ -3,6 +3,8 @@ SAM Microscopy Analysis Agent
 """
 
 import warnings
+
+from scilink.executors import require_sandbox_approval
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 import json
@@ -29,6 +31,8 @@ from ...tools.sam import (
     run_sam_analysis,
     calculate_sam_statistics,
 )
+
+from ...executors import require_sandbox_approval
 
 
 class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
@@ -67,6 +71,15 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         enable_human_feedback: bool = False,
         output_dir: str = "sam_output"
     ):
+        
+        if not require_sandbox_approval(
+            context="SAMMicroscopyAnalysisAgent (SAM microscopy analysis)"
+        ):
+            raise RuntimeError(
+                "SAMMicroscopyAnalysisAgent requires code execution but user declined. "
+                "Run in Docker, VM, or Colab for safe execution."
+            )
+    
         # Normalize Params
         self.api_key, self.base_url = normalize_params(
             api_key, google_api_key, base_url, local_model, 

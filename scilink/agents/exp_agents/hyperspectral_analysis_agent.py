@@ -21,6 +21,8 @@ from .pipelines.hyperspectral_pipelines import (
     create_hyperspectral_synthesis_pipeline
 )
 from ...tools.image_processor import load_image, convert_numpy_to_jpeg_bytes
+from ...executors import require_sandbox_approval
+
 from ._deprecation import normalize_params
 
 
@@ -70,6 +72,15 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         run_preprocessing: bool = True,
         enable_human_feedback: bool = True
     ):
+        
+        if not require_sandbox_approval(
+            context="HyperspectralAnalysisAgent (hyperspectral analysis)"
+        ):
+            raise RuntimeError(
+                "HyperspectralAnalysisAgent requires code execution but user declined. "
+                "Run in Docker, VM, or Colab for safe execution."
+            )
+        
         # Normalize params
         self.api_key, self.base_url = normalize_params(
             api_key, google_api_key, base_url, local_model,

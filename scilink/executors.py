@@ -10,6 +10,32 @@ from .auth import get_api_key
 
 DEFAULT_TIMEOUT = 120
 
+# Global cache for sandbox approval (shared across all agents in session)
+_GLOBAL_SANDBOX_APPROVED: bool = False
+
+# Description of what the LLM is instructed to do
+LLM_EXECUTION_DESCRIPTION = """
+WHAT THIS SYSTEM DOES:
+  An LLM (Large Language Model) will generate and execute Python code on your
+  machine to perform scientific data analysis. The LLM is instructed to:
+
+  • Write Python scripts for curve fitting, spectral analysis, and data processing
+  • Use scientific libraries: NumPy, SciPy, scikit-learn, matplotlib, pandas
+  • Read input data files you provide (CSV, NPY, TXT, etc.)
+  • Save output files (plots, results) to the designated output directory
+  • Execute the generated code automatically without manual review
+
+  The LLM is NOT instructed to:
+  • Access the internet or make network requests
+  • Modify system files or install software
+  • Access files outside the working/output directories
+  • Execute shell commands beyond running Python scripts
+
+  However, AI-generated code can behave unexpectedly. A sandbox provides
+  protection against unintended actions.
+""".strip()
+
+
 def is_in_colab():
     """Check for Google Colab environment."""
     if 'COLAB_GPU' in os.environ or 'GCE_METADATA_TIMEOUT' in os.environ:
@@ -17,6 +43,7 @@ def is_in_colab():
     if 'google.colab' in sys.modules:
         return True
     return False
+
 
 def check_security_sandbox_indicators(verbose=False):
     """Check for OS-level sandboxing indicators."""
@@ -32,14 +59,12 @@ def check_security_sandbox_indicators(verbose=False):
         return score, positive_indicators
 
     # Tier 2: Strong Indicators (Score: 5)
-    # Docker/Container check
     if os.path.exists('/.dockerenv') or ('docker' in (open('/proc/1/cgroup').read() if os.path.exists('/proc/1/cgroup') else '')):
         score += 5
         positive_indicators.append("docker_container")
         if verbose:
             logging.info("Strong Indicator: Docker or container environment detected.")
 
-    # Virtual Machine check
     try:
         if sys.platform.startswith("linux"):
             result = subprocess.run(['systemd-detect-virt'], capture_output=True, text=True, check=False)
@@ -65,72 +90,160 @@ def check_security_sandbox_indicators(verbose=False):
 
     return score, list(set(positive_indicators))
 
-def enforce_security_sandbox(required_score=4, allow_override=False):
-    """Enforce security sandbox requirement before code execution."""
+
+def prompt_user_for_unsafe_execution(show_llm_description=True):
+    """
+    Prompt the user to decide whether to proceed without a sandbox.
+    
+    Returns:
+        bool: True if user chooses to proceed, False to abort.
+    """
+    if not sys.stdin.isatty():
+        logging.warning("Non-interactive environment detected. Cannot prompt user.")
+        return False
+    
+    print("\n" + "=" * 74)
+    print("⚠️  WARNING: NO SECURITY SANDBOX DETECTED ⚠️")
+    print("=" * 74)
+    
+    if show_llm_description:
+        print()
+        print(LLM_EXECUTION_DESCRIPTION)
+        print()
+        print("-" * 74)
+    
+    print("""
+WHY A SANDBOX IS RECOMMENDED:
+  While the LLM is instructed to perform only safe operations, AI-generated
+  code can sometimes behave unexpectedly due to:
+  • Misinterpretation of instructions
+  • Hallucinated or incorrect code patterns  
+  • Edge cases in data that trigger unusual behavior
+
+POTENTIAL RISKS WITHOUT A SANDBOX:
+  • Accidental file modifications outside intended directories
+  • High CPU/memory usage from inefficient generated code
+  • Unexpected interactions with your Python environment
+
+HOW TO RUN SAFELY:
+  1. Docker (Recommended):  Run in a container using the provided Dockerfile
+  2. Virtual Machine:       Use VMware, VirtualBox, or a cloud VM
+  3. Google Colab:          Use Colab's free isolated environment
+
+If you understand the risks and want to proceed anyway, you may continue.
+""")
+    print("=" * 74)
+    
+    while True:
+        try:
+            response = input("\n❓ Proceed WITHOUT sandbox protection? (y=yes, n=abort) [N]: ").strip().lower()
+            if response in ('y', 'yes'):
+                print()
+                logging.warning("⚠️  User acknowledged risks and chose to proceed without sandbox.")
+                return True
+            elif response in ('n', 'no', ''):
+                print()
+                logging.info("User chose to abort. No code will be executed.")
+                return False
+            else:
+                print("   Please enter 'y' to proceed or 'n' to abort.")
+        except (EOFError, KeyboardInterrupt):
+            print("\n\nAborted by user.")
+            return False
+
+
+def require_sandbox_approval(
+    interactive: bool = True,
+    allow_override: bool = True,
+    context: str = "This operation"
+) -> bool:
+    """
+    Check sandbox and get user approval if needed. 
+    
+    Results are cached globally so user is only prompted once per Python session,
+    regardless of how many agents are created.
+    
+    Args:
+        interactive: If True, prompt user when no sandbox detected
+        allow_override: If True, respect UNSAFE_EXECUTION_OK env var
+        context: Description of what will execute code (for user message)
+    
+    Returns:
+        bool: True if execution is approved, False if user declined
+        
+    Raises:
+        RuntimeError: If non-interactive and no sandbox/override
+    """
+    global _GLOBAL_SANDBOX_APPROVED
+    
+    # Check global cache first
+    if _GLOBAL_SANDBOX_APPROVED:
+        logging.info("✅ Sandbox approval already granted this session")
+        return True
+    
+    # Check for environment variable override
     if allow_override and os.environ.get("UNSAFE_EXECUTION_OK", "false").lower() == "true":
-        logging.warning("⚠️  WARNING: Safety check explicitly bypassed by user override.")
-        logging.warning("         Executing on the host machine at your own risk.")
-        return
+        logging.warning("⚠️  Sandbox bypass via UNSAFE_EXECUTION_OK environment variable")
+        _GLOBAL_SANDBOX_APPROVED = True
+        return True
+    
+    # Check sandbox indicators
+    score, indicators = check_security_sandbox_indicators(verbose=False)
+    
+    if score >= 4:
+        friendly_name = indicators[0] if indicators else "sandbox"
+        logging.info(f"✅ Sandbox detected ({friendly_name}) - code execution enabled")
+        _GLOBAL_SANDBOX_APPROVED = True
+        return True
+    
+    # No sandbox detected - need user approval
+    if not interactive:
+        raise RuntimeError(
+            f"No sandbox detected and interactive=False. "
+            f"Set UNSAFE_EXECUTION_OK=true or run in Docker/VM/Colab."
+        )
+    
+    if not sys.stdin.isatty():
+        logging.error("No sandbox detected and non-interactive terminal.")
+        return False
+    
+    # Prompt user
+    print("\n" + "=" * 74)
+    print(f"⚠️  {context.upper()} REQUIRES CODE EXECUTION")
+    print("=" * 74)
+    print(LLM_EXECUTION_DESCRIPTION)
+    
+    approved = prompt_user_for_unsafe_execution(show_llm_description=False)
+    
+    if approved:
+        _GLOBAL_SANDBOX_APPROVED = True
+    
+    return approved
 
-    logging.info("Running Security Sandbox Check...")
-    score, indicators = check_security_sandbox_indicators(verbose=True)
 
-    if score >= required_score:
-        friendly_name = indicators[0] if indicators else "Unknown Sandbox"
-        logging.info(f"✅ Security Check Passed (Score: {score}, Indicator: {friendly_name})")
-        logging.info("   OS-level isolated environment detected. Proceeding with code execution.")
-        return
-    else:
-        error_msg = f"""
-❌ DANGER: SECURITY CHECK FAILED (Score: {score}, Required: {required_score}) ❌
-{'='*70}
-This system executes AI-generated code and requires a secure, isolated
-environment to protect your computer from unintended or harmful actions.
+def get_execution_description():
+    """Return a description of what the LLM execution system does."""
+    return LLM_EXECUTION_DESCRIPTION
 
-Running directly on your main operating system is **EXTREMELY UNSAFE**.
-{'='*70}
-
-▶️ HOW TO RUN SCILINK SAFELY:
-You MUST restart SciLink inside a container or virtual machine.
-
-1. Docker (Strongly Recommended):
-   Use the provided Dockerfile or run in a Docker container.
-
-2. Virtual Machine:
-   Install and run SciLink within a VM (VMware, VirtualBox, Cloud VM, etc.).
-
-3. Google Colab:
-   Use Colab's isolated notebook environment.
-
-4. Advanced Override (NOT RECOMMENDED):
-   Set environment variable: UNSAFE_EXECUTION_OK=true
-{'='*70}
-"""
-        logging.error(error_msg)
-        raise RuntimeError("Security sandbox requirement not met. Halting execution for safety.")
 
 class ScriptExecutor:
-    def __init__(self, timeout: int = DEFAULT_TIMEOUT, mp_api_key: str = None,
-                 enforce_sandbox: bool = False, allow_unsafe_override: bool = False):
+    """
+    Executes Python scripts for scientific analysis.
+    
+    NOTE: Sandbox enforcement is handled at the agent level via 
+    `require_sandbox_approval()`. This executor assumes the caller 
+    has already verified it's safe to execute code.
+    """
+    
+    def __init__(self, timeout: int = DEFAULT_TIMEOUT, mp_api_key: str = None):
         self.timeout = timeout
         self.mp_api_key = mp_api_key or get_api_key('materials_project') or os.getenv("MP_API_KEY")
-        self.enforce_sandbox = enforce_sandbox
-        self.allow_unsafe_override = allow_unsafe_override
         
-        if self.enforce_sandbox:
-            enforce_security_sandbox(allow_override=self.allow_unsafe_override)
-        
-        logging.info(f"ScriptExecutor initialized with timeout: {self.timeout}s")
+        logging.info(f"ScriptExecutor initialized (timeout: {self.timeout}s)")
 
     def execute_script(self, script_content: str, working_dir: str = None) -> dict:
-        if self.enforce_sandbox:
-            try:
-                enforce_security_sandbox(allow_override=self.allow_unsafe_override)
-            except RuntimeError as e:
-                return {"status": "error", "message": f"Security check failed: {str(e)}"}
-        
-        logging.info("Attempting to execute generated script...")
-        logging.warning("⚠️  EXECUTING AI-GENERATED CODE - Security sandbox verified")
+        """Execute a Python script."""
+        logging.info("Executing Python script...")
         
         original_cwd = os.getcwd()
         if working_dir:
@@ -162,11 +275,9 @@ class ScriptExecutor:
                 return {"status": "error", "message": error_msg}
 
         except subprocess.TimeoutExpired:
-            error_msg = f"Script execution timed out after {self.timeout} seconds."
-            return {"status": "error", "message": error_msg}
+            return {"status": "error", "message": f"Script execution timed out after {self.timeout} seconds."}
         except Exception as e:
-            error_msg = f"An unexpected error occurred during script execution: {e}"
-            return {"status": "error", "message": error_msg}
+            return {"status": "error", "message": f"An unexpected error occurred: {e}"}
         finally:
             os.chdir(original_cwd)
             if temp_script_file and os.path.exists(temp_script_file):

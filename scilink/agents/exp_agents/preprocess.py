@@ -20,7 +20,7 @@ from .instruct import (
     CURVE_PREPROCESSING_STRATEGY_INSTRUCTIONS,
     PREPROCESSING_QUALITY_ASSESSMENT_INSTRUCTIONS
 )
-from ...executors import ScriptExecutor
+from ...executors import ScriptExecutor, require_sandbox_approval
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -39,6 +39,14 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
                  executor_timeout: int = 120,
                  **kwargs):
         """Initialize the pre-processing agent."""
+
+        if not require_sandbox_approval(
+            context="HyperspectralPreprocessingAgent (hyperspectral preprocessing analysis)"
+        ):
+            raise RuntimeError(
+                "HyperspectralPreprocessingAgent requires code execution but user declined. "
+                "Run in Docker, VM, or Colab for safe execution."
+            )
         
         # Pass output_dir to BaseAnalysisAgent for state management
         super().__init__(*args, output_dir=output_dir, **kwargs) 
@@ -50,7 +58,7 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        self.executor = ScriptExecutor(timeout=executor_timeout, enforce_sandbox=False)
+        self.executor = ScriptExecutor(timeout=executor_timeout)
         self.logger.info(f"HyperspectralPreprocessingAgent initialized. Custom script output dir: {self.output_dir}")
 
     def _get_initial_state_fields(self) -> Dict[str, Any]:
@@ -423,6 +431,15 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                  **kwargs):
         """Initialize the 1D pre-processing agent."""
         # Pass output_dir to BaseAnalysisAgent for state management
+
+        if not require_sandbox_approval(
+            context="CurvePreprocessingAgent (curve preprocessing analysis)"
+        ):
+            raise RuntimeError(
+                "CurvePreprocessingAgent requires code execution but user declined. "
+                "Run in Docker, VM, or Colab for safe execution."
+            )
+        
         super().__init__(*args, output_dir=output_dir, **kwargs) 
         self.logger = logging.getLogger(self.__class__.__name__)
         self.agent_type = "curve_preprocessing"
@@ -430,7 +447,7 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         self.output_dir = self.output_dir.resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        self.executor = ScriptExecutor(timeout=executor_timeout, enforce_sandbox=False)
+        self.executor = ScriptExecutor(timeout=executor_timeout)
         self.logger.info(f"CurvePreprocessingAgent initialized. Custom script output dir: {self.output_dir}")
 
     def _get_initial_state_fields(self) -> Dict[str, Any]:

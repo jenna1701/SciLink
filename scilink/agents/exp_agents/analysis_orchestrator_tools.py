@@ -765,9 +765,11 @@ class AnalysisOrchestratorTools:
             
             Each analysis run creates a unique output directory under results/
             to ensure traceability and prevent output collisions when analyzing
-            multiple datasets with the same agent. Note that "dataset" refers to
-            the data file/collection - the same physical sample may produce
-            multiple datasets (different conditions, time points, etc.).
+            multiple datasets with the same agent.
+            
+            For agents that execute LLM-generated code (CurveFitting, Hyperspectral),
+            a sandbox check is performed. If no sandbox is detected, the user is
+            prompted to confirm before proceeding.
             
             Output directory format: results/analysis_{dataset_name}_{timestamp}_{counter}/
             """
@@ -822,12 +824,43 @@ class AnalysisOrchestratorTools:
                     }, f, indent=2)
                 
                 # === Create agent with unique output directory ===
-                agent = self.orch.create_agent_for_analysis(agent_id, str(analysis_output_dir))
+                # NOTE: For code-executing agents (2, 3), this may prompt the user
+                # for sandbox approval and raise RuntimeError if declined.
+                try:
+                    agent = self.orch.create_agent_for_analysis(agent_id, str(analysis_output_dir))
+                except RuntimeError as e:
+                    # Handle sandbox rejection or other init failures
+                    error_msg = str(e)
+                    
+                    if "sandbox" in error_msg.lower() or "declined" in error_msg.lower():
+                        # Clean up the output directory we created
+                        import shutil
+                        if analysis_output_dir.exists():
+                            shutil.rmtree(analysis_output_dir)
+                        
+                        return json.dumps({
+                            "status": "aborted",
+                            "reason": "sandbox_declined",
+                            "message": "Analysis aborted: User declined to proceed without sandbox protection.",
+                            "agent_id": agent_id,
+                            "agent_name": self.AGENT_NAMES.get(agent_id),
+                            "recommendation": (
+                                "This agent executes AI-generated Python code and requires a secure environment.\n\n"
+                                "Please run SciLink in one of the following:\n"
+                                "  1. Docker container (recommended)\n"
+                                "  2. Virtual machine (VMware, VirtualBox, cloud VM)\n"
+                                "  3. Google Colab\n\n"
+                                "See the documentation for setup instructions."
+                            )
+                        })
+                    else:
+                        # Some other initialization error
+                        raise
                 
                 print(f"    Using agent: {type(agent).__name__}")
                 print(f"    Data: {data_path}")
                 
-                # Handle directory input - filter out metadata files
+                # === Handle directory input - filter out metadata files ===
                 path = Path(data_path)
                 actual_data_input = data_path  # Default: pass as-is
                 
@@ -849,7 +882,7 @@ class AnalysisOrchestratorTools:
                     if not data_files:
                         return json.dumps({
                             "status": "error",
-                            "message": f"No data files found in directory (only metadata files present)"
+                            "message": "No data files found in directory (only metadata files present)"
                         })
                     
                     # Sort for consistent ordering
@@ -871,34 +904,34 @@ class AnalysisOrchestratorTools:
                         if len(actual_data_input) > 3:
                             print(f"      ... and {len(actual_data_input) - 3} more")
                 
-                # Run analysis
+                # === Run analysis ===
                 result = agent.analyze(
                     data=actual_data_input,
                     system_info=self.orch.current_metadata
                 )
                 
-                # Store result (including full result for get_recommendations)
+                # === Store result ===
                 analysis_record = {
                     "analysis_id": analysis_id,
                     "timestamp": datetime.now().isoformat(),
-                    "data_path": data_path,  # Store original path
+                    "data_path": data_path,
                     "agent_id": agent_id,
                     "agent_name": self.AGENT_NAMES.get(agent_id),
                     "status": result.get("status"),
                     "output_directory": str(analysis_output_dir),
-                    "full_result": result,  # Store full result for recommendations
-                    "novelty_assessment": None  # Placeholder for novelty assessment
+                    "full_result": result,
+                    "novelty_assessment": None
                 }
                 self.orch.analysis_results.append(analysis_record)
                 
-                # Format response
+                # === Format response ===
                 if result.get("status") == "success":
                     return json.dumps({
                         "status": "success",
                         "analysis_id": analysis_id,
                         "agent_used": self.AGENT_NAMES.get(agent_id),
                         "output_directory": str(analysis_output_dir),
-                        "detailed_analysis": result.get("detailed_analysis", "")[:2000],  # Truncate for chat
+                        "detailed_analysis": result.get("detailed_analysis", "")[:2000],
                         "claims_count": len(result.get("scientific_claims", [])),
                         "full_result_available": True,
                         "note": f"All outputs saved to: {analysis_output_dir}",
