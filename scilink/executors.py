@@ -10,6 +10,9 @@ from .auth import get_api_key
 
 DEFAULT_TIMEOUT = 120
 
+# Global cache for sandbox approval (shared across all agents in session)
+_GLOBAL_SANDBOX_APPROVED: bool = False
+
 # Description of what the LLM is instructed to do
 LLM_EXECUTION_DESCRIPTION = """
 WHAT THIS SYSTEM DOES:
@@ -56,14 +59,12 @@ def check_security_sandbox_indicators(verbose=False):
         return score, positive_indicators
 
     # Tier 2: Strong Indicators (Score: 5)
-    # Docker/Container check
     if os.path.exists('/.dockerenv') or ('docker' in (open('/proc/1/cgroup').read() if os.path.exists('/proc/1/cgroup') else '')):
         score += 5
         positive_indicators.append("docker_container")
         if verbose:
             logging.info("Strong Indicator: Docker or container environment detected.")
 
-    # Virtual Machine check
     try:
         if sys.platform.startswith("linux"):
             result = subprocess.run(['systemd-detect-virt'], capture_output=True, text=True, check=False)
@@ -94,16 +95,11 @@ def prompt_user_for_unsafe_execution(show_llm_description=True):
     """
     Prompt the user to decide whether to proceed without a sandbox.
     
-    Args:
-        show_llm_description: If True, display what the LLM is instructed to do.
-    
     Returns:
         bool: True if user chooses to proceed, False to abort.
     """
-    # Check if we're in an interactive terminal
     if not sys.stdin.isatty():
         logging.warning("Non-interactive environment detected. Cannot prompt user.")
-        logging.warning("Set UNSAFE_EXECUTION_OK=true to bypass sandbox check in non-interactive mode.")
         return False
     
     print("\n" + "=" * 74)
@@ -156,104 +152,16 @@ If you understand the risks and want to proceed anyway, you may continue.
             return False
 
 
-def get_execution_description():
-    """
-    Return a description of what the LLM execution system does.
-    
-    This can be used to inform users before they start using the system.
-    
-    Returns:
-        str: Multi-line description of LLM execution behavior.
-    """
-    return LLM_EXECUTION_DESCRIPTION
-
-
-def enforce_security_sandbox(required_score=4, allow_override=False, interactive=True,
-                              show_llm_description=True):
-    """
-    Enforce security sandbox requirement before code execution.
-    
-    Args:
-        required_score: Minimum sandbox score required (default: 4)
-        allow_override: Allow UNSAFE_EXECUTION_OK env var to bypass (default: False)
-        interactive: If True, prompt user when sandbox not detected (default: True)
-        show_llm_description: If True, show what the LLM does when prompting (default: True)
-    
-    Returns:
-        bool: True if execution should proceed, False if it should abort.
-        
-    Raises:
-        RuntimeError: If sandbox check fails and interactive=False and no override.
-    """
-    # Check for environment variable override
-    if allow_override and os.environ.get("UNSAFE_EXECUTION_OK", "false").lower() == "true":
-        logging.warning("⚠️  WARNING: Safety check explicitly bypassed by environment variable.")
-        logging.warning("         Executing on the host machine at your own risk.")
-        return True
-
-    logging.info("Running Security Sandbox Check...")
-    score, indicators = check_security_sandbox_indicators(verbose=True)
-
-    if score >= required_score:
-        friendly_name = indicators[0] if indicators else "Unknown Sandbox"
-        logging.info(f"✅ Security Check Passed (Score: {score}, Indicator: {friendly_name})")
-        logging.info("   OS-level isolated environment detected. Proceeding safely.")
-        return True
-    
-    # Sandbox not detected
-    logging.warning(f"⚠️  Security Check: No sandbox detected (Score: {score}, Required: {required_score})")
-    
-    if interactive:
-        # Prompt user for decision
-        if prompt_user_for_unsafe_execution(show_llm_description=show_llm_description):
-            return True
-        else:
-            raise RuntimeError("User chose to abort execution due to missing sandbox.")
-    else:
-        # Non-interactive mode: fail hard
-        error_msg = f"""
-{'='*74}
-❌ SECURITY CHECK FAILED: NO SANDBOX DETECTED ❌
-{'='*74}
-
-{LLM_EXECUTION_DESCRIPTION}
-
-{'='*74}
-CURRENT STATUS:
-  Sandbox Score: {score} (Required: {required_score})
-  Mode: Non-interactive (cannot prompt for confirmation)
-{'='*74}
-
-TO PROCEED, CHOOSE ONE OPTION:
-
-  1. Docker (Recommended):
-     docker run -it your-scilink-image
-
-  2. Virtual Machine:
-     Run inside VMware, VirtualBox, or a cloud VM
-
-  3. Google Colab:
-     Use Colab's isolated notebook environment
-
-  4. Environment Variable (accepts all risk):
-     export UNSAFE_EXECUTION_OK=true
-
-  5. Interactive Mode:
-     Use interactive=True to be prompted for confirmation
-
-{'='*74}
-"""
-        logging.error(error_msg)
-        raise RuntimeError("Security sandbox requirement not met. Halting execution for safety.")
-
-
 def require_sandbox_approval(
     interactive: bool = True,
     allow_override: bool = True,
     context: str = "This operation"
 ) -> bool:
     """
-    Check sandbox and get user approval if needed. Call this early in agent init.
+    Check sandbox and get user approval if needed. 
+    
+    Results are cached globally so user is only prompted once per Python session,
+    regardless of how many agents are created.
     
     Args:
         interactive: If True, prompt user when no sandbox detected
@@ -266,30 +174,37 @@ def require_sandbox_approval(
     Raises:
         RuntimeError: If non-interactive and no sandbox/override
     """
+    global _GLOBAL_SANDBOX_APPROVED
+    
+    # Check global cache first
+    if _GLOBAL_SANDBOX_APPROVED:
+        logging.info("✅ Sandbox approval already granted this session")
+        return True
+    
     # Check for environment variable override
     if allow_override and os.environ.get("UNSAFE_EXECUTION_OK", "false").lower() == "true":
         logging.warning("⚠️  Sandbox bypass via UNSAFE_EXECUTION_OK environment variable")
+        _GLOBAL_SANDBOX_APPROVED = True
         return True
     
-    # Check sandbox
+    # Check sandbox indicators
     score, indicators = check_security_sandbox_indicators(verbose=False)
     
     if score >= 4:
         friendly_name = indicators[0] if indicators else "sandbox"
         logging.info(f"✅ Sandbox detected ({friendly_name}) - code execution enabled")
+        _GLOBAL_SANDBOX_APPROVED = True
         return True
     
-    # No sandbox detected
+    # No sandbox detected - need user approval
     if not interactive:
         raise RuntimeError(
             f"No sandbox detected and interactive=False. "
             f"Set UNSAFE_EXECUTION_OK=true or run in Docker/VM/Colab."
         )
     
-    # Check if running in interactive terminal
     if not sys.stdin.isatty():
         logging.error("No sandbox detected and non-interactive terminal.")
-        logging.error("Set UNSAFE_EXECUTION_OK=true to proceed.")
         return False
     
     # Prompt user
@@ -298,154 +213,37 @@ def require_sandbox_approval(
     print("=" * 74)
     print(LLM_EXECUTION_DESCRIPTION)
     
-    return prompt_user_for_unsafe_execution(show_llm_description=False)
+    approved = prompt_user_for_unsafe_execution(show_llm_description=False)
+    
+    if approved:
+        _GLOBAL_SANDBOX_APPROVED = True
+    
+    return approved
+
+
+def get_execution_description():
+    """Return a description of what the LLM execution system does."""
+    return LLM_EXECUTION_DESCRIPTION
 
 
 class ScriptExecutor:
     """
-    Executes AI-generated Python scripts with optional sandbox enforcement.
+    Executes Python scripts for scientific analysis.
     
-    This executor runs Python code generated by an LLM for scientific analysis.
-    The LLM is instructed to use common scientific libraries (NumPy, SciPy,
-    scikit-learn, matplotlib, pandas) for data analysis tasks.
-    
-    Security:
-        When enforce_sandbox=True, the executor verifies it's running in an
-        isolated environment (Docker, VM, or Colab) before executing any code.
-        If no sandbox is detected, the user is prompted to confirm they want
-        to proceed (in interactive mode) or execution is blocked.
-    
-    Args:
-        timeout: Maximum script execution time in seconds (default: 120)
-        mp_api_key: Materials Project API key for materials science queries
-        enforce_sandbox: Require sandbox verification before execution
-        allow_unsafe_override: Allow UNSAFE_EXECUTION_OK env var to bypass
-        interactive_sandbox: Prompt user if no sandbox detected (vs. hard fail)
-        show_llm_description: Show what the LLM does when prompting user
-    
-    Example:
-        # Standard usage with sandbox enforcement
-        executor = ScriptExecutor(enforce_sandbox=True)
-        result = executor.execute_script("import numpy as np; print(np.pi)")
-        
-        # Non-interactive (for CI/CD - will fail without sandbox)
-        executor = ScriptExecutor(enforce_sandbox=True, interactive_sandbox=False)
-        
-        # See what the LLM is instructed to do
-        print(executor.get_execution_description())
+    NOTE: Sandbox enforcement is handled at the agent level via 
+    `require_sandbox_approval()`. This executor assumes the caller 
+    has already verified it's safe to execute code.
     """
     
-    def __init__(self, timeout: int = DEFAULT_TIMEOUT, mp_api_key: str = None,
-                 enforce_sandbox: bool = True, allow_unsafe_override: bool = False,
-                 interactive_sandbox: bool = True, show_llm_description: bool = True):
+    def __init__(self, timeout: int = DEFAULT_TIMEOUT, mp_api_key: str = None):
         self.timeout = timeout
         self.mp_api_key = mp_api_key or get_api_key('materials_project') or os.getenv("MP_API_KEY")
-        self.enforce_sandbox = enforce_sandbox
-        self.allow_unsafe_override = allow_unsafe_override
-        self.interactive_sandbox = interactive_sandbox
-        self.show_llm_description = show_llm_description
-        self._user_accepted_risk = False
-        self._sandbox_verified = False
         
-        if self.enforce_sandbox:
-            self._sandbox_verified, self._user_accepted_risk = self._check_sandbox_once()
-        
-        logging.info(f"ScriptExecutor initialized (timeout: {self.timeout}s, sandbox: {self._get_sandbox_status()})")
-
-    def _get_sandbox_status(self) -> str:
-        """Get a human-readable sandbox status."""
-        if not self.enforce_sandbox:
-            return "not enforced"
-        elif self._sandbox_verified:
-            return "verified"
-        elif self._user_accepted_risk:
-            return "user-accepted-risk"
-        else:
-            return "blocked"
-
-    def _check_sandbox_once(self) -> tuple:
-        """
-        Perform sandbox check once at initialization.
-        
-        Returns:
-            tuple: (sandbox_verified: bool, user_accepted_risk: bool)
-        """
-        score, _ = check_security_sandbox_indicators(verbose=False)
-        
-        if score >= 4:
-            # Sandbox detected
-            try:
-                enforce_security_sandbox(
-                    allow_override=self.allow_unsafe_override,
-                    interactive=False  # Don't prompt, just verify
-                )
-                return True, False
-            except RuntimeError:
-                return False, False
-        else:
-            # No sandbox - need user confirmation or override
-            try:
-                enforce_security_sandbox(
-                    allow_override=self.allow_unsafe_override,
-                    interactive=self.interactive_sandbox,
-                    show_llm_description=self.show_llm_description
-                )
-                # If we get here, user accepted or override was set
-                return False, True
-            except RuntimeError:
-                return False, False
-
-    def get_execution_description(self) -> str:
-        """
-        Get a description of what the LLM execution system does.
-        
-        Returns:
-            str: Multi-line description of LLM behavior and capabilities.
-        """
-        return LLM_EXECUTION_DESCRIPTION
-
-    def get_sandbox_status(self) -> dict:
-        """
-        Get detailed sandbox status information.
-        
-        Returns:
-            dict: Status information including score, indicators, and decisions.
-        """
-        score, indicators = check_security_sandbox_indicators(verbose=False)
-        return {
-            "enforcement_enabled": self.enforce_sandbox,
-            "sandbox_score": score,
-            "required_score": 4,
-            "sandbox_detected": score >= 4,
-            "indicators": indicators,
-            "user_accepted_risk": self._user_accepted_risk,
-            "execution_allowed": not self.enforce_sandbox or self._sandbox_verified or self._user_accepted_risk,
-            "status": self._get_sandbox_status()
-        }
+        logging.info(f"ScriptExecutor initialized (timeout: {self.timeout}s)")
 
     def execute_script(self, script_content: str, working_dir: str = None) -> dict:
-        """
-        Execute a Python script.
-        
-        Args:
-            script_content: Python code to execute
-            working_dir: Optional working directory for execution
-            
-        Returns:
-            dict: Result with 'status' ('success' or 'error') and output/message
-        """
-        if self.enforce_sandbox and not (self._sandbox_verified or self._user_accepted_risk):
-            return {
-                "status": "error", 
-                "message": "Execution blocked: No sandbox detected and user declined to proceed.\n\n"
-                          "To understand what this system does, call executor.get_execution_description()"
-            }
-        
-        logging.info("Executing AI-generated Python script...")
-        if self._sandbox_verified:
-            logging.info("   Environment: Sandbox verified ✓")
-        elif self._user_accepted_risk:
-            logging.warning("   Environment: No sandbox (user accepted risk) ⚠️")
+        """Execute a Python script."""
+        logging.info("Executing Python script...")
         
         original_cwd = os.getcwd()
         if working_dir:
@@ -477,11 +275,9 @@ class ScriptExecutor:
                 return {"status": "error", "message": error_msg}
 
         except subprocess.TimeoutExpired:
-            error_msg = f"Script execution timed out after {self.timeout} seconds."
-            return {"status": "error", "message": error_msg}
+            return {"status": "error", "message": f"Script execution timed out after {self.timeout} seconds."}
         except Exception as e:
-            error_msg = f"An unexpected error occurred during script execution: {e}"
-            return {"status": "error", "message": error_msg}
+            return {"status": "error", "message": f"An unexpected error occurred: {e}"}
         finally:
             os.chdir(original_cwd)
             if temp_script_file and os.path.exists(temp_script_file):

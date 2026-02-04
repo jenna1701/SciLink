@@ -59,6 +59,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     
     For series analysis, the fitting model is carefully selected on the
     first spectrum and then LOCKED for consistent analysis across all spectra.
+    
+    Security:
+    - This agent executes LLM-generated Python code for curve fitting
+    - A sandbox check is performed at initialization
+    - If no sandbox (Docker/VM/Colab) is detected, user is prompted to confirm
+    - Use UNSAFE_EXECUTION_OK=true environment variable to bypass in CI/CD
 
     Args:
         api_key: LLM API key
@@ -115,9 +121,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         # Get measurement recommendations
         recommendations = agent.recommend_measurements(analysis_result=result)
+    
+    Raises:
+        RuntimeError: If sandbox check fails and user declines to proceed.
     """
-
-    _session_sandbox_approved: bool = False
 
     def __init__(
         self,
@@ -125,10 +132,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         model_name: str = "gemini-3-pro-preview",
         base_url: str | None = None,
         output_dir: str = "curve_analysis_output",
-        # Deprecated
+        # Deprecated parameters
         google_api_key: str | None = None,
         local_model: str | None = None,
-        # Agent config
+        # Agent configuration
         futurehouse_api_key: str | None = None,
         use_literature: bool = False,
         run_preprocessing: bool = True,
@@ -142,28 +149,21 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         max_verification_iterations: int = 5,
         **kwargs,
     ):
+        # ====================================================================
+        # SANDBOX CHECK - Must happen first, before any expensive operations
+        # ====================================================================
+        # This agent executes LLM-generated code, so we verify the environment
+        # is sandboxed (Docker/VM/Colab) or get explicit user approval.
+        # The global cache in require_sandbox_approval() ensures users are
+        # only prompted once per session, even if multiple agents are created.
         
-        self._sandbox_approved = False
-        
-        # Check class-level cache first (same session, different instance)
-        if CurveFittingAgent._session_sandbox_approved:
-            self._sandbox_approved = True
-            logging.info("✅ Sandbox previously approved in this session")
-        else:
-            # Do the check
-            approved = require_sandbox_approval(
-                context="CurveFittingAgent (curve fitting analysis)"
+        if not require_sandbox_approval(
+            context="CurveFittingAgent (curve fitting analysis)"
+        ):
+            raise RuntimeError(
+                "CurveFittingAgent requires code execution but user declined. "
+                "Run in Docker, VM, or Colab for safe execution."
             )
-            
-            if not approved:
-                raise RuntimeError(
-                    "CurveFittingAgent requires code execution but user declined. "
-                    "Run in Docker, VM, or Colab for safe execution."
-                )
-            
-            self._sandbox_approved = True
-            CurveFittingAgent._session_sandbox_approved = True
-
 
         self.api_key, self.base_url = normalize_params(
             api_key, google_api_key, base_url, local_model, source="CurveFittingAgent"
@@ -187,7 +187,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.outlier_sigma = outlier_sigma
         self.max_verification_iterations = max_verification_iterations
 
-        self.executor = ScriptExecutor(timeout=executor_timeout, enforce_sandbox=False)
+        self.executor = ScriptExecutor(timeout=executor_timeout)
 
         # Optional preprocessor
         self.run_preprocessing = run_preprocessing
