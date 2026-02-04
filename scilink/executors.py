@@ -245,6 +245,60 @@ TO PROCEED, CHOOSE ONE OPTION:
         raise RuntimeError("Security sandbox requirement not met. Halting execution for safety.")
 
 
+def require_sandbox_approval(
+    interactive: bool = True,
+    allow_override: bool = True,
+    context: str = "This operation"
+) -> bool:
+    """
+    Check sandbox and get user approval if needed. Call this early in agent init.
+    
+    Args:
+        interactive: If True, prompt user when no sandbox detected
+        allow_override: If True, respect UNSAFE_EXECUTION_OK env var
+        context: Description of what will execute code (for user message)
+    
+    Returns:
+        bool: True if execution is approved, False if user declined
+        
+    Raises:
+        RuntimeError: If non-interactive and no sandbox/override
+    """
+    # Check for environment variable override
+    if allow_override and os.environ.get("UNSAFE_EXECUTION_OK", "false").lower() == "true":
+        logging.warning("⚠️  Sandbox bypass via UNSAFE_EXECUTION_OK environment variable")
+        return True
+    
+    # Check sandbox
+    score, indicators = check_security_sandbox_indicators(verbose=False)
+    
+    if score >= 4:
+        friendly_name = indicators[0] if indicators else "sandbox"
+        logging.info(f"✅ Sandbox detected ({friendly_name}) - code execution enabled")
+        return True
+    
+    # No sandbox detected
+    if not interactive:
+        raise RuntimeError(
+            f"No sandbox detected and interactive=False. "
+            f"Set UNSAFE_EXECUTION_OK=true or run in Docker/VM/Colab."
+        )
+    
+    # Check if running in interactive terminal
+    if not sys.stdin.isatty():
+        logging.error("No sandbox detected and non-interactive terminal.")
+        logging.error("Set UNSAFE_EXECUTION_OK=true to proceed.")
+        return False
+    
+    # Prompt user
+    print("\n" + "=" * 74)
+    print(f"⚠️  {context.upper()} REQUIRES CODE EXECUTION")
+    print("=" * 74)
+    print(LLM_EXECUTION_DESCRIPTION)
+    
+    return prompt_user_for_unsafe_execution(show_llm_description=False)
+
+
 class ScriptExecutor:
     """
     Executes AI-generated Python scripts with optional sandbox enforcement.

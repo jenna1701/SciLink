@@ -26,7 +26,7 @@ import numpy as np
 
 from .base_agent import BaseAnalysisAgent, AnalysisInput
 from .human_feedback import SimpleFeedbackMixin
-from ...executors import ScriptExecutor
+from ...executors import ScriptExecutor, require_sandbox_approval
 from ..lit_agents.literature_agent import FittingModelLiteratureAgent
 from .preprocess import CurvePreprocessingAgent
 from .pipelines.curve_fitting_pipelines import create_unified_curve_fitting_pipeline
@@ -140,6 +140,29 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         max_verification_iterations: int = 5,
         **kwargs,
     ):
+        
+        self._sandbox_approved = False
+        
+        # Check class-level cache first (same session, different instance)
+        if CurveFittingAgent._session_sandbox_approved:
+            self._sandbox_approved = True
+            logging.info("✅ Sandbox previously approved in this session")
+        else:
+            # Do the check
+            approved = require_sandbox_approval(
+                context="CurveFittingAgent (curve fitting analysis)"
+            )
+            
+            if not approved:
+                raise RuntimeError(
+                    "CurveFittingAgent requires code execution but user declined. "
+                    "Run in Docker, VM, or Colab for safe execution."
+                )
+            
+            self._sandbox_approved = True
+            CurveFittingAgent._session_sandbox_approved = True
+
+
         self.api_key, self.base_url = normalize_params(
             api_key, google_api_key, base_url, local_model, source="CurveFittingAgent"
         )
