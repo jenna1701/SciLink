@@ -117,6 +117,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         recommendations = agent.recommend_measurements(analysis_result=result)
     """
 
+    _session_sandbox_approved: bool = False
+    
     def __init__(
         self,
         api_key: str | None = None,
