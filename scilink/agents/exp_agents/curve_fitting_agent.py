@@ -162,7 +162,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.outlier_sigma = outlier_sigma
         self.max_verification_iterations = max_verification_iterations
 
-        self.executor = ScriptExecutor(timeout=executor_timeout, enforce_sandbox=False)
+        self.executor = ScriptExecutor(timeout=executor_timeout)
 
         # Optional preprocessor
         self.run_preprocessing = run_preprocessing
