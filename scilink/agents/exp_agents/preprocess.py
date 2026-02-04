@@ -41,10 +41,10 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         """Initialize the pre-processing agent."""
 
         if not require_sandbox_approval(
-            context="CurveFittingAgent (curve fitting analysis)"
+            context="HyperspectralPreprocessingAgent (hyperspectral preprocessing analysis)"
         ):
             raise RuntimeError(
-                "CurveFittingAgent requires code execution but user declined. "
+                "HyperspectralPreprocessingAgent requires code execution but user declined. "
                 "Run in Docker, VM, or Colab for safe execution."
             )
         
@@ -433,10 +433,10 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         # Pass output_dir to BaseAnalysisAgent for state management
 
         if not require_sandbox_approval(
-            context="CurveFittingAgent (curve fitting analysis)"
+            context="CurvePreprocessingAgent (curve preprocessing analysis)"
         ):
             raise RuntimeError(
-                "CurveFittingAgent requires code execution but user declined. "
+                "CurvePreprocessingAgent requires code execution but user declined. "
                 "Run in Docker, VM, or Colab for safe execution."
             )
         

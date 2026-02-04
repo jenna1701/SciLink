@@ -11,6 +11,7 @@ import PIL.Image as PIL_Image
 from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+from ...executors import require_sandbox_approval
 from .parser_utils import parse_json_from_response
 from .instruct import SCALARIZER_PROMPT, SCALARIZER_REFLECTION_PROMPT
 
@@ -60,6 +61,13 @@ class ScalarizerAgent(BaseAgent):
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
     ):
+        if not require_sandbox_approval(
+            context="ScalarizerAgent (scalarization of experimental data)"
+        ):
+            raise RuntimeError(
+                "ScalarizerAgent requires code execution but user declined. "
+                "Run in Docker, VM, or Colab for safe execution."
+            )
         super().__init__(output_dir)
         self.agent_type = "scalarizer"
 
