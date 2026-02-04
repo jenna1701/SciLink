@@ -118,7 +118,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
 
     _session_sandbox_approved: bool = False
-    
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -187,7 +187,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.outlier_sigma = outlier_sigma
         self.max_verification_iterations = max_verification_iterations
 
-        self.executor = ScriptExecutor(timeout=executor_timeout)
+        self.executor = ScriptExecutor(timeout=executor_timeout, enforce_sandbox=False)
 
         # Optional preprocessor
         self.run_preprocessing = run_preprocessing
