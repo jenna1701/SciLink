@@ -287,6 +287,9 @@ class OrchestratorPlayground:
         }
         autonomy_level = autonomy_map.get(autonomy_level_str, AutonomyLevel.CO_PILOT)
         
+        # Store for use in _process_initial_inputs
+        self._autonomy_level = autonomy_level
+        
         # === SHOW DIRECTORY GUIDE (CO-PILOT MODE ONLY) ===
         if autonomy_level == AutonomyLevel.CO_PILOT:
             print("\n" + "="*60)
@@ -363,6 +366,9 @@ class OrchestratorPlayground:
         if not objective:
             objective = "Optimize experimental conditions"
             print(f"   Using default: {objective}")
+        
+        # Store objective for use in _process_initial_inputs
+        self._objective = objective
         
         # === SESSION DIRECTORY ===
         default_dir = f"./campaign_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -574,6 +580,150 @@ class OrchestratorPlayground:
         
         return False
     
+    def _process_initial_inputs(self):
+        """
+        Process initial workspace directories based on autonomy level.
+        
+        Behavior by mode:
+        - co-pilot: Do nothing (human leads, full backward compatibility)
+        - supervised: Survey workspace, analyze available data, suggest next steps
+        - autonomous: Execute full pipeline (survey → TEA → plan → checkpoint)
+        """
+        from scilink.agents.planning_agents.planning_orchestrator import AutonomyLevel
+        
+        autonomy = self.agent.autonomy_level
+        
+        # === CO-PILOT MODE: Human leads, don't auto-start anything ===
+        # This maintains full backward compatibility
+        if autonomy == AutonomyLevel.CO_PILOT:
+            return
+        
+        has_data = self.data_dir is not None
+        has_knowledge = self.knowledge_dir is not None
+        has_code = self.code_dir is not None
+        
+        # Nothing to process if no directories configured
+        # (This shouldn't happen for supervised/autonomous due to CLI validation,
+        # but we handle it gracefully anyway)
+        if not has_data and not has_knowledge:
+            return
+        
+        print("\n" + "-"*60)
+        print(f"🚀 AUTO-PROCESSING WORKSPACE ({autonomy.value} mode)")
+        print("-"*60)
+        
+        # === AUTONOMOUS MODE: Full pipeline execution ===
+        if autonomy == AutonomyLevel.AUTONOMOUS:
+            print("🤖 AUTONOMOUS MODE: Executing complete research workflow...")
+            print(f"   Objective: {self.agent.objective}")
+            print(f"   Data: {self.data_dir}")
+            print(f"   Knowledge: {self.knowledge_dir or 'not provided'}")
+            print(f"   Code: {self.code_dir or 'not provided'}")
+            print("-"*60 + "\n")
+            
+            # Build comprehensive instruction for full autonomous execution
+            instruction_parts = [
+                f"Execute the complete research workflow for objective: '{self.agent.objective}'."
+            ]
+            
+            # Step 1: Survey
+            instruction_parts.append(
+                "Step 1: Survey the workspace using list_workspace_files to understand available data."
+            )
+            
+            # Step 2: Economic analysis (if knowledge available)
+            if has_knowledge:
+                instruction_parts.append(
+                    f"Step 2: Run economic analysis using knowledge from {self.knowledge_dir} "
+                    f"and experimental data from {self.data_dir} to assess viability."
+                )
+            else:
+                instruction_parts.append(
+                    f"Step 2: Skip economic analysis (no knowledge directory provided)."
+                )
+            
+            # Step 3: Generate plan
+            instruction_parts.append(
+                f"Step 3: Generate an initial experimental plan based on the objective, "
+                f"available data in {self.data_dir}"
+                + (f", and literature in {self.knowledge_dir}" if has_knowledge else "")
+                + "."
+            )
+            
+            # Step 4: Generate code (if code KB available)
+            if has_code:
+                instruction_parts.append(
+                    f"Step 4: Generate implementation code using the code knowledge base in {self.code_dir}."
+                )
+            else:
+                instruction_parts.append(
+                    "Step 4: Skip code generation (no code directory provided)."
+                )
+            
+            # Step 5: Checkpoint
+            instruction_parts.append(
+                "Step 5: Save a checkpoint to preserve the campaign state."
+            )
+            
+            instruction_parts.append(
+                "Execute ALL steps without stopping for confirmation. "
+                "Chain tool calls as needed to complete the entire workflow."
+            )
+            
+            # Execute the full pipeline
+            self.agent.chat(" ".join(instruction_parts))
+            
+            print("\n" + "-"*60)
+            print("✅ Autonomous workflow complete.")
+            print("   Entering interactive mode for follow-up questions.")
+            print("-"*60)
+            return
+        
+        # === SUPERVISED MODE: Survey and recommend ===
+        if autonomy == AutonomyLevel.SUPERVISED:
+            print("🔄 SUPERVISED MODE: Surveying workspace and preparing recommendations...")
+            print(f"   Objective: {self.agent.objective}")
+            print(f"   Data: {self.data_dir}")
+            print(f"   Knowledge: {self.knowledge_dir or 'not provided'}")
+            print("-"*60 + "\n")
+            
+            # Step 1: Survey workspace
+            print("📂 Step 1: Surveying workspace...")
+            self.agent.chat(
+                "Survey the workspace using list_workspace_files. "
+                "Report what data files, papers, and other resources are available."
+            )
+            
+            # Step 2: Analyze and recommend next steps
+            print("\n🧠 Step 2: Analyzing and suggesting next steps...")
+            
+            recommendation_prompt = (
+                f"Based on the workspace contents, recommend the best next steps for "
+                f"achieving the objective: '{self.agent.objective}'. "
+                f"Consider the following options and recommend which to do first:\n"
+            )
+            
+            if has_knowledge:
+                recommendation_prompt += (
+                    f"- Run economic/TEA analysis using papers in {self.knowledge_dir}\n"
+                )
+            
+            recommendation_prompt += (
+                f"- Generate an experimental plan based on available data\n"
+                f"- Analyze existing experimental results\n"
+                f"\nProvide a clear recommendation with reasoning, then proceed with "
+                f"the recommended action."
+            )
+            
+            self.agent.chat(recommendation_prompt)
+            
+            print("\n" + "-"*60)
+            print("✅ Workspace analysis complete.")
+            print("   Review the recommendations above and provide direction,")
+            print("   or let the agent continue with its suggested approach.")
+            print("-"*60)
+            return
+    
     def run(self):
         """Main interactive loop."""
         self.setup()
@@ -584,6 +734,11 @@ class OrchestratorPlayground:
         print("="*60)
         print("Type /help for commands, or just chat naturally!\n")
         
+        # Process initial workspace based on autonomy level ===
+        # Note: This does nothing for co-pilot mode (backward compatible)
+        self._process_initial_inputs()
+        
+        # === Main chat loop ===
         while True:
             try:
                 user_input = input("\n👤 You: ").strip()
