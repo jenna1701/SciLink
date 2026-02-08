@@ -9,8 +9,6 @@ import cv2
 from typing import Callable
 
 import traceback
-import matplotlib.pyplot as plt
-from io import BytesIO
 
 from ....tools import hyperspectral_tools as tools
 from ....tools.image_processor import load_image
@@ -438,14 +436,19 @@ class RunFinalSpectralUnmixingController:
 class CreateAnalysisPlotsController:
     """
     [🛠️ Tool Step]
-    Generates high-quality visualization pairs for the Agent.
+    Generates high-quality validation plots using reconstruction comparison.
+    
+    UPDATED: Now uses create_validated_component_pair_reconstruction() 
+    to fix the "all components look the same" problem.
     """
     def __init__(self, logger: logging.Logger, settings: dict):
         self.logger = logger
         self.settings = settings
 
     def execute(self, state: dict) -> dict:
-        if state.get("error_dict"): return state
+        if state.get("error_dict"): 
+            return state
+            
         self.logger.info("\n\n🛠️ --- CALLING TOOL: CREATE ANALYSIS PLOTS --- 🛠️\n")
         
         components = state.get("final_components")
@@ -463,17 +466,22 @@ class CreateAnalysisPlotsController:
         final_plots = []
         validated_bytes_list = [] 
         
-        # --- 1. Generate Validated Pairs ---
-        self.logger.info(f"Generating Validated Analysis Plots for {components.shape[0]} components...")
+        # --- 1. Generate Validated Reconstruction Plots ---
+        self.logger.info(
+            f"Generating High-Purity Reconstruction Validation Plots "
+            f"for {components.shape[0]} components..."
+        )
         
         for i in range(components.shape[0]):
-            plot_bytes = tools.create_validated_component_pair(
-                state["hspy_data"], 
-                components[i], 
-                abundance_maps[..., i], 
-                i, 
+            plot_bytes = tools.create_validated_component_pair_reconstruction(
+                state["hspy_data"],       # Raw data
+                components,               # ALL components (needed for reconstruction)
+                abundance_maps,           # ALL abundance maps
+                i,                        # Current component index
                 state["system_info"],
-                self.logger
+                self.logger,
+                purity_percentile=90.0,   # Top 10% (adjustable)
+                show_basis_component=True # Show orange reference line
             )
             
             if plot_bytes:
@@ -509,15 +517,15 @@ class CreateAnalysisPlotsController:
         except Exception as e:
             self.logger.warning(f"Failed to create/save NMF summary plot: {e}")
 
-        # --- 3. Structure Overlays ---
+        # --- 3. Structure Overlays (UNCHANGED) ---
         if state.get("structure_image_path"):
             try:
-                # Load image (Controller logic)
+                # Load image
                 structure_img = load_image(state["structure_image_path"])
                 if structure_img.ndim == 3:
                     structure_img = cv2.cvtColor(structure_img, cv2.COLOR_RGB2GRAY)
                 
-                # Create (Tool logic)
+                # Create overlays
                 overlay_bytes = tools.create_multi_abundance_overlays(
                     structure_img, abundance_maps, threshold_percentile=85.0 
                 )
@@ -547,89 +555,139 @@ class BuildHyperspectralPromptController:
         self.logger = logger
 
     def execute(self, state: dict) -> dict:
-        if state.get("error_dict"): return state
+        if state.get("error_dict"): 
+            return state
         self.logger.info("\n\n📝 --- PREP STEP: BUILDING FINAL PROMPT --- 📝\n")
         
         # 1. Base Instruction & Context
         prompt_parts = [state["instruction_prompt"]]
 
+        # 2. Parent Reasoning (if this is a refinement)
         if state.get("parent_refinement_reasoning"):
-            prompt_parts.append("\n\n### 🔍 CONTEXT: Why are we performing this focused analysis?")
-            prompt_parts.append(f"**Reasoning from previous step:** \"{state['parent_refinement_reasoning']}\"")
-            prompt_parts.append("Use this context to guide your interpretation.")
+            prompt_parts.append(f"""
+
+### 🔍 CONTEXT: Why are we performing this focused analysis?
+
+**Reasoning from previous step:** "{state['parent_refinement_reasoning']}"
+
+Use this context to guide your interpretation.
+""")
         
-        # 2. Data Metadata
+        # 3. Data Metadata
         h, w, e = state["hspy_data"].shape
         _, energy_xlabel, _ = tools.create_energy_axis(e, state["system_info"])
         
-        prompt_parts.append(f"\n\nHyperspectral Data Information:")
-        prompt_parts.append(f"- Data shape: ({h}, {w}, {e})")
-        prompt_parts.append(f"- X-axis: {energy_xlabel}")
+        metadata_info = f"""
+
+Hyperspectral Data Information:
+- Data shape: ({h}, {w}, {e})
+- X-axis: {energy_xlabel}
+"""
         
         if state.get("final_components") is not None:
-            prompt_parts.append(f"- Spectral unmixing method: {state['settings'].get('method', 'nmf').upper()}")
-            prompt_parts.append(f"- Number of components: {state['final_n_components']}")
-            prompt_parts.append(f"- Final Reconstruction Error: {state.get('final_reconstruction_error', 'N/A'):.4f}")
+            metadata_info += f"""- Spectral unmixing method: {state['settings'].get('method', 'nmf').upper()}
+- Number of components: {state['final_n_components']}
+- Final Reconstruction Error: {state.get('final_reconstruction_error', 'N/A'):.4f}
+"""
+        
+        prompt_parts.append(metadata_info)
 
-        # 3. Component Analysis (Dynamic Instructions)
+        # 4. Component Analysis (Dynamic Instructions based on depth)
         current_depth = state.get("current_depth", 0)
         
         if state.get("component_pair_plots"):
             prompt_parts.append("\n\n**Spectral Component Analysis:**")
             
             if current_depth == 0:
-                # Standard Instructions for Depth 0
-                prompt_parts.append("Below are the NMF components extracted from the global dataset.")
-                prompt_parts.append("For each component, the LEFT image is the Spectral Signature and the RIGHT image is the Spatial Abundance.")
+                # Standard Instructions for Global Analysis
+                prompt_parts.append("""
+Below are the NMF components extracted from the global dataset.
+For each component, the LEFT image is the Spectral Signature and the RIGHT image is the Spatial Abundance.
+""")
             else:
-                # Validation Instructions for Depth > 0
-                prompt_parts.append("### 🧪 Quantitative Validation Mode (Split-Panel Analysis)")
-                prompt_parts.append("Because this is a focused refinement, the plots are more detailed to help you detect artifacts.")
-                prompt_parts.append("Each figure contains:")
-                
-                prompt_parts.append("\n**1. LEFT: Spatial Distribution**")
-                prompt_parts.append("- Shows where this component is located physically.")
-                
-                prompt_parts.append("\n**2. RIGHT (TOP PANEL): Spectral Fit & Variance**")
-                prompt_parts.append("- **Black Line (Mean):** The abundance-weighted average spectrum of the raw data (Ground Truth).")
-                prompt_parts.append("- **Red Dashed Line (Model):** The NMF component (Mathematical Model).")
-                prompt_parts.append(r"- **Blue Shaded Band:** The Weighted Standard Deviation ($\pm 1\sigma$). This represents the natural heterogeneity of the data in this region.")
-                
-                prompt_parts.append("\n**3. RIGHT (BOTTOM PANEL): Residuals**")
-                prompt_parts.append("- **Gray Area:** The difference between the Data and the Model.")
+                # Validation Instructions for Refinements
+                prompt_parts.append("""
+### 🧪 Quantitative Validation Mode (High-Purity Reconstruction Analysis)
 
-                prompt_parts.append("\n### ⚠️ CRITICAL INTERPRETATION RULES")
-                prompt_parts.append("Use the **Blue Band** to distinguish between 'Messy Data' and 'Bad Model':")
-                prompt_parts.append("1. **Valid Fit:** If the Red Line (Model) stays mostly **INSIDE** the Blue Band, the component is valid, even if it doesn't match the Black Line perfectly. The mismatch is just natural variation.")
-                prompt_parts.append("2. **Hallucination (Artifact):** If the Red Line creates a peak that goes significantly **OUTSIDE** the Blue Band (and the Black Line is flat there), NMF has 'invented' a feature. **Reject this feature.**")
-                prompt_parts.append("3. **Missed Physics:** If the Bottom Panel (Residual) shows a large, structured peak, NMF failed to capture a real physical/chemical feature present in the data.")
+Because this is a focused refinement, the plots use advanced validation to detect artifacts.
+Each figure contains:
+
+**LEFT PANEL: Spatial Abundance Map**
+- Shows where this component is located physically
+- **Red Dashed Contour**: Marks the 'high-purity region' (top 10% of abundance)
+- Only pixels inside this contour are used for the validation on the right
+
+**RIGHT PANEL (TOP): Spectrum Comparison**
+- **Black Line (Measured Spectrum):** The abundance-weighted average of the RAW DATA in the high-purity region. This is the ground truth.
+- **Red Dashed Line (NMF Reconstruction):** What the complete NMF model predicts for the same region (sum of all components weighted by their abundances).
+- **Orange Dotted Line (NMF Basis Component):** The pure unmixed component from NMF (shown as reference to understand mixing).
+- **Blue Shaded Band (±1σ):** The natural variance in the raw data. Shows measurement uncertainty and heterogeneity.
+
+**RIGHT PANEL (BOTTOM): Residual**
+- **Gray Area:** The difference between Measured Spectrum (Black) and NMF Reconstruction (Red)
+- Shows what the NMF model is missing or getting wrong
+
+### ⚠️ CRITICAL INTERPRETATION RULES
+
+**1. VALID COMPONENT (Good Fit):**
+   - Black and Red lines match closely (stay within the Blue Band)
+   - Residuals are small and random (no structured patterns)
+   - Orange may differ slightly from Black/Red (mixing is expected)
+   - **Conclusion:** NMF successfully reconstructs the data in this region
+
+**2. RECONSTRUCTION FAILURE (Bad Fit):**
+   - Black and Red lines diverge significantly (>2σ outside Blue Band)
+   - Residuals show large, structured peaks or systematic bias
+   - **Conclusion:** NMF model is failing to capture the measured spectrum. Need more components or better preprocessing.
+
+**3. HALLUCINATION (Invented Feature):**
+   - Orange line (Basis Component) shows a peak NOT present in Black (Measured)
+   - AND the high-purity region is tiny (<2% of pixels)
+   - **Conclusion:** NMF created a mathematical artifact. This component doesn't represent real chemistry/physics.
+
+**4. MIXING (Expected in Transition Zones):**
+   - Black ≈ Red (reconstruction works)
+   - But Orange differs from both (basis component is 'purer')
+   - **Conclusion:** Valid component. The high-purity region still contains ~5-10% of other components (expected).
+
+### 🎯 KEY INSIGHT
+**If Black ≈ Red → NMF is working correctly** (even if both differ from Orange)
+**If Black ≠ Red → NMF is failing** to reconstruct the measurements
+
+The Orange line (Basis Component) is a reference to help understand what mixing is occurring.
+""")
 
             # Append the plots
             for plot in state["component_pair_plots"]:
                 prompt_parts.append(f"\n{plot['label']}:")
                 prompt_parts.append({"mime_type": "image/jpeg", "data": plot['bytes']})
 
-        # 4. Structure Overlays (if available)
+        # 5. Structure Overlays (if available)
         if state.get("structure_overlay_bytes"):
-            prompt_parts.append("\n\n**Structure-Abundance Correlation Analysis:**")
-            prompt_parts.append("Overlays showing where components are concentrated on the structural image.")
+            prompt_parts.append("""
+
+**Structure-Abundance Correlation Analysis:**
+Overlays showing where components are concentrated on the structural image.
+""")
             prompt_parts.append({"mime_type": "image/jpeg", "data": state["structure_overlay_bytes"]})
             
             # Ensure storage for synthesis
             found = False
             for img in state.get("analysis_images", []):
-                if img.get("label") == "Structure-Abundance Overlays": found = True
+                if img.get("label") == "Structure-Abundance Overlays": 
+                    found = True
             if not found:
                 state["analysis_images"].append({
                     "label": "Structure-Abundance Overlays",
                     "data": state["structure_overlay_bytes"]
                 })
 
-        # 5. System Metadata & Formatting
+        # 6. System Metadata
         if state.get("system_info"):
             sys_info_str = json.dumps(state["system_info"], indent=2)
             prompt_parts.append(f"\n\nAdditional System Information (Metadata):\n{sys_info_str}")
 
+        # 7. Final instructions
         prompt_parts.append("\n\nProvide your analysis in the requested JSON format.")
         
         state["final_prompt_parts"] = prompt_parts
