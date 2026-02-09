@@ -19,11 +19,84 @@ from ..instruct import (
     SPECTROSCOPY_REFINEMENT_INSTRUCTIONS,
     SPECTROSCOPY_HOLISTIC_SYNTHESIS_INSTRUCTIONS,
     SPECTROSCOPY_REFLECTION_INSTRUCTIONS,
-    SPECTROSCOPY_REFLECTION_UPDATE_INSTRUCTIONS
+    SPECTROSCOPY_REFLECTION_UPDATE_INSTRUCTIONS,
+    SPECTROSCOPY_VALIDATION_INTERPRETATION_INSTRUCTIONS,  
+    SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS,                  
 )
 
 from ....tools.hyperspectral_tools import AGENT_METADATA_KEYS_TO_STRIP
 
+
+def build_code_generation_prompt(
+    target_desc: str,
+    h: int, w: int, e: int,
+    axis_units: str,
+    axis_start: float,
+    axis_end: float,
+    processing_note: str
+) -> str:
+    return f"""
+You are a Python Data Scientist specialized in Spectroscopy. 
+The standard NMF tool failed to model a spectral feature described as: "{target_desc}".
+
+Your task: Write a Python function to mathematically model this feature. 
+Since complex features often require multiple parameters (e.g., Peak Position AND Peak Width), your function must be able to return MULTIPLE maps.
+
+### 1. DATA CONTEXT
+- Input Data `hspy_data`: Shape ({h}, {w}, {e}) (Numpy array)
+- X-Axis `axis`: Shape ({e},) (Numpy array). **Units: {axis_units}**
+- **Axis Range:** {axis_start:.2f} to {axis_end:.2f} {axis_units}
+
+### 2. EXECUTION ENVIRONMENT (STRICT)
+Your code will run in a restricted `exec()` sandbox. 
+
+**PRE-IMPORTED LIBRARIES (Available Globally):**
+- `np`: The full NumPy library.
+- `scipy`: The top-level SciPy module.
+- `sklearn`: The top-level Scikit-Learn module.
+
+**PRE-IMPORTED FUNCTIONS (Direct Shortcuts):**
+- `curve_fit`, `nnls` (from scipy.optimize)
+- `linregress` (from scipy.stats)
+- `find_peaks` (from scipy.signal)
+- `gaussian_filter` (from scipy.ndimage)
+
+### 3. CODING CONSTRAINTS
+1. **NO External Imports:** Do not import `os`, `sys`, `matplotlib`, or `warnings`. The sandbox does not support them.
+2. **SciPy Submodules:** If you need a specific SciPy submodule that is NOT in the shortcuts list (e.g., `scipy.interpolate` or `scipy.integrate`), you MUST write `import scipy.interpolate` **inside** your function definition before using it.
+3. **Standard Math:** Use `np.exp`, `np.log`, etc., instead of the `math` library.
+4. **Return Format:** You must return a dictionary, not a print statement or a plot.
+
+### 4. YOUR GOAL
+Write a function `analyze_feature(data, axis)` that:
+1. Reshapes data to (pixels, energy).
+2. Implements the specific math required.
+3. Returns a DICTIONARY containing the results.
+
+### ADDITIONAL NOTES
+The variable `hspy_data` passed to your function contains: **{processing_note}**.
+However, even with pre-processing, experimental data often contains high-frequency shot noise (jitter).
+If you are performing derivative-based operations (like `find_peaks` or `curve_fit`), it is advisable to apply a light smoothing filter
+(e.g., `gaussian_filter(..., sigma=1-2)`) to ensure convergence.
+
+### REQUIRED RETURN FORMAT
+{{
+    "maps": {{
+        "Feature_Name_1": np.ndarray, 
+        "Feature_Name_2": np.ndarray
+    }},
+    "units": {{                 
+        "Feature_Name_1": "{axis_units}",
+        "Feature_Name_2": "a.u."
+    }},    
+    "description": "Brief physics explanation"
+}}
+
+### RESPONSE FORMAT
+Return a JSON object with:
+- "code": The valid Python code string.
+- "explanation": Brief logic summary.
+"""
 
 def _fmt(val, fmt=".4f"):
     """Format a numeric value, or return 'N/A'."""
@@ -37,68 +110,6 @@ def _sanitize_filename(text: str) -> str:
     # Replace spaces with underscores, remove non-alphanumeric chars except _ and -
     safe_text = re.sub(r'[^\w\-\_]', '', text.replace(" ", "_"))
     return safe_text
-
-def _create_grid_from_images(image_bytes_list: list, logger: logging.Logger) -> bytes:
-    """
-    Stitches a list of JPEG bytes into a single grid image using OpenCV.
-    Used to create a 'Validated Summary Grid' from individual validated plots.
-    """
-    if not image_bytes_list:
-        return None
-        
-    try:
-        # Decode all images
-        images = []
-        for b in image_bytes_list:
-            nparr = np.frombuffer(b, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            if img is not None:
-                images.append(img)
-        
-        if not images:
-            return None
-
-        n_imgs = len(images)
-        
-        # If only one, return it directly (re-encoded)
-        if n_imgs == 1:
-            return image_bytes_list[0]
-
-        # Determine grid size (target ~2 columns)
-        cols = 2
-        rows = (n_imgs + cols - 1) // cols
-        
-        # Find max dimensions to standardize cells
-        max_h = max(img.shape[0] for img in images)
-        max_w = max(img.shape[1] for img in images)
-        
-        # Create blank canvas
-        grid_h = rows * max_h
-        grid_w = cols * max_w
-        grid_img = np.zeros((grid_h, grid_w, 3), dtype=np.uint8) + 255 # White background
-        
-        for idx, img in enumerate(images):
-            r = idx // cols
-            c = idx % cols
-            
-            # Resize current img to fit cell if needed (maintain aspect ratio logic could go here, 
-            # but usually plots are uniform size. We'll center it.)
-            h, w = img.shape[:2]
-            
-            y_offset = r * max_h
-            x_offset = c * max_w
-            
-            # Simple copy (top-left alignment for simplicity, or center)
-            grid_img[y_offset:y_offset+h, x_offset:x_offset+w] = img
-            
-        # Encode back to jpeg
-        retval, buf = cv2.imencode('.jpg', grid_img, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        return buf.tobytes()
-
-    except Exception as e:
-        logger.warning(f"Failed to stitch validation grid: {e}")
-        return None
-
 
 class RunPreprocessingController:
     """
@@ -616,57 +627,7 @@ Below are the NMF components extracted from the global dataset.
 For each component, the LEFT image is the Spectral Signature and the RIGHT image is the Spatial Abundance.
 """)
             else:
-                # Validation Instructions for Refinements
-                prompt_parts.append("""
-### 🧪 Quantitative Validation Mode (High-Purity Reconstruction Analysis)
-
-Because this is a focused refinement, the plots use advanced validation to detect artifacts.
-Each figure contains:
-
-**LEFT PANEL: Spatial Abundance Map**
-- Shows where this component is located physically
-- **Red Dashed Contour**: Marks the 'high-purity region' (top 10% of abundance)
-- Only pixels inside this contour are used for the validation on the right
-
-**RIGHT PANEL (TOP): Spectrum Comparison**
-- **Black Line (Measured Spectrum):** The abundance-weighted average of the RAW DATA in the high-purity region. This is the ground truth.
-- **Red Dashed Line (NMF Reconstruction):** What the complete NMF model predicts for the same region (sum of all components weighted by their abundances).
-- **Orange Dotted Line (NMF Basis Component):** The pure unmixed component from NMF (shown as reference to understand mixing).
-- **Blue Shaded Band (±1σ):** The natural variance in the raw data. Shows measurement uncertainty and heterogeneity.
-
-**RIGHT PANEL (BOTTOM): Residual**
-- **Gray Area:** The difference between Measured Spectrum (Black) and NMF Reconstruction (Red)
-- Shows what the NMF model is missing or getting wrong
-
-### ⚠️ CRITICAL INTERPRETATION RULES
-
-**1. VALID COMPONENT (Good Fit):**
-   - Black and Red lines match closely (stay within the Blue Band)
-   - Residuals are small and random (no structured patterns)
-   - Orange may differ slightly from Black/Red (mixing is expected)
-   - **Conclusion:** NMF successfully reconstructs the data in this region
-
-**2. RECONSTRUCTION FAILURE (Bad Fit):**
-   - Black and Red lines diverge significantly (>2σ outside Blue Band)
-   - Residuals show large, structured peaks or systematic bias
-   - **Conclusion:** NMF model is failing to capture the measured spectrum. Need more components or better preprocessing.
-
-**3. HALLUCINATION (Invented Feature):**
-   - Orange line (Basis Component) shows a peak NOT present in Black (Measured)
-   - AND the high-purity region is tiny (<2% of pixels)
-   - **Conclusion:** NMF created a mathematical artifact. This component doesn't represent real chemistry/physics.
-
-**4. MIXING (Expected in Transition Zones):**
-   - Black ≈ Red (reconstruction works)
-   - But Orange differs from both (basis component is 'purer')
-   - **Conclusion:** Valid component. The high-purity region still contains ~5-10% of other components (expected).
-
-### 🎯 KEY INSIGHT
-**If Black ≈ Red → NMF is working correctly** (even if both differ from Orange)
-**If Black ≠ Red → NMF is failing** to reconstruct the measurements
-
-The Orange line (Basis Component) is a reference to help understand what mixing is occurring.
-""")
+                prompt_parts.append(SPECTROSCOPY_VALIDATION_INTERPRETATION_INSTRUCTIONS)
 
             # Append the plots
             for plot in state["component_pair_plots"]:
@@ -1367,69 +1328,14 @@ class RunDynamicAnalysisController:
             self.logger.info(f"👉 Task {i}/{len(custom_targets)}: {target_desc}")
 
             # 1. Define Prompt for this specific task
-            base_prompt = f"""
-            You are a Python Data Scientist specialized in Spectroscopy. 
-            The standard NMF tool failed to model a spectral feature described as: "{target_desc}".
-            
-            Your task: Write a Python function to mathematically model this feature. 
-            Since complex features often require multiple parameters (e.g., Peak Position AND Peak Width), your function must be able to return MULTIPLE maps.
-
-            ### 1. DATA CONTEXT
-            - Input Data `hspy_data`: Shape ({h}, {w}, {e}) (Numpy array)
-            - X-Axis `axis`: Shape ({e},) (Numpy array). **Units: {axis_units}**
-            - **Axis Range:** {state['energy_axis'][0]:.2f} to {state['energy_axis'][-1]:.2f} {axis_units}
-
-            ### 2. EXECUTION ENVIRONMENT (STRICT)
-            Your code will run in a restricted `exec()` sandbox. 
-            
-            **PRE-IMPORTED LIBRARIES (Available Globally):**
-            - `np`: The full NumPy library.
-            - `scipy`: The top-level SciPy module.
-            - `sklearn`: The top-level Scikit-Learn module.
-            
-            **PRE-IMPORTED FUNCTIONS (Direct Shortcuts):**
-            - `curve_fit`, `nnls` (from scipy.optimize)
-            - `linregress` (from scipy.stats)
-            - `find_peaks` (from scipy.signal)
-            - `gaussian_filter` (from scipy.ndimage)
-
-            ### 3. CODING CONSTRAINTS
-            1. **NO External Imports:** Do not import `os`, `sys`, `matplotlib`, or `warnings`. The sandbox does not support them.
-            2. **SciPy Submodules:** If you need a specific SciPy submodule that is NOT in the shortcuts list (e.g., `scipy.interpolate` or `scipy.integrate`), you MUST write `import scipy.interpolate` **inside** your function definition before using it.
-            3. **Standard Math:** Use `np.exp`, `np.log`, etc., instead of the `math` library.
-            4. **Return Format:** You must return a dictionary, not a print statement or a plot.
-
-
-            ### 4. YOUR GOAL
-            Write a function `analyze_feature(data, axis)` that:
-            1. Reshapes data to (pixels, energy).
-            2. Implements the specific math required.
-            3. Returns a DICTIONARY containing the results.
-
-            ### ADDITIONAL NOTES
-            The variable `hspy_data` passed to your function contains: **{processing_note}**.
-            However, even with pre-processing, experimental data often contains high-frequency shot noise (jitter).
-            If you are performing derivative-based operations (like `find_peaks` or `curve_fit`), it is advisable to apply a light smoothing filter
-            (e.g., `gaussian_filter(..., sigma=1-2)`) to ensure convergence.
-
-            ### REQUIRED RETURN FORMAT
-            {{
-                "maps": {{
-                    "Feature_Name_1": np.ndarray, 
-                    "Feature_Name_2": np.ndarray
-                }},
-                "units": {{                 
-                    "Feature_Name_1": "{axis_units}",
-                    "Feature_Name_2": "a.u."
-                }},    
-                "description": "Brief physics explanation"
-            }}
-
-            ### RESPONSE FORMAT
-            Return a JSON object with:
-            - "code": The valid Python code string.
-            - "explanation": Brief logic summary.
-            """
+            base_prompt = build_code_generation_prompt(
+                target_desc=target_desc,
+                h=h, w=w, e=e,
+                axis_units=axis_units,
+                axis_start=state['energy_axis'][0],
+                axis_end=state['energy_axis'][-1],
+                processing_note=processing_note
+            )
 
             current_prompt = base_prompt
             retries = 0
@@ -1596,31 +1502,8 @@ class RunDynamicAnalysisController:
         Judge the Dashboard (Map + Histogram) with SPARSE SIGNAL AWARENESS.
         """
         check_prompt = [
-            f"You are a Quality Assurance Scientist. You wrote code to model the feature: '{feature_desc}'.",
-            "Below is the resulting 'Feature Dashboard'. Left=Map, Right=Histogram.",
-            
-            "\n### YOUR TASK",
-            "Determine if this result captures a REAL physical signal, even if that signal is rare or sparse.",
-            
-            "\n### CRITICAL: HANDLING SPARSE SIGNALS",
-            "In spectroscopy, some features (like impurities) only exist in small regions.",
-            "If the Histogram shows a large pile-up at zero/bounds (background) BUT there is a distinct, smaller population distribution elsewhere, **THIS IS VALID.**",
-            
-            "\n### FAILURE CRITERIA (Reject ONLY if these are true):",
-            "1. **Total Noise:** The map is pure 'static' (salt-and-pepper) with ZERO recognizable structure.",
-            "2. **Total Algorithm Failure:** The histogram is a **SINGLE** sharp spike (Dirac delta) containing 100% of the data.",
-            "3. **Complete Rail-Gazing:** The data is piled up at the min/max edges with **NO secondary distribution** visible.",
-            
-            "\n### SUCCESS CRITERIA (Accept if present):",
-            "- **Structure:** Does the map show ANY structured domains, even if they are small?",
-            "- **Population:** Is there a visible distribution (bell curve, tail, or cluster) separate from the background spike?",
-            
-            "\n### OUTPUT FORMAT",
-            "Return a JSON object with:",
-            "- 'valid': boolean",
-            "- 'critique': string (Briefly explain decision)"
+            SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS.format(feature_desc=feature_desc)
         ]
-        
         check_prompt.append({"mime_type": "image/jpeg", "data": dashboard_bytes})
         
         try:

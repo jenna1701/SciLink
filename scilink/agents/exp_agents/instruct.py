@@ -1462,6 +1462,86 @@ Update your analysis **ONLY** to address the specific points raised in the criti
 Return the **complete, updated JSON object** (same format as the original: `detailed_analysis` and `scientific_claims`).
 """
 
+
+SPECTROSCOPY_VALIDATION_INTERPRETATION_INSTRUCTIONS = """
+### 🧪 Quantitative Validation Mode (High-Purity Reconstruction Analysis)
+
+Because this is a focused refinement, the plots use advanced validation to detect artifacts.
+Each figure contains:
+
+**LEFT PANEL: Spatial Abundance Map**
+- Shows where this component is located physically
+- **Red Dashed Contour**: Marks the 'high-purity region' (top 10% of abundance)
+- Only pixels inside this contour are used for the validation on the right
+
+**RIGHT PANEL (TOP): Spectrum Comparison**
+- **Black Line (Measured Spectrum):** The abundance-weighted average of the RAW DATA in the high-purity region. This is the ground truth.
+- **Red Dashed Line (NMF Reconstruction):** What the complete NMF model predicts for the same region (sum of all components weighted by their abundances).
+- **Orange Dotted Line (NMF Basis Component):** The pure unmixed component from NMF (shown as reference to understand mixing).
+- **Blue Shaded Band (±1σ):** The natural variance in the raw data. Shows measurement uncertainty and heterogeneity.
+
+**RIGHT PANEL (BOTTOM): Residual**
+- **Gray Area:** The difference between Measured Spectrum (Black) and NMF Reconstruction (Red)
+- Shows what the NMF model is missing or getting wrong
+
+### ⚠️ CRITICAL INTERPRETATION RULES
+
+**1. VALID COMPONENT (Good Fit):**
+   - Black and Red lines match closely (stay within the Blue Band)
+   - Residuals are small and random (no structured patterns)
+   - Orange may differ slightly from Black/Red (mixing is expected)
+   - **Conclusion:** NMF successfully reconstructs the data in this region
+
+**2. RECONSTRUCTION FAILURE (Bad Fit):**
+   - Black and Red lines diverge significantly (>2σ outside Blue Band)
+   - Residuals show large, structured peaks or systematic bias
+   - **Conclusion:** NMF model is failing to capture the measured spectrum. Need more components or better preprocessing.
+
+**3. HALLUCINATION (Invented Feature):**
+   - Orange line (Basis Component) shows a peak NOT present in Black (Measured)
+   - AND the high-purity region is tiny (<2% of pixels)
+   - **Conclusion:** NMF created a mathematical artifact. This component doesn't represent real chemistry/physics.
+
+**4. MIXING (Expected in Transition Zones):**
+   - Black ≈ Red (reconstruction works)
+   - But Orange differs from both (basis component is 'purer')
+   - **Conclusion:** Valid component. The high-purity region still contains ~5-10% of other components (expected).
+
+### 🎯 KEY INSIGHT
+**If Black ≈ Red → NMF is working correctly** (even if both differ from Orange)
+**If Black ≠ Red → NMF is failing** to reconstruct the measurements
+
+The Orange line (Basis Component) is a reference to help understand what mixing is occurring.
+"""
+
+
+SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS = """
+You are a Quality Assurance Scientist. You wrote code to model the feature: '{feature_desc}'.
+Below is the resulting 'Feature Dashboard'. Left=Map, Right=Histogram.
+
+### YOUR TASK
+Determine if this result captures a REAL physical signal, even if that signal is rare or sparse.
+
+### CRITICAL: HANDLING SPARSE SIGNALS
+In spectroscopy, some features (like impurities) only exist in small regions.
+If the Histogram shows a large pile-up at zero/bounds (background) BUT there is a distinct, smaller population distribution elsewhere, **THIS IS VALID.**
+
+### FAILURE CRITERIA (Reject ONLY if these are true):
+1. **Total Noise:** The map is pure 'static' (salt-and-pepper) with ZERO recognizable structure.
+2. **Total Algorithm Failure:** The histogram is a **SINGLE** sharp spike (Dirac delta) containing 100% of the data.
+3. **Complete Rail-Gazing:** The data is piled up at the min/max edges with **NO secondary distribution** visible.
+
+### SUCCESS CRITERIA (Accept if present):
+- **Structure:** Does the map show ANY structured domains, even if they are small?
+- **Population:** Is there a visible distribution (bell curve, tail, or cluster) separate from the background spike?
+
+### OUTPUT FORMAT
+Return a JSON object with:
+- 'valid': boolean
+- 'critique': string (Briefly explain decision)
+"""
+
+
 # ============================================================================
 # NEW INSTRUCTION PROMPTS FOR BATCH ANALYSIS
 # ============================================================================
