@@ -25,6 +25,13 @@ from ..instruct import (
 from ....tools.hyperspectral_tools import AGENT_METADATA_KEYS_TO_STRIP
 
 
+def _fmt(val, fmt=".4f"):
+    """Format a numeric value, or return 'N/A'."""
+    try:
+        return f"{val:{fmt}}"
+    except (ValueError, TypeError):
+        return "N/A"
+    
 def _sanitize_filename(text: str) -> str:
     """Helper to create safe filenames from labels."""
     # Replace spaces with underscores, remove non-alphanumeric chars except _ and -
@@ -473,7 +480,7 @@ class CreateAnalysisPlotsController:
         )
         
         for i in range(components.shape[0]):
-            plot_bytes = tools.create_validated_component_pair_reconstruction(
+            result = tools.create_validated_component_pair_reconstruction(
                 state["hspy_data"],       # Raw data
                 components,               # ALL components (needed for reconstruction)
                 abundance_maps,           # ALL abundance maps
@@ -483,10 +490,15 @@ class CreateAnalysisPlotsController:
                 purity_percentile=90.0,   # Top 10% (adjustable)
                 show_basis_component=True # Show orange reference line
             )
+
+            if result is not None:
+                plot_bytes, metrics = result
+            else:
+                plot_bytes, metrics = None, {}
             
             if plot_bytes:
                 label = f"Component {i+1} Analysis"
-                final_plots.append({'label': label, 'bytes': plot_bytes})
+                final_plots.append({'label': label, 'bytes': plot_bytes, 'metrics': metrics})
                 validated_bytes_list.append(plot_bytes)
                 
                 # Save using tool
@@ -498,8 +510,7 @@ class CreateAnalysisPlotsController:
 
         state["component_pair_plots"] = final_plots
         for plot in final_plots:
-            state["analysis_images"].append({"label": plot['label'], "data": plot['bytes']})
-
+            state["analysis_images"].append({"label": plot['label'], "data": plot['bytes'], "metrics": plot.get('metrics', {})})
         # --- 2. Create Summary Grid ---
         try:
             self.logger.info("  (Tool Info: Stitching validated plots into Summary Grid...)")
@@ -587,7 +598,7 @@ Hyperspectral Data Information:
         if state.get("final_components") is not None:
             metadata_info += f"""- Spectral unmixing method: {state['settings'].get('method', 'nmf').upper()}
 - Number of components: {state['final_n_components']}
-- Final Reconstruction Error: {state.get('final_reconstruction_error', 'N/A'):.4f}
+- Final Reconstruction Error: {_fmt(state.get('final_reconstruction_error'))}
 """
         
         prompt_parts.append(metadata_info)
@@ -659,7 +670,14 @@ The Orange line (Basis Component) is a reference to help understand what mixing 
 
             # Append the plots
             for plot in state["component_pair_plots"]:
+                metrics = plot.get('metrics', {})
                 prompt_parts.append(f"\n{plot['label']}:")
+                if metrics:
+                    prompt_parts.append(f"  Reconstruction RMSE: {_fmt(metrics.get('rmse'))}")
+                    prompt_parts.append(f"  Cosine Similarity (Measured vs Reconstruction): {_fmt(metrics.get('cosine_similarity'))}")
+                    prompt_parts.append(f"  Cosine Similarity (Measured vs Basis): {_fmt(metrics.get('basis_cosine_similarity'))}")
+                    prompt_parts.append(f"  High-Purity Region: {_fmt(metrics.get('purity_pixel_percent'), '.1f')}% of pixels")
+                    prompt_parts.append(f"  Residual Autocorrelation: {_fmt(metrics.get('residual_autocorrelation'), '.3f')}")
                 prompt_parts.append({"mime_type": "image/jpeg", "data": plot['bytes']})
 
         # 5. Structure Overlays (if available)
@@ -728,10 +746,13 @@ class SelectRefinementTargetController:
             prompt_parts.append("(No visual results available)")
         
         for img in analysis_images:
-            # Robustly get bytes
-            image_bytes = img.get('data') or img.get('bytes') 
+            image_bytes = img.get('data') or img.get('bytes')
             if image_bytes:
                 prompt_parts.append(f"\n{img['label']}:")
+                # Surface metrics if available (from component plots)
+                metrics = img.get('metrics', {})
+                if metrics:
+                    prompt_parts.append(f"  CosSim: {_fmt(metrics.get('cosine_similarity'))} | Residual AutoCorr: {_fmt(metrics.get('residual_autocorrelation'), '.3f')}")
                 prompt_parts.append({"mime_type": "image/jpeg", "data": image_bytes})
             else:
                 self.logger.warning(f"Could not find image bytes for plot: {img.get('label')}")

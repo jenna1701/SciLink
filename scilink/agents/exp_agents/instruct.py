@@ -1258,6 +1258,10 @@ Depending on the analysis method used in the current iteration, you will receive
    * *Observation:* The spectrum looks real but "blended" (e.g., two phases mixed in one component).
    * *Action:* Target a standard `spatial` or `spectral` zoom.
 
+   **IMPORTANT: When NOT to use spatial refinement:**
+   If multiple NMF components show the SAME spectral feature (e.g., same peak) at slightly different energy positions, spatial zoom will NOT help — it will just reduce the visible shift range within the subregion. This pattern indicates a continuous physical variation (peak shift, edge shift) that requires `custom_code` (dynamic analysis) to quantify. Similarly, if residual autocorrelation is high (>0.3) across multiple components sharing similar spectral features, this is strong evidence of a continuous shift that NMF cannot model regardless of spatial subsetting.
+
+
    **Scenario B: Missed Physics / Model Failure (Use Custom Code)**
    * *Observation:* In NMF results, **Black and Red diverge** (poor reconstruction).
    * *Observation:* The Residual Plot shows a **Structured Shape** (e.g., a "Hill", a "Sine Wave", or a "Step") indicating NMF missed a specific feature.
