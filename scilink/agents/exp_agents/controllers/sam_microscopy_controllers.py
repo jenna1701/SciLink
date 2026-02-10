@@ -41,6 +41,469 @@ from ....tools.sam import (
 
 
 # ============================================================================
+# AUTOMATED LLM REFINEMENT CONTROLLER
+# (Runs when human feedback is disabled - LLM acts as the reviewer)
+# ============================================================================
+
+class AutomatedLLMRefinementController:
+    """
+    [🧠 LLM Step]
+    Automated quality gate that runs when human feedback is DISABLED.
+    
+    The LLM evaluates the initial segmentation and decides whether to:
+    - Accept the current results and proceed
+    - Refine parameters and re-run SAM analysis
+    
+    KEY FEATURE: Iteration history + LLM Judge
+    
+    Every iteration's results (params, SAM output, stats, LLM evaluation)
+    are stored in a history. If refinement doesn't converge to an accepted
+    result within max iterations, an LLM "judge" reviews ALL iterations
+    and selects the best one. This prevents two failure modes:
+    
+    1. Max iterations reached with poor results → judge picks the best
+    2. Non-monotonic improvement (iter 1 good, iter 2 worse) → judge picks iter 1
+    
+    Works identically for single images and batches - always evaluates
+    the first image as a representative sample.
+    """
+    
+    def __init__(
+        self,
+        model,
+        logger: logging.Logger,
+        generation_config,
+        safety_settings,
+        parse_fn: Callable,
+        settings: dict
+    ):
+        self.model = model
+        self.logger = logger
+        self.generation_config = generation_config
+        self.safety_settings = safety_settings
+        self._parse_llm_response = parse_fn
+        self.settings = settings
+        self.max_auto_iterations = settings.get('max_auto_refinement_iterations', 2)
+    
+    def _get_llm_evaluation(self, state: dict, iteration_history: list) -> dict:
+        """
+        Ask the LLM to evaluate segmentation quality and decide whether
+        to accept or refine parameters.
+        
+        Args:
+            state: Current pipeline state
+            iteration_history: List of previous iteration records, so the LLM
+                               can see what has already been tried and avoid
+                               repeating failed strategies.
+        
+        Returns:
+            dict with keys:
+                - decision: "accept" | "refine"
+                - reasoning: str
+                - recommended_parameters: dict (only if decision == "refine")
+                - evaluation: dict with quality scores
+        """
+        self.logger.info("   🧠 LLM evaluating segmentation quality...")
+        
+        original_image_bytes = state["image_blob"]["data"]
+        sam_result = state.get("sam_result")
+        sam_stats = state.get("summary_stats", {})
+        current_params = state.get("current_params", {})
+        
+        # Generate overlay visualization for LLM review
+        overlay_img = visualize_sam_results(sam_result)
+        overlay_bytes = convert_numpy_to_jpeg_bytes(overlay_img)
+        
+        # Build history context so LLM knows what was already tried
+        history_context = ""
+        if iteration_history:
+            history_lines = []
+            for record in iteration_history:
+                eval_info = record.get("evaluation", {})
+                history_lines.append(
+                    f"  - Iteration {record['iteration']}: "
+                    f"params={json.dumps(record['params_used'], indent=None)}, "
+                    f"particles={record.get('particle_count', '?')}, "
+                    f"coverage={eval_info.get('coverage_score', '?')}/10, "
+                    f"accuracy={eval_info.get('accuracy_score', '?')}/10, "
+                    f"quality={eval_info.get('overall_quality', '?')}, "
+                    f"decision={record.get('decision', '?')}"
+                )
+            history_context = (
+                "\n\n**PREVIOUS ITERATIONS (do NOT repeat parameters that already failed):**\n"
+                + "\n".join(history_lines)
+            )
+        
+        prompt_parts = [
+            SAM_BATCH_REFINEMENT_INSTRUCTIONS,
+            "\n\n**CONTEXT:** You are the automated quality reviewer. There is no "
+            "human in the loop. You must decide whether the segmentation is acceptable "
+            "or needs refinement. Be especially vigilant about:\n"
+            "- Zero or very low particle counts (may indicate wrong parameters)\n"
+            "- Extremely high counts (may indicate over-segmentation)\n"
+            "- Particles that are clearly artifacts or noise\n"
+            "- Large regions of the image with obvious features that were missed\n",
+            "\n\n**ORIGINAL MICROSCOPY IMAGE:**",
+            {"mime_type": "image/jpeg", "data": original_image_bytes},
+            "\n\n**CURRENT SEGMENTATION RESULT:**",
+            {"mime_type": "image/jpeg", "data": overlay_bytes},
+            f"\n\n**MORPHOLOGICAL STATISTICS:**\n{json.dumps(sam_stats, indent=2)}",
+            f"\n\n**CURRENT PARAMETERS:**\n{json.dumps(current_params, indent=2)}",
+            history_context,
+            "\n\nRespond with JSON containing:\n"
+            "- \"decision\": \"accept\" or \"refine\"\n"
+            "- \"reasoning\": your analysis of the segmentation quality\n"
+            "- \"evaluation\": {\"coverage_score\": 1-10, \"accuracy_score\": 1-10, "
+            "\"overall_quality\": \"good\"/\"acceptable\"/\"poor\"}\n"
+            "- \"recommended_parameters\": {param changes} (only if decision is \"refine\")\n"
+        ]
+        
+        try:
+            response = self.model.generate_content(
+                contents=prompt_parts,
+                generation_config=self.generation_config,
+                safety_settings=self.safety_settings,
+            )
+            result_json, error_dict = self._parse_llm_response(response)
+            
+            if error_dict:
+                self.logger.warning(f"LLM evaluation failed: {error_dict}")
+                return {"decision": "accept", "reasoning": "Evaluation failed, proceeding with current results"}
+            
+            # Validate the response has required fields
+            if "decision" not in result_json:
+                if result_json.get("needs_refinement"):
+                    result_json["decision"] = "refine"
+                else:
+                    result_json["decision"] = "accept"
+            
+            return result_json
+            
+        except Exception as e:
+            self.logger.error(f"Error in LLM evaluation: {e}")
+            return {"decision": "accept", "reasoning": f"Evaluation error: {str(e)}"}
+    
+    def _judge_select_best_iteration(self, state: dict, iteration_history: list) -> int:
+        """
+        LLM Judge: Reviews all iteration results and selects the best one.
+        
+        Called when:
+        - Max iterations exhausted without an "accept" decision
+        - Acts as a safety net against non-monotonic refinement
+        
+        Args:
+            state: Current pipeline state (has original image for reference)
+            iteration_history: Complete list of iteration records
+        
+        Returns:
+            Index into iteration_history of the best iteration (0-based)
+        """
+        self.logger.info("\n   ⚖️  LLM JUDGE: Reviewing all iterations to select the best result...\n")
+        
+        original_image_bytes = state["image_blob"]["data"]
+        
+        # Build comparison data for all iterations
+        iterations_summary = []
+        overlay_parts = []
+        
+        for record in iteration_history:
+            iter_num = record["iteration"]
+            eval_info = record.get("evaluation", {})
+            
+            iterations_summary.append({
+                "iteration": iter_num,
+                "particle_count": record.get("particle_count", 0),
+                "parameters": record["params_used"],
+                "coverage_score": eval_info.get("coverage_score"),
+                "accuracy_score": eval_info.get("accuracy_score"),
+                "overall_quality": eval_info.get("overall_quality"),
+                "reasoning": record.get("reasoning", ""),
+            })
+            
+            # Include overlay images for visual comparison
+            overlay_bytes = record.get("overlay_bytes")
+            if overlay_bytes:
+                overlay_parts.append(f"\n\n**ITERATION {iter_num} SEGMENTATION:**")
+                overlay_parts.append({"mime_type": "image/jpeg", "data": overlay_bytes})
+        
+        prompt_parts = [
+            "You are a quality judge for microscopy image segmentation. "
+            "Multiple parameter configurations have been tried. Your job is to "
+            "select the BEST iteration — the one that most accurately segments "
+            "the particles/features in the original image.\n\n"
+            "Consider:\n"
+            "- Coverage: Are all real particles detected?\n"
+            "- Accuracy: Are detected regions actual particles (not noise/artifacts)?\n"
+            "- Particle count plausibility: Does the count make sense for this image?\n"
+            "- Area statistics: Are the detected sizes reasonable?\n\n"
+            "If ALL iterations are poor quality, still pick the least-bad one.\n",
+            "\n\n**ORIGINAL MICROSCOPY IMAGE:**",
+            {"mime_type": "image/jpeg", "data": original_image_bytes},
+        ]
+        
+        # Add all overlay images
+        prompt_parts.extend(overlay_parts)
+        
+        prompt_parts.append(
+            f"\n\n**ITERATION DETAILS:**\n{json.dumps(iterations_summary, indent=2)}"
+        )
+        
+        prompt_parts.append(
+            "\n\nRespond with JSON containing:\n"
+            "- \"selected_iteration\": the iteration number (1-based) of the best result\n"
+            "- \"reasoning\": why this iteration is the best\n"
+            "- \"confidence\": \"high\"/\"medium\"/\"low\" — how confident you are in this selection\n"
+            "- \"quality_warning\": optional string if even the best result has significant issues\n"
+        )
+        
+        try:
+            response = self.model.generate_content(
+                contents=prompt_parts,
+                generation_config=self.generation_config,
+                safety_settings=self.safety_settings,
+            )
+            result_json, error_dict = self._parse_llm_response(response)
+            
+            if error_dict or not result_json:
+                self.logger.warning(f"Judge evaluation failed: {error_dict}. Falling back to highest-scored iteration.")
+                return self._fallback_select_best(iteration_history)
+            
+            selected = result_json.get("selected_iteration")
+            reasoning = result_json.get("reasoning", "No reasoning provided")
+            confidence = result_json.get("confidence", "unknown")
+            quality_warning = result_json.get("quality_warning")
+            
+            self.logger.info(f"   ⚖️  Judge selected iteration {selected} (confidence: {confidence})")
+            self.logger.info(f"   💬 Reasoning: {reasoning}")
+            
+            if quality_warning:
+                self.logger.warning(f"   ⚠️  Quality warning: {quality_warning}")
+            
+            # Convert 1-based iteration number to 0-based index
+            if isinstance(selected, int) and 1 <= selected <= len(iteration_history):
+                return selected - 1
+            else:
+                self.logger.warning(f"   ⚠️  Invalid selection '{selected}'. Falling back to scoring.")
+                return self._fallback_select_best(iteration_history)
+                
+        except Exception as e:
+            self.logger.error(f"Judge error: {e}. Falling back to highest-scored iteration.")
+            return self._fallback_select_best(iteration_history)
+    
+    def _fallback_select_best(self, iteration_history: list) -> int:
+        """
+        Deterministic fallback: select the iteration with the highest
+        combined coverage + accuracy score. Used when the LLM judge fails.
+        """
+        best_idx = 0
+        best_score = -1
+        
+        for i, record in enumerate(iteration_history):
+            eval_info = record.get("evaluation", {})
+            coverage = eval_info.get("coverage_score", 0)
+            accuracy = eval_info.get("accuracy_score", 0)
+            
+            # Ensure numeric
+            try:
+                combined = float(coverage) + float(accuracy)
+            except (TypeError, ValueError):
+                combined = 0
+            
+            if combined > best_score:
+                best_score = combined
+                best_idx = i
+        
+        self.logger.info(f"   📊 Fallback selected iteration {best_idx + 1} (score: {best_score})")
+        return best_idx
+    
+    def _restore_iteration(self, state: dict, record: dict) -> dict:
+        """Restore state to a specific iteration's results."""
+        state["current_params"] = record["params_used"].copy()
+        state["sam_result"] = record["sam_result"]
+        state["summary_stats"] = record["summary_stats"]
+        state["final_params_for_batch"] = record["params_used"].copy()
+        return state
+    
+    def execute(self, state: dict) -> dict:
+        """
+        Execute automated LLM refinement loop with iteration tracking
+        and judge-based best-selection.
+        
+        Flow:
+        1. Evaluate current segmentation
+        2. If accepted → use it, done
+        3. If refine → update params, re-run SAM, record iteration, loop
+        4. If max iterations reached without accept → LLM judge picks best
+        
+        Only runs when human feedback is DISABLED.
+        """
+        if state.get('enable_human_feedback', False):
+            self.logger.info("Human feedback enabled — skipping automated LLM refinement.")
+            return state
+        
+        is_single = state.get("is_single_image", False)
+        mode_str = "SINGLE IMAGE" if is_single else "BATCH"
+        self.logger.info(f"\n\n🤖 --- AUTOMATED LLM QUALITY GATE ({mode_str}) --- 🤖\n")
+        
+        sam_result = state.get("sam_result")
+        if sam_result and sam_result.get("total_count", 0) == 0:
+            self.logger.warning("⚠️  Initial SAM detected 0 particles — LLM will evaluate.")
+        
+        # =====================================================================
+        # Track all iterations for the judge
+        # =====================================================================
+        iteration_history = []
+        accepted = False
+        
+        iteration = 0
+        while iteration < self.max_auto_iterations:
+            iteration += 1
+            self.logger.info(f"   📋 Evaluation iteration {iteration}/{self.max_auto_iterations}")
+            
+            # Snapshot current state BEFORE evaluation
+            current_sam_result = state.get("sam_result")
+            current_stats = state.get("summary_stats", {})
+            current_params = state.get("current_params", {}).copy()
+            
+            # Generate overlay for this iteration (stored for judge)
+            overlay_img = visualize_sam_results(current_sam_result)
+            overlay_bytes = convert_numpy_to_jpeg_bytes(overlay_img)
+            
+            # Get LLM evaluation (with history context)
+            evaluation = self._get_llm_evaluation(state, iteration_history)
+            
+            decision = evaluation.get("decision", "accept")
+            reasoning = evaluation.get("reasoning", "No reasoning provided")
+            quality = evaluation.get("evaluation", {})
+            
+            self.logger.info(f"   📊 Quality: coverage={quality.get('coverage_score', '?')}/10, "
+                           f"accuracy={quality.get('accuracy_score', '?')}/10, "
+                           f"overall={quality.get('overall_quality', '?')}")
+            self.logger.info(f"   💬 Reasoning: {reasoning[:200]}{'...' if len(reasoning) > 200 else ''}")
+            self.logger.info(f"   🎯 Decision: {decision.upper()}")
+            
+            # Record this iteration
+            iteration_record = {
+                "iteration": iteration,
+                "params_used": current_params,
+                "sam_result": current_sam_result,
+                "summary_stats": current_stats,
+                "particle_count": current_sam_result.get("total_count", 0) if current_sam_result else 0,
+                "evaluation": quality,
+                "reasoning": reasoning,
+                "decision": decision,
+                "overlay_bytes": overlay_bytes,
+            }
+            iteration_history.append(iteration_record)
+            
+            if decision == "accept":
+                self.logger.info("   ✅ LLM accepted segmentation quality.")
+                state["llm_refinement_iterations"] = iteration
+                state["llm_quality_evaluation"] = quality
+                state["final_params_for_batch"] = current_params
+                state["refinement_history"] = self._sanitize_history_for_state(iteration_history)
+                accepted = True
+                break
+            
+            elif decision == "refine":
+                recommended_params = evaluation.get("recommended_parameters", {})
+                
+                if not recommended_params:
+                    self.logger.warning("   ⚠️ LLM recommended refinement but provided no parameters.")
+                    # Don't break — let the judge decide if this was the best iteration
+                    continue
+                
+                self.logger.info(f"   🔧 Applying recommended parameters: {json.dumps(recommended_params, indent=2)}")
+                
+                # Update parameters
+                updated_params = state.get("current_params", {}).copy()
+                updated_params.update(recommended_params)
+                state["current_params"] = updated_params
+                
+                # Re-run SAM analysis
+                try:
+                    image_array = state["preprocessed_image_array"]
+                    new_sam_result = run_sam_analysis(image_array, params=updated_params)
+                    state["sam_result"] = new_sam_result
+                    
+                    summary_stats = calculate_sam_statistics(
+                        sam_result=new_sam_result,
+                        image_path=state["image_path"],
+                        preprocessed_image_shape=image_array.shape,
+                        nm_per_pixel=state.get("nm_per_pixel")
+                    )
+                    state["summary_stats"] = summary_stats
+                    
+                    old_count = current_sam_result.get("total_count", 0) if current_sam_result else 0
+                    new_count = new_sam_result.get("total_count", 0)
+                    self.logger.info(f"   🔄 Re-analysis: {old_count} → {new_count} particles")
+                    
+                except Exception as e:
+                    self.logger.error(f"   ❌ Re-analysis failed: {e}")
+                    # Revert to pre-refinement params so next iteration or judge
+                    # can still work with the last good result
+                    state["current_params"] = current_params
+                    state["sam_result"] = current_sam_result
+                    state["summary_stats"] = current_stats
+                    continue
+            else:
+                self.logger.warning(f"   ⚠️ Unknown decision '{decision}'.")
+                continue
+        
+        # =====================================================================
+        # JUDGE: If we exhausted iterations without an accepted result
+        # =====================================================================
+        if not accepted:
+            self.logger.warning(
+                f"\n   ⚠️ Max auto-refinement iterations ({self.max_auto_iterations}) "
+                f"reached without acceptance. Invoking LLM judge..."
+            )
+            
+            if len(iteration_history) == 1:
+                # Only one iteration — no need for a judge, just use it
+                self.logger.info("   📋 Only one iteration attempted — using it directly.")
+                best_idx = 0
+            else:
+                best_idx = self._judge_select_best_iteration(state, iteration_history)
+            
+            best_record = iteration_history[best_idx]
+            self.logger.info(
+                f"\n   🏆 Judge selected iteration {best_record['iteration']} "
+                f"({best_record['particle_count']} particles)"
+            )
+            
+            # Restore state to the best iteration's results
+            state = self._restore_iteration(state, best_record)
+            state["llm_refinement_iterations"] = len(iteration_history)
+            state["llm_quality_evaluation"] = best_record.get("evaluation", {})
+            state["judge_selected_iteration"] = best_record["iteration"]
+            state["judge_invoked"] = True
+            state["refinement_history"] = self._sanitize_history_for_state(iteration_history)
+        else:
+            state["judge_invoked"] = False
+        
+        return state
+    
+    def _sanitize_history_for_state(self, iteration_history: list) -> list:
+        """
+        Create a serializable version of iteration history for state/results.
+        Removes large binary data (overlay_bytes, sam_result masks) that
+        shouldn't be serialized to JSON.
+        """
+        sanitized = []
+        for record in iteration_history:
+            sanitized.append({
+                "iteration": record["iteration"],
+                "params_used": record["params_used"],
+                "particle_count": record.get("particle_count", 0),
+                "evaluation": record.get("evaluation", {}),
+                "reasoning": record.get("reasoning", ""),
+                "decision": record.get("decision", ""),
+            })
+        return sanitized
+
+
+# ============================================================================
 # HUMAN FEEDBACK REFINEMENT CONTROLLER
 # (Same for single and batch - refines parameters on first image)
 # ============================================================================
@@ -53,6 +516,9 @@ class HumanFeedbackRefinementController:
     Works identically for single images and batches:
     - Single image: Refine params, then process that one image
     - Batch: Refine params on first image, then apply to all
+    
+    NOTE: Only runs when enable_human_feedback=True.
+    When disabled, AutomatedLLMRefinementController handles quality evaluation.
     """
     
     def __init__(
@@ -268,8 +734,7 @@ Return JSON with ONLY the parameters to change:
     def execute(self, state: dict) -> dict:
         """Execute the human feedback refinement loop."""
         if not state.get('enable_human_feedback', False):
-            self.logger.info("Human feedback disabled. Using initial parameters.")
-            state["final_params_for_batch"] = state.get("current_params", {})
+            self.logger.info("Human feedback disabled — skipping (automated LLM handles this).")
             return state
         
         is_single = state.get("is_single_image", False)
@@ -860,6 +1325,85 @@ class UnifiedSynthesisController:
         else:
             return self._synthesize_batch(state)
     
+    def _build_segmentation_quality_context(self, state: dict) -> str:
+        """
+        Build a context block describing segmentation quality, refinement
+        history, and any caveats the synthesis LLM should factor into its
+        scientific claims.
+        
+        This ensures the LLM knows about:
+        - Whether the judge had to intervene (refinement never converged)
+        - Quality scores from the evaluation
+        - What parameter changes were tried and why
+        - Any quality warnings from the judge
+        
+        The LLM is instructed to incorporate appropriate caveats and
+        confidence qualifiers into its scientific claims.
+        """
+        lines = []
+        
+        # Quality evaluation scores
+        llm_eval = state.get("llm_quality_evaluation", {})
+        if llm_eval:
+            coverage = llm_eval.get("coverage_score", "?")
+            accuracy = llm_eval.get("accuracy_score", "?")
+            overall = llm_eval.get("overall_quality", "unknown")
+            lines.append(f"- Segmentation quality assessment: coverage={coverage}/10, accuracy={accuracy}/10, overall={overall}")
+        
+        # Refinement history
+        refinement_iters = state.get("llm_refinement_iterations", 0)
+        refinement_history = state.get("refinement_history", [])
+        
+        if refinement_iters > 1:
+            lines.append(f"- Parameter refinement required {refinement_iters} iteration(s) to optimize segmentation")
+            for record in refinement_history:
+                iter_num = record.get("iteration")
+                decision = record.get("decision", "?")
+                particles = record.get("particle_count", "?")
+                eval_info = record.get("evaluation", {})
+                lines.append(
+                    f"  - Iteration {iter_num}: {particles} particles, "
+                    f"coverage={eval_info.get('coverage_score', '?')}/10, "
+                    f"accuracy={eval_info.get('accuracy_score', '?')}/10, "
+                    f"decision={decision}"
+                )
+        
+        # Judge intervention
+        judge_invoked = state.get("judge_invoked", False)
+        judge_selected = state.get("judge_selected_iteration")
+        
+        if judge_invoked:
+            lines.append(
+                f"- ⚠️ IMPORTANT: Automated refinement did NOT converge to an accepted result. "
+                f"A judge selected iteration {judge_selected} as the best available, but even "
+                f"this result may have significant segmentation issues."
+            )
+        
+        # Compose the full context block
+        if not lines:
+            return ""
+        
+        quality_context = "\n".join(lines)
+        
+        caveat_instruction = (
+            "\n\n**SEGMENTATION QUALITY CONTEXT:**\n"
+            f"{quality_context}\n\n"
+            "**IMPORTANT:** Factor the above segmentation quality information into your "
+            "scientific analysis. Specifically:\n"
+            "- If overall quality is 'poor' or scores are below 5/10, explicitly state that "
+            "quantitative claims have limited reliability due to segmentation uncertainty.\n"
+            "- If the judge had to intervene (refinement did not converge), note that the "
+            "segmentation parameters may not be optimal for this sample and results should "
+            "be interpreted with caution.\n"
+            "- Scale the confidence of your scientific claims to match the segmentation quality. "
+            "High-quality segmentation (8+/10) supports strong claims; poor segmentation "
+            "(below 5/10) should only support tentative observations.\n"
+            "- If particle counts or morphological statistics may be unreliable, say so "
+            "explicitly rather than presenting them as definitive.\n"
+        )
+        
+        return caveat_instruction
+    
     def _synthesize_single_image(self, state: dict) -> dict:
         """Generate scientific interpretation for a single image."""
         self.logger.info("\n\n🔬 --- SINGLE IMAGE SYNTHESIS --- 🔬\n")
@@ -872,6 +1416,9 @@ class UnifiedSynthesisController:
         result = batch_results[0]
         stats = result.get("statistics", {})
         
+        # Build segmentation quality context
+        quality_context = self._build_segmentation_quality_context(state)
+        
         # Build prompt for single-image analysis
         prompt_parts = [
             SAM_SINGLE_IMAGE_SYNTHESIS_INSTRUCTIONS,
@@ -881,6 +1428,10 @@ class UnifiedSynthesisController:
             f"\n\n**MORPHOLOGICAL STATISTICS:**\n{json.dumps(stats, indent=2)}",
             f"\n\n**SYSTEM INFORMATION:**\n{json.dumps(state.get('system_info', {}), indent=2)}",
         ]
+        
+        # Inject quality context before images
+        if quality_context:
+            prompt_parts.append(quality_context)
         
         # Add visualization if available
         viz_path = result.get("visualization_path")
@@ -933,12 +1484,19 @@ class UnifiedSynthesisController:
                     "mean_area": r["statistics"].get("mean_area_pixels"),
                 })
         
+        # Build segmentation quality context
+        quality_context = self._build_segmentation_quality_context(state)
+        
         prompt_parts = [
             SAM_BATCH_SYNTHESIS_INSTRUCTIONS,
             f"\n\n**INDIVIDUAL ANALYSIS SUMMARY:**\n{json.dumps(stats_summary, indent=2)}",
             f"\n\n**CUSTOM ANALYSIS RESULTS:**\n{json.dumps(custom_results, indent=2)}",
             f"\n\n**SERIES METADATA:**\n{json.dumps(series_metadata, indent=2)}"
         ]
+        
+        # Inject quality context
+        if quality_context:
+            prompt_parts.append(quality_context)
         
         # Add generated plots
         if custom_results.get("success") and custom_results.get("generated_files"):
@@ -1035,6 +1593,25 @@ class UnifiedReportGenerationController:
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         
+        # Include LLM quality evaluation info if available
+        quality_info = ""
+        llm_eval = state.get("llm_quality_evaluation", {})
+        refinement_iters = state.get("llm_refinement_iterations", 0)
+        judge_invoked = state.get("judge_invoked", False)
+        judge_selected = state.get("judge_selected_iteration")
+        
+        if llm_eval:
+            quality_info = f"""
+        <p><strong>Automated Quality Check:</strong> 
+            Coverage {llm_eval.get('coverage_score', '?')}/10, 
+            Accuracy {llm_eval.get('accuracy_score', '?')}/10
+            ({llm_eval.get('overall_quality', 'N/A')})
+            — {refinement_iters} refinement iteration(s)</p>"""
+            if judge_invoked:
+                quality_info += f"""
+        <p><strong>⚖️ Judge Override:</strong> Selected iteration {judge_selected} 
+            out of {refinement_iters} (best quality among all attempts)</p>"""
+        
         html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1062,7 +1639,7 @@ class UnifiedReportGenerationController:
         <p><strong>Date:</strong> {timestamp}</p>
         <p><strong>Image:</strong> {result.get('image_name', 'unknown')}</p>
         <p><strong>Particles Detected:</strong> {result.get('particle_count', 0)}</p>
-        <p><strong>Mean Area:</strong> {result.get('statistics', {}).get('mean_area_pixels', 'N/A')} px²</p>
+        <p><strong>Mean Area:</strong> {result.get('statistics', {}).get('mean_area_pixels', 'N/A')} px²</p>{quality_info}
     </div>
 
     <h2>Scientific Analysis</h2>
@@ -1142,6 +1719,25 @@ class UnifiedReportGenerationController:
         num_images = len(batch_results)
         successful = sum(1 for r in batch_results if r.get("success"))
         
+        # Include LLM quality evaluation info if available
+        quality_info = ""
+        llm_eval = state.get("llm_quality_evaluation", {})
+        refinement_iters = state.get("llm_refinement_iterations", 0)
+        judge_invoked = state.get("judge_invoked", False)
+        judge_selected = state.get("judge_selected_iteration")
+        
+        if llm_eval:
+            quality_info = f"""
+        <p><strong>Automated Quality Check:</strong> 
+            Coverage {llm_eval.get('coverage_score', '?')}/10, 
+            Accuracy {llm_eval.get('accuracy_score', '?')}/10
+            ({llm_eval.get('overall_quality', 'N/A')})
+            — {refinement_iters} refinement iteration(s)</p>"""
+            if judge_invoked:
+                quality_info += f"""
+        <p><strong>⚖️ Judge Override:</strong> Selected iteration {judge_selected} 
+            out of {refinement_iters} (best quality among all attempts)</p>"""
+        
         html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1169,7 +1765,7 @@ class UnifiedReportGenerationController:
         <p><strong>Date:</strong> {timestamp}</p>
         <p><strong>Images Processed:</strong> {successful}/{num_images}</p>
         <p><strong>Analysis Approach:</strong> {custom_results.get("approach", "time_series")}</p>
-        <p><strong>Series Type:</strong> {series_metadata.get("series_type", "unknown")}</p>
+        <p><strong>Series Type:</strong> {series_metadata.get("series_type", "unknown")}</p>{quality_info}
     </div>
 
     <h2>Scientific Analysis</h2>

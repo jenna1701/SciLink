@@ -32,7 +32,7 @@ from ...tools.sam import (
     calculate_sam_statistics,
 )
 
-from ...executors import require_sandbox_approval
+from ...executors import require_sandbox_approval, ScriptExecutor
 
 
 class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
@@ -58,6 +58,28 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         # Get measurement recommendations
         recommendations = agent.recommend_measurements(analysis_result=result)
+    
+    Settings (sam_settings dict):
+        SAM Analysis Parameters:
+            checkpoint_path (str): Path to SAM model checkpoint. Default: None (auto-download)
+            model_type (str): SAM model variant. Default: 'vit_h'
+            device (str): Compute device. Default: 'auto'
+            use_clahe (bool): Enable CLAHE contrast enhancement. Default: False
+            sam_parameters (str): Detection sensitivity preset. Default: 'default'
+                Options: 'default', 'sensitive', 'ultra-permissive'
+            min_area (int): Minimum particle area in pixels. Default: 500
+            max_area (int): Maximum particle area in pixels. Default: 50000
+            use_pruning (bool): Enable duplicate removal. Default: True
+            pruning_iou_threshold (float): IoU threshold for duplicate removal. Default: 0.5
+        
+        Pipeline Control:
+            SAM_ENABLED (bool): Enable SAM analysis. Default: True
+            enable_human_feedback (bool): Enable interactive refinement. Default: False
+            max_feedback_iterations (int): Max human feedback rounds. Default: 3
+            max_auto_refinement_iterations (int): Max automated LLM refinement rounds. Default: 2
+            max_script_corrections (int): Max LLM script fix attempts. Default: 3
+            script_timeout (int): Script execution timeout in seconds. Default: 300
+            save_visualizations (bool): Save overlay PNGs. Default: True
     """
     
     def __init__(
@@ -108,15 +130,38 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         for d in [self.viz_dir, self.data_dir, self.scripts_dir]:
             d.mkdir(parents=True, exist_ok=True)
         
-        # Prepare settings
+        # Prepare settings — consolidate ALL defaults here as single source of truth.
+        # Controllers read from settings but should not need to define their own
+        # fallback defaults for any key listed here.
         self.settings = sam_settings if sam_settings else {}
+        
+        # --- Feature flags ---
         self.settings.setdefault('SAM_ENABLED', True)
         self.settings.setdefault('enable_human_feedback', enable_human_feedback)
-        self.settings.setdefault('max_feedback_iterations', 3)
-        self.settings.setdefault('max_script_corrections', 3)
         self.settings.setdefault('save_visualizations', True)
+        
+        # --- SAM analysis parameters ---
+        self.settings.setdefault('checkpoint_path', None)
+        self.settings.setdefault('model_type', 'vit_h')
+        self.settings.setdefault('device', 'auto')
+        self.settings.setdefault('use_clahe', False)
+        self.settings.setdefault('sam_parameters', 'default')
+        self.settings.setdefault('min_area', 500)
+        self.settings.setdefault('max_area', 50000)
+        self.settings.setdefault('use_pruning', True)
+        self.settings.setdefault('pruning_iou_threshold', 0.5)
+        
+        # --- Pipeline iteration limits ---
+        self.settings.setdefault('max_feedback_iterations', 3)
+        self.settings.setdefault('max_auto_refinement_iterations', 4)
+        self.settings.setdefault('max_script_corrections', 3)
+        self.settings.setdefault('script_timeout', 300)
+        
+        # --- Directories (set explicitly, not defaulted) ---
         self.settings['visualization_dir'] = str(self.viz_dir)
         self.settings['output_dir'] = str(self.data_dir)
+
+        self.executor = ScriptExecutor(timeout=self.settings.get('script_timeout', 300))
         
         if self.settings.get('SAM_ENABLED', True):
             self.logger.info(f"SAMMicroscopyAnalysisAgent initialized. Outputs: {self.output_dir}")
@@ -133,17 +178,22 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         }
     
     def _initialize_sam_params(self) -> dict:
-        """Get initial SAM parameters from settings."""
+        """
+        Get initial SAM parameters from settings.
+        
+        All keys here MUST have corresponding setdefault() calls in __init__,
+        so .get() calls without a fallback default are safe.
+        """
         return {
-            "checkpoint_path": self.settings.get('checkpoint_path', None),
-            "model_type": self.settings.get('model_type', 'vit_h'),
-            "device": self.settings.get('device', 'auto'),
-            "use_clahe": self.settings.get('use_clahe', False),
-            "sam_parameters": self.settings.get('sam_parameters', 'default'),
-            "min_area": self.settings.get('min_area', 500),
-            "max_area": self.settings.get('max_area', 50000),
-            "use_pruning": self.settings.get('use_pruning', True),
-            "pruning_iou_threshold": self.settings.get('pruning_iou_threshold', 0.5)
+            "checkpoint_path": self.settings.get('checkpoint_path'),
+            "model_type": self.settings.get('model_type'),
+            "device": self.settings.get('device'),
+            "use_clahe": self.settings.get('use_clahe'),
+            "sam_parameters": self.settings.get('sam_parameters'),
+            "min_area": self.settings.get('min_area'),
+            "max_area": self.settings.get('max_area'),
+            "use_pruning": self.settings.get('use_pruning'),
+            "pruning_iou_threshold": self.settings.get('pruning_iou_threshold')
         }
     
     def analyze(
@@ -317,7 +367,8 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             safety_settings=self.safety_settings,
             settings=self.settings,
             parse_fn=self._parse_llm_response,
-            store_fn=self._store_analysis_images
+            store_fn=self._store_analysis_images,
+            executor=self.executor
         )
         
         # Execute pipeline steps
@@ -374,10 +425,31 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     def _compile_results(self, state: dict) -> Dict[str, Any]:
         """
         Compile results into a consistent output structure.
+        Includes segmentation quality metadata from refinement/judge.
         """
         is_single = state.get("is_single_image", False)
         num_images = state.get("num_images", 1)
         batch_results = state.get("batch_results", [])
+        
+        # Build segmentation quality metadata
+        segmentation_quality = {}
+        
+        llm_eval = state.get("llm_quality_evaluation", {})
+        if llm_eval:
+            segmentation_quality["evaluation"] = llm_eval
+        
+        refinement_iters = state.get("llm_refinement_iterations", 0)
+        if refinement_iters:
+            segmentation_quality["refinement_iterations"] = refinement_iters
+        
+        refinement_history = state.get("refinement_history", [])
+        if refinement_history:
+            segmentation_quality["refinement_history"] = refinement_history
+        
+        judge_invoked = state.get("judge_invoked", False)
+        if judge_invoked:
+            segmentation_quality["judge_invoked"] = True
+            segmentation_quality["judge_selected_iteration"] = state.get("judge_selected_iteration")
         
         results = {
             "status": "success",
@@ -390,6 +462,10 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             },
             "output_directory": str(self.output_dir)
         }
+        
+        # Include segmentation quality metadata if present
+        if segmentation_quality:
+            results["segmentation_quality"] = segmentation_quality
         
         if is_single:
             # Single image: provide simplified structure for backward compatibility
