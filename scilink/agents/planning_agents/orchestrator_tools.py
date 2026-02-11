@@ -1395,7 +1395,9 @@ class OrchestratorTools:
                     input_bounds=input_bounds,                    
                     target_cols=self.orch.expected_target_columns,
                     output_dir=str(self.orch.base_dir / "bo_artifacts"),
-                    batch_size=int(final_batch_size)
+                    batch_size=int(final_batch_size),
+                    plot_acq=True,
+                    save_acq=True,
                 )
                 
                 if res.get("status") != "success":
@@ -1415,7 +1417,7 @@ class OrchestratorTools:
                     hint = "Run this experiment, then use analyze_file on the result to continue."
                     params_summary = "Generated next experiment parameters"
                 
-                return json.dumps({
+                response = {
                     "status": "success",
                     "mode": "parallel" if parallel_capable else "sequential",
                     "batch_size": final_batch_size,
@@ -1424,7 +1426,12 @@ class OrchestratorTools:
                     "strategy_used": res.get('strategy', {}).get('acquisition_strategy', {}).get('type'),
                     "plot_path": res.get('plot_path'),
                     "hint": hint
-                })
+                }
+                if res.get("acq_plot_path"):
+                    response["acq_plot_path"] = res["acq_plot_path"]
+                if res.get("acq_data_path"):
+                    response["acq_data_path"] = res["acq_data_path"]
+                return json.dumps(response)
                 
             except Exception as e:
                 logging.error(f"Optimization error: {e}")
