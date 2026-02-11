@@ -159,7 +159,93 @@ class SingleObjectiveOptimizer:
         return candidates.detach().cpu().numpy()
 
     # ------------------------------------------------------------------ #
-    #  Acquisition function evaluation helpers
+    #  Acquisition function evaluation (for constrained batch planning)
+    # ------------------------------------------------------------------ #
+
+    def evaluate_acquisition(self, X: np.ndarray) -> np.ndarray:
+        """
+        Evaluate acquisition landscape at arbitrary points.
+        
+        For standard acquisition functions (EI, UCB): evaluates acq_func directly.
+        For Thompson sampling: draws a single posterior sample and evaluates it.
+        For no strategy yet: raises RuntimeError.
+        
+        Args:
+            X: (N, D) array of points to evaluate
+            
+        Returns:
+            (N,) array of acquisition values
+        """
+        X_t = torch.tensor(X, dtype=torch.double, device=self.device)
+        
+        if self.acq_func is not None:
+            # Standard acquisition function (EI, UCB, max_variance)
+            acq_values = np.empty(len(X_t))
+            chunk_size = 256
+            with torch.no_grad():
+                for start in range(0, len(X_t), chunk_size):
+                    end = min(start + chunk_size, len(X_t))
+                    chunk = X_t[start:end].unsqueeze(1)  # (chunk, 1, d)
+                    acq_values[start:end] = self.acq_func(chunk).cpu().numpy()
+            return acq_values
+        
+        elif self.acq_strategy_name == 'thompson':
+            # Thompson sampling: a single posterior draw IS the acquisition surface.
+            # Must chunk to avoid OOM — GP posterior builds full N×N covariance.
+            # We use posterior mean + scaled posterior std with a fixed random draw
+            # to create a consistent pseudo-sample across chunks.
+            self.model.eval()
+            acq_values = np.empty(len(X_t))
+            chunk_size = 256
+            
+            # Draw a single global random seed vector for consistency across chunks
+            rng = np.random.RandomState(42)
+            
+            with torch.no_grad():
+                for start in range(0, len(X_t), chunk_size):
+                    end = min(start + chunk_size, len(X_t))
+                    chunk = X_t[start:end]
+                    posterior = self.model.posterior(chunk)
+                    mean = posterior.mean.squeeze(-1)       # (chunk_size,)
+                    std = posterior.variance.sqrt().squeeze(-1)  # (chunk_size,)
+                    # Consistent random perturbation per point
+                    z = torch.tensor(
+                        rng.randn(end - start), 
+                        dtype=torch.double, device=self.device
+                    )
+                    sample = mean + std * z
+                    acq_values[start:end] = sample.cpu().numpy()
+            
+            return acq_values
+        
+        else:
+            raise RuntimeError(
+                "No acquisition function available. "
+                "Call recommend() first to establish a strategy."
+            )
+
+    def predict(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Return posterior mean and variance at points X.
+        
+        Args:
+            X: (N, D) array of points
+            
+        Returns:
+            Tuple of (mean, variance) arrays, each shape (N,)
+        """
+        if self.model is None:
+            raise RuntimeError("Call fit() first.")
+        X_t = torch.tensor(X, dtype=torch.double, device=self.device)
+        self.model.eval()
+        with torch.no_grad():
+            posterior = self.model.posterior(X_t)
+            mean = posterior.mean.cpu().numpy().squeeze()
+            variance = posterior.variance.cpu().numpy().squeeze()
+        return mean, variance
+
+    # ------------------------------------------------------------------ #
+    #  Acquisition function evaluation helpers (for plotting)
     # ------------------------------------------------------------------ #
 
     def _evaluate_acq_on_grid(self, dim1: int, dim2: int,
@@ -183,15 +269,7 @@ class SingleObjectiveOptimizer:
         flat[:, dim1] = g1.ravel()
         flat[:, dim2] = g2.ravel()
 
-        X_grid = torch.tensor(flat, dtype=torch.double, device=self.device)
-
-        acq_values = np.empty(X_grid.shape[0])
-        chunk_size = 256
-        with torch.no_grad():
-            for start in range(0, X_grid.shape[0], chunk_size):
-                end = min(start + chunk_size, X_grid.shape[0])
-                chunk = X_grid[start:end].unsqueeze(1)  # (chunk, 1, d)
-                acq_values[start:end] = self.acq_func(chunk).cpu().numpy()
+        acq_values = self.evaluate_acquisition(flat)
 
         return g1, g2, acq_values.reshape(resolution, resolution)
 
@@ -211,10 +289,7 @@ class SingleObjectiveOptimizer:
         X_sweep = np.tile(anchor, (resolution, 1))
         X_sweep[:, dim] = x_vals
 
-        X_t = torch.tensor(X_sweep, dtype=torch.double, device=self.device)
-
-        with torch.no_grad():
-            acq_vals = self.acq_func(X_t.unsqueeze(1)).cpu().numpy()
+        acq_vals = self.evaluate_acquisition(X_sweep)
 
         return x_vals, acq_vals
 
@@ -233,6 +308,9 @@ class SingleObjectiveOptimizer:
         For ND inputs (N>2): 2D heatmap of the top-2 most important dimensions
             (by Sobol sensitivity) plus 1D marginal slices for every dimension.
 
+        Works with all acquisition strategies including Thompson sampling 
+        (uses a single posterior sample as the acquisition surface).
+
         Args:
             candidate_x: Recommended candidate(s) from recommend(). Shape (n_candidates, d).
                           The first candidate is used as the anchor point for slicing.
@@ -245,14 +323,12 @@ class SingleObjectiveOptimizer:
             save_path on success.
 
         Raises:
-            RuntimeError: If no acquisition function is available (e.g. Thompson sampling
-                          was used, or recommend() hasn't been called yet).
+            RuntimeError: If recommend() hasn't been called yet.
         """
-        if self.acq_func is None:
+        if self.acq_func is None and self.acq_strategy_name != 'thompson':
             raise RuntimeError(
                 "No acquisition function available. "
-                "This happens when using Thompson sampling (no explicit acq function) "
-                "or when recommend() has not been called yet."
+                "Call recommend() first to establish a strategy."
             )
 
         anchor = candidate_x[0] if candidate_x.ndim == 2 else candidate_x
@@ -383,6 +459,8 @@ class SingleObjectiveOptimizer:
         Evaluates and saves the acquisition function landscape to a .npz file
         for later analysis or custom plotting.
 
+        Works with all acquisition strategies including Thompson sampling.
+
         Saved arrays:
         - 1D sweeps for every dimension (keyed as 'x_dim0', 'acq_dim0', etc.)
         - If input_dim <= 4, pairwise 2D grids ('grid1_0_1', 'grid2_0_1', 'acq_0_1')
@@ -397,12 +475,12 @@ class SingleObjectiveOptimizer:
             Dict with keys saved and the file path.
 
         Raises:
-            RuntimeError: If no acquisition function is available.
+            RuntimeError: If recommend() hasn't been called yet.
         """
-        if self.acq_func is None:
+        if self.acq_func is None and self.acq_strategy_name != 'thompson':
             raise RuntimeError(
                 "No acquisition function available. "
-                "Cannot save data for Thompson sampling or before calling recommend()."
+                "Call recommend() first to establish a strategy."
             )
 
         anchor = candidate_x[0] if candidate_x.ndim == 2 else candidate_x
@@ -512,13 +590,14 @@ class SingleObjectiveOptimizer:
             ax_sens.text(0.5, 0.5, f"Analysis Error: {str(e)}", ha='center')
 
         # --- 3. Acquisition Function (Bottom Left) ---
-        # 1D/2D: full landscape.  d>2: 1D slice along top Sobol dim.
-        # Fallback to GP posterior when acq_func is unavailable (Thompson).
+        # Uses evaluate_acquisition() which handles all strategies including Thompson.
         ax_acq = axes[1, 0]
         anchor = x_plot[0]
         X_np = self.X_train.cpu().numpy()
 
-        if self.acq_func is not None:
+        has_acquisition = (self.acq_func is not None) or (self.acq_strategy_name == 'thompson')
+
+        if has_acquisition:
             if self.input_dim == 1:
                 # --- 1D: full acquisition curve ---
                 x_vals, acq_vals = self._evaluate_acq_1d(
@@ -580,7 +659,7 @@ class SingleObjectiveOptimizer:
                                  f"{dim1_name} vs {dim2_name}")
 
         else:
-            # Fallback for Thompson sampling: show GP posterior
+            # Fallback: no strategy set at all — show GP posterior
             dim_name = self.feature_names[top_dim_idx]
             b_min = self.bounds[0, top_dim_idx].item()
             b_max = self.bounds[1, top_dim_idx].item()
@@ -618,6 +697,9 @@ class MultiObjectiveOptimizer:
         self.input_dim = 0
         self.output_dim = 0
         self.feature_names = []
+        # Persisted after recommend()
+        self.acq_func = None
+        self.acq_strategy_name = None
 
     def fit(self, X: np.ndarray, y: np.ndarray, bounds: List[Tuple[float, float]], 
             model_config: Dict[str, str], feature_names: List[str] = None):
@@ -645,10 +727,16 @@ class MultiObjectiveOptimizer:
         self.model = ModelListGP(*models)
         self.mll = SumMarginalLogLikelihood(self.model.likelihood, self.model)
         fit_gpytorch_mll(self.mll)
+        
+        # Clear stale acquisition function from previous fit
+        self.acq_func = None
+        self.acq_strategy_name = None
 
     def recommend(self, n_candidates: int = 1, strategy: str = 'pareto', params: Dict[str, Any] = None) -> np.ndarray:
         if self.model is None: raise RuntimeError("Call fit() first.")
         params = params or {}
+        
+        self.acq_strategy_name = strategy
 
         if strategy == 'weighted':
             weights = params.get('weights', [1.0]*self.output_dim)
@@ -672,6 +760,9 @@ class MultiObjectiveOptimizer:
                 ref_point=ref_point
             )
 
+        # Persist the acquisition function
+        self.acq_func = acq_func
+
         is_large = n_candidates > 10
         candidates, _ = optimize_acqf(
             acq_function=acq_func, bounds=self.bounds, q=n_candidates,
@@ -680,6 +771,62 @@ class MultiObjectiveOptimizer:
             sequential=True
         )
         return candidates.detach().cpu().numpy()
+
+    # ------------------------------------------------------------------ #
+    #  Acquisition function evaluation (for constrained batch planning)
+    # ------------------------------------------------------------------ #
+
+    def evaluate_acquisition(self, X: np.ndarray) -> np.ndarray:
+        """
+        Evaluate MOO acquisition landscape at arbitrary points.
+        
+        For EHVI/UCB: evaluates the persisted acq_func in chunks.
+        
+        Args:
+            X: (N, D) array of points to evaluate
+            
+        Returns:
+            (N,) array of acquisition values
+        """
+        if self.acq_func is None:
+            raise RuntimeError(
+                "No acquisition function available. "
+                "Call recommend() first to establish a strategy."
+            )
+        
+        X_t = torch.tensor(X, dtype=torch.double, device=self.device)
+        acq_values = np.empty(len(X_t))
+        chunk_size = 256
+        with torch.no_grad():
+            for start in range(0, len(X_t), chunk_size):
+                end = min(start + chunk_size, len(X_t))
+                chunk = X_t[start:end].unsqueeze(1)  # (chunk, 1, d)
+                acq_values[start:end] = self.acq_func(chunk).cpu().numpy()
+        return acq_values
+
+    def predict(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Return posterior mean and variance at points X (summed across objectives).
+        
+        Used as fallback for acquisition landscape when acq_func unavailable.
+        Returns summed variance as a scalar proxy for multi-output uncertainty.
+        
+        Args:
+            X: (N, D) array of points
+            
+        Returns:
+            Tuple of (mean_sum, variance_sum) arrays, each shape (N,)
+        """
+        if self.model is None:
+            raise RuntimeError("Call fit() first.")
+        X_t = torch.tensor(X, dtype=torch.double, device=self.device)
+        self.model.eval()
+        with torch.no_grad():
+            posterior = self.model.posterior(X_t)
+            # Sum across objectives for a scalar proxy
+            mean = posterior.mean.sum(dim=-1).cpu().numpy()
+            variance = posterior.variance.sum(dim=-1).cpu().numpy()
+        return mean, variance
 
     def generate_diagnostics(self, save_path: str):
         """

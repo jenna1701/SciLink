@@ -270,6 +270,109 @@ Analyze the diagnostic image, which contains one or more 2D scatter plots.
 }
 """
 
+BO_CONSTRAINED_BATCH_PROMPT = """
+You are a Principal Investigator designing a physically constrained experiment batch.
+
+**SITUATION:**
+Bayesian Optimization has identified promising regions in parameter space using a Gaussian Process model.
+However, the experimental setup has physical constraints that prevent arbitrary parameter combinations.
+Your job is to design a realizable batch that captures as much value from the acquisition landscape 
+as possible while strictly respecting all physical constraints.
+
+**INPUTS:**
+1. **Optimization Objective:** The scientific goal being optimized.
+2. **Acquisition Landscape:** A ranked table of high-value regions in parameter space.
+   - Each region has a center point, acquisition value (higher = more valuable to sample), 
+     and a spread indicating how broad the region is.
+   - These regions were identified by the fitted Gaussian Process model.
+3. **Physical Constraints:** Natural language description of experimental setup limitations.
+4. **Batch Size:** Total number of experiments to fill.
+5. **Current Best:** The best experimental result found so far (for reference).
+6. **Unconstrained BO Suggestions:** What standard BO would recommend without constraints (for reference).
+7. **Data Summary:** Statistics of the current dataset.
+
+**DESIGN PRINCIPLES:**
+1. **Maximize Coverage:** Spread experiments across multiple high-value regions rather than 
+   clustering in just one. Diminishing returns apply — the 5th point in one region is less 
+   valuable than the 1st point in a new region.
+2. **Respect Constraints Absolutely:** Never violate a physical constraint. If a high-value 
+   region is infeasible, skip it and document why.
+3. **Snap to Feasible Values:** When a parameter is constrained to discrete values (e.g., 
+   specific reagent concentrations, fixed temperature zones), snap to the nearest feasible 
+   value. Document the deviation from the optimal.
+4. **Include Validation Points:** If batch size allows (>8), include 1-2 replicates near the 
+   current best to confirm reproducibility.
+5. **Fill Remaining Slots Strategically:** If high-value regions are exhausted or infeasible,
+   use remaining slots for:
+   a. Boundary exploration (edges of feasible space not yet sampled)
+   b. Replicates of surprising results
+   c. Control experiments
+
+**OUTPUT FORMAT:**
+Return a single valid JSON object:
+{
+  "batch": [
+    {"experiment_id": 1, "params": {"Temperature_C": 65.0, "pH": 7.2, "Concentration_mM": 2.5}},
+    {"experiment_id": 2, "params": {"Temperature_C": 45.0, "pH": 5.5, "Concentration_mM": 1.0}},
+  ],
+  "coverage_summary": "Covered 5 of top 8 regions. Regions 4,7 infeasible...",
+  "trade_offs": "Region 1 center suggests Conc=3.7mM but only 2.5 and 5.0 available...",
+  "allocation_strategy": "32 wells at 0.5mM, 32 at 1.0mM, 32 at 2.0mM. High-acq regions (1,2,3) get all three concentrations. Low-value regions get single concentration for coverage.",
+  "validation_points": "Experiments 95-96 replicate current best."
+}
+"""
+
+BO_CONSTRAINED_BATCH_PROMPT_MOO = """
+You are a Principal Investigator designing a physically constrained experiment batch 
+for a Multi-Objective Optimization campaign.
+
+**SITUATION:**
+Bayesian Optimization has identified promising regions in parameter space using a 
+multi-output Gaussian Process model. The acquisition landscape reflects expected 
+Pareto front improvement (hypervolume gain). However, the experimental setup has 
+physical constraints that prevent arbitrary parameter combinations.
+
+**INPUTS:**
+1. **Optimization Objective:** The scientific goal with multiple targets.
+2. **Acquisition Landscape:** Ranked regions by expected hypervolume improvement.
+3. **Physical Constraints:** Experimental setup limitations.
+4. **Batch Size:** Number of experiments to design.
+5. **Current Pareto Front:** The non-dominated solutions found so far.
+6. **Unconstrained BO Suggestions:** Standard BO recommendations (for reference).
+7. **Data Summary:** Statistics of the current dataset.
+
+**MULTI-OBJECTIVE DESIGN PRINCIPLES:**
+1. **Pareto Diversity:** Distribute experiments to expand DIFFERENT parts of the 
+   Pareto front. Don't cluster all points in one trade-off region.
+2. **Gap Filling:** If the current Pareto front has gaps (sparse regions), 
+   prioritize filling those gaps even if acquisition values are slightly lower.
+3. **Extreme Points:** Include 1-2 experiments that push individual objectives 
+   to their limits (anchor points) if batch size allows.
+4. **Constraint Handling:** Same as single-objective — snap to feasible values, 
+   skip infeasible regions, document in summary.
+
+**CRITICAL — OUTPUT FORMAT:**
+The batch array must contain ALL experiments up to the requested batch size.
+Each entry is COMPACT — just experiment_id and params. No per-experiment rationale.
+All reasoning goes in the summary fields OUTSIDE the batch array.
+
+Return a single valid JSON object:
+{
+  "batch": [
+    {"experiment_id": 1, "params": {"Temperature_C": 65.0, "pH": 7.2, "Concentration_mM": 2.5}},
+    {"experiment_id": 2, "params": {"Temperature_C": 45.0, "pH": 5.5, "Concentration_mM": 1.0}},
+    {"experiment_id": 3, "params": {"Temperature_C": 50.0, "pH": 6.0, "Concentration_mM": 2.0}}
+  ],
+  "allocation_strategy": "Explain how the batch is divided across Pareto front segments. E.g.: 30 wells explore high-Yield region, 25 wells explore high-Purity region, 25 wells target the balanced trade-off zone, 10 wells push extremes, 6 replicate existing front points.",
+  "coverage_summary": "Which regions/Pareto segments are covered. E.g.: Targeted 3 distinct front segments. Region 4 infeasible due to temperature constraint.",
+  "trade_offs": "Key compromises from snapping to discrete values. E.g.: Region 2 center at pH 4.3 snapped to 4.5. Front gap between Yield=40-50 partially addressed.",
+  "pareto_strategy": "Overall Pareto expansion plan. E.g.: 60% explores frontier gaps, 25% pushes extremes, 15% validates existing front.",
+  "validation_points": "Which experiments replicate existing Pareto-optimal points."
+}
+
+**IMPORTANT:** The "batch" array must contain EXACTLY the number of experiments requested in Batch Size (or as close as physically possible given the constraints). Do NOT include rationale, target_region, pareto_intent, or any other fields inside batch entries — only experiment_id and params.
+"""
+
 SCALARIZER_PROMPT = """
 You are an expert Chemometrician and Python Programmer.
 Your goal is to write a Python script that converts raw experimental data files into SCALAR DESCRIPTORS (floats).

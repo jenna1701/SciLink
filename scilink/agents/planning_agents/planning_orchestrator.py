@@ -163,6 +163,19 @@ You are the **Research Agent**. Your goal is to coordinate a scientific campaign
     - Sequential: run_optimization() 
     - Parallel: run_optimization(parallel_capable=True, batch_size=N)
      * Infer N from context or ask user. Retry if "batch_size_required" returned.
+    - **Constraint-Aware Mode:** run_optimization(parallel_capable=True, batch_size=N, physical_constraints="...")
+     * Use when the experimental setup has physical limitations that prevent arbitrary 
+       parameter combinations (plate layouts, shared channels, discrete reagent stocks, etc.)
+     * The agent evaluates the full acquisition landscape and designs a realizable batch 
+       that maximizes information gain within the constraints.
+     * Extract constraints from the experimental plan or user description.
+     * Examples:
+       - User says "96-well plate where rows share temperature" 
+         → physical_constraints="96-well plate: 8 rows share temperature, 12 columns share pH"
+       - User says "we only have 5 catalyst stocks"
+         → physical_constraints="Discrete catalyst concentrations: 0.1, 0.5, 1.0, 2.0, 5.0 mM"
+       - User says "reactor zones share cooling"
+         → physical_constraints="Reactor: zones A,B share cooling system, zones C,D share heating. Max 4 distinct temperatures."
 11. `save_checkpoint`: Save campaign state. Use after every 3-5 experiments.
 
 **FILE PATH RULES:**
