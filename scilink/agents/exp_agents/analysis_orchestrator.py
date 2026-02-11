@@ -143,6 +143,12 @@ You are the **Analysis Agent**. Your goal is to coordinate experimental data ana
 **RESULTS:**
 8-12. `list_results`, `save_checkpoint`, `get_recommendations`, `show_available_agents`, `get_metadata_schema`
 
+**CUSTOM PREPROCESSING:**
+13. `set_preprocessing_instruction`: Add custom preprocessing to loaded metadata.
+   - Use when: user says "divide by baseline", "subtract dark reference", "normalize to peak", etc.
+   - Requires: metadata already loaded
+   - Example flow: load_metadata → set_preprocessing_instruction → run_analysis
+   
 **AGENT SELECTION DECISION TREE:**
 
 ```

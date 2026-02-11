@@ -1179,33 +1179,96 @@ SPECTROSCOPY_REFINEMENT_INSTRUCTIONS = """You are an expert spectroscopist steer
 * Standard Refinement uses **NMF** on a subset of data. It works well for separating mixed spatial phases.
 * Dynamic Analysis (Custom Code) uses **Python/Math** (e.g., curve fitting). It works well when NMF fails to model the physical shape (e.g., peak shifts, specific background shapes).
 
-**Input:**
-1. **Analysis Plots:** Component Spectra and Spatial Abundance Maps.
-2. **Validation Plots:** Critical overlay of Model (Red) vs. Raw Data (Black) with Variance (Blue) and Residuals (Gray).
-3. **Context:** System metadata.
+---
+
+**What You Will See:**
+
+Depending on the analysis method used in the current iteration, you will receive different types of plots:
+
+### A. Standard NMF Results
+
+**Validation Plots (one per component):**
+- **LEFT Panel:** Spatial abundance map with red contour marking high-purity region (top 10%)
+- **RIGHT TOP Panel:** Four-line spectral validation
+  - **Black Line (Measured Spectrum):** Abundance-weighted average of RAW DATA in high-purity region (ground truth)
+  - **Red Dashed Line (NMF Reconstruction):** What the complete NMF model predicts for the same region
+  - **Orange Dotted Line (NMF Basis Component):** The pure unmixed component from NMF (reference for mixing assessment)
+  - **Blue Shaded Band (±1σ):** Natural variance in raw data
+- **RIGHT BOTTOM Panel:** Gray residual (Measured - Predicted)
+
+**How to Interpret NMF Validation:**
+* **Black ≈ Red within Blue Band** → NMF is working correctly
+* **Orange differs from Black/Red** → Expected mixing (valid component, just not pure in this region)
+* **Orange shows peaks NOT in Black** → Possible hallucination (especially if high-purity region is tiny <2% of pixels)
+* **Black and Red diverge (>2σ outside Blue Band)** → NMF reconstruction failed
+* **Large structured residuals** → NMF is missing physics
+
+### B. Dynamic Analysis Results
+
+**Feature Dashboards (one per feature):**
+- **LEFT Panel:** Spatial heatmap showing where the feature is located
+- **RIGHT Panel:** Histogram showing the statistical distribution of feature values across all pixels
+
+**How to Interpret Dynamic Analysis:**
+* **Structured spatial pattern** → Real feature
+* **Salt-and-pepper noise** → Artifact
+* **Reasonable value distribution** → Valid measurement (bell curve, not spike at zero)
+* **Statistics make physical sense** → Feature is meaningful
+
+---
 
 **Decision Logic:**
+
 1. **Artifact Check (STOP):**
+   
+   **For NMF Results:**
    * Does the spectrum look like random noise (jagged spikes)?
-   * Does the map look like "salt-and-pepper" static?
-   * Does the Model (Red) hallucinate peaks outside the Variance Band (Blue)?
-   * *If YES, the feature is invalid/noise. Do not refine.*
+   * Does the spatial map look like "salt-and-pepper" static?
+   * Does **Orange show peaks that are NOT present in Black** AND the high-purity region is tiny (<2% of pixels)?
+   * Does Red diverge from Black by >2σ outside the Blue Band?
+   
+   **For Dynamic Analysis Results:**
+   * Does the spatial map show salt-and-pepper noise?
+   * Is the histogram a single spike at zero or max?
+   * Are the statistics nonsensical (e.g., negative values for a physical distance)?
+   
+   *If YES to any, the feature is invalid/noise. Do not refine.*
+   
 2. **Success Check (STOP):**
+   
+   **For NMF Results:**
    * Are components chemically distinct and clean?
    * Are spatial domains well-defined?
+   * Is **Black ≈ Red** (within Blue Band)?
    * Is the Residual (Bottom Panel) flat/featureless?
-   * *If YES, analysis is complete.*
+   
+   **For Dynamic Analysis Results:**
+   * Do the custom features show clear spatial structure?
+   * Do the histograms show reasonable distributions?
+   * Do the features provide new physical insight not captured by NMF?
+   
+   *If YES, analysis is complete.*
+   
 3. **Ambiguity Check & Tool Selection (REFINE):**
+   
    If the signal is **real but complex**, identify the specific *type* of complexity to choose the tool:
 
-   * **Scenario A: Spatial/Spectral Mixing (Use Standard NMF)**
-     * *Observation:* The spectrum looks real but "blended" (e.g., two phases mixed in one component). The residual is generally high but unstructured.
-     * *Action:* Target a standard `spatial` or `spectral` zoom.
+   **Scenario A: Spatial/Spectral Mixing (Use Standard NMF)**
+   * *Observation:* In NMF results, Black ≈ Red (good reconstruction), but Orange differs from Black/Red (mixing present). The component is valid but represents a mixed phase.
+   * *Observation:* The spectrum looks real but "blended" (e.g., two phases mixed in one component).
+   * *Action:* Target a standard `spatial` or `spectral` zoom.
 
-   * **Scenario B: Missed Physics / Model Failure (Use Custom Code)**
-     * *Observation:* The Residual Plot shows a **Structured Shape** (e.g., a "Hill", a "Sine Wave", or a "Step") indicating NMF missed a specific feature.
-     * *Observation:* Evidence of a **Peak Shift** (Derivative shape in residual) or **Specific Shape** (e.g., Edge onset, Power-law tail).
-     * *Action:* Define a target with `type: "custom_code"`. You must describe the *math* needed (e.g., "Fit a Gaussian to the residual bump at 0.6eV").
+   **IMPORTANT: When NOT to use spatial refinement:**
+   If multiple NMF components show the SAME spectral feature (e.g., same peak) at slightly different energy positions, spatial zoom will NOT help — it will just reduce the visible shift range within the subregion. This pattern indicates a continuous physical variation (peak shift, edge shift) that requires `custom_code` (dynamic analysis) to quantify. Similarly, if residual autocorrelation is high (>0.3) across multiple components sharing similar spectral features, this is strong evidence of a continuous shift that NMF cannot model regardless of spatial subsetting.
+
+
+   **Scenario B: Missed Physics / Model Failure (Use Custom Code)**
+   * *Observation:* In NMF results, **Black and Red diverge** (poor reconstruction).
+   * *Observation:* The Residual Plot shows a **Structured Shape** (e.g., a "Hill", a "Sine Wave", or a "Step") indicating NMF missed a specific feature.
+   * *Observation:* Evidence of a **Peak Shift** (Derivative shape in residual) or **Specific Shape** (e.g., Edge onset, Power-law tail).
+   * *Action:* Define a target with `type: "custom_code"`. You must describe the *math* needed (e.g., "Fit a Gaussian to model the peak shift around 0.6eV").
+
+---
 
 **Output Format:**
 You MUST output a valid JSON object.
@@ -1215,29 +1278,35 @@ You MUST output a valid JSON object.
 * For "spectral" targets: 'value' = List of two Numbers [start, end].
 * For "custom_code" targets: 'value' = null (The description field is what matters).
 
-**Example 1: STOP (Artifact)**
+**Example 1: STOP (NMF Artifact)**
 {
   "refinement_needed": false,
-  "reasoning": "Component 4 is noise. The map is static and the spectrum is jagged. Refinement unjustified."
+  "reasoning": "Component 4 is a hallucination. The Orange line (Basis Component) shows peaks at 0.5 and 0.8 eV that are NOT present in the Black line (Measured Spectrum). Additionally, the high-purity region comprises only 1.2% of pixels. This is a mathematical artifact from NMF overfitting."
 }
 
-**Example 2: REFINE (Standard NMF - Mixing)**
+**Example 2: STOP (Dynamic Analysis Success)**
+{
+  "refinement_needed": false,
+  "reasoning": "Dynamic Analysis successfully mapped the peak center positions. The spatial map shows clear grain-boundary localization, and the histogram shows a bimodal distribution consistent with two distinct chemical environments. Analysis complete."
+}
+
+**Example 3: REFINE (Standard NMF - Mixing)**
 {
   "refinement_needed": true,
-  "reasoning": "Component 2 shows clean signal but broad spatial mixing. NMF zoom needed to separate the interface.",
+  "reasoning": "Component 2 shows valid signal. Black and Red lines match well (RMSE=0.01), confirming accurate reconstruction. However, Orange differs from Black/Red, indicating ~10% mixing with adjacent phases. A spatial zoom could isolate the pure interface.",
   "targets": [
-      { "type": "spatial", "description": "Isolate interface", "value": 2 }
+      { "type": "spatial", "description": "Isolate pure interface region to separate mixed phases", "value": 2 }
   ]
 }
 
-**Example 3: REFINE (Dynamic Analysis - Peak Shift)**
+**Example 4: REFINE (Dynamic Analysis - Peak Shift)**
 {
   "refinement_needed": true,
-  "reasoning": "Component 3 is valid, but the Residual plot shows a distinct sine-wave shape at 0.5 eV. This indicates a physical peak shift that NMF cannot model. I need to track this shift mathematically.",
+  "reasoning": "Component 3 is valid (Black line shows clear peaks), but Black and Red diverge at 0.5 eV. The Residual plot shows a distinct derivative pattern indicating a physical peak shift that NMF's linear model cannot capture. Need mathematical modeling to quantify this shift spatially.",
   "targets": [
       {
         "type": "custom_code",
-        "description": "Perform a 'Spectral Probe' scan or cross-correlation to map the precise center position of the peak around 0.5 eV.",
+        "description": "Map peak center position around 0.5 eV using Gaussian fitting or cross-correlation to quantify the spatial variation in peak energy across the sample.",
         "value": null
       }
   ]
@@ -1251,16 +1320,68 @@ You will receive a series of analysis reports, starting from a "Global Analysis"
 ### YOUR TASK
 Write a single, cohesive scientific narrative that integrates all findings into a unified physical model.
 
-**Inputs you will see:**
-1.  **NMF Results:** Standard component unmixing (Maps + Spectra).
-2.  **Dynamic Analysis Dashboards:** Visuals generated by custom LLM-written code containing two panels:
-    * **Left Panel (Spatial Map):** Where the feature is located.
-    * **Right Panel (Histogram):** The statistical distribution of the feature's values across the scan.
+**IMPORTANT: Write for a general scientific audience.**
+Translate validation terminology (Black/Red/Orange lines, RMSE) into plain language that describes model quality, reconstruction accuracy, and confidence levels without requiring readers to understand the validation system details.
+---
+
+**What You Will See:**
+
+### 1. Standard NMF Results
+**Validation Plots (one per component):**
+- **LEFT Panel:** Spatial abundance map with red contour (high-purity region, top 10%)
+- **RIGHT TOP Panel:** Four-line spectral validation
+  - **Black Line (Measured Spectrum):** Ground truth from high-purity region
+  - **Red Dashed Line (NMF Reconstruction):** Model prediction (sum of all components)
+  - **Orange Dotted Line (NMF Basis Component):** Pure unmixed component (reference)
+  - **Blue Shaded Band (±1σ):** Natural variance
+- **RIGHT BOTTOM Panel:** Gray residual (Measured - Predicted)
+
+**How to Interpret NMF Validation:**
+* **Black ≈ Red** → NMF successfully reconstructed the data (high confidence in this component)
+* **Black ≠ Red** → NMF struggled to model this region (lower confidence, caveat needed)
+* **Orange ≈ Black ≈ Red** → Pure, homogeneous component
+* **Orange differs from Black/Red** → Mixed component (expected in transition zones)
+* **Orange shows peaks not in Black** → Potential artifact (cross-check with spatial map and residuals)
+
+### 2. Dynamic Analysis Results
+**Feature Dashboards (one per feature):**
+- **LEFT Panel:** Spatial heatmap showing where the feature is located
+- **RIGHT Panel:** Histogram showing the statistical distribution of feature values
+- **Statistics Box:** Mean and standard deviation
+
+**How to Interpret Dynamic Analysis:**
+* Structured spatial pattern → Real feature
+* Reasonable value distribution → Valid measurement
+* Statistics support physical model → High confidence
+
+---
 
 **Synthesis Logic & Interpretation Rules:**
-* **Compare and Contrast:** If a region was analyzed by both NMF and Dynamic Analysis, compare them.
-* **Prioritize Physics:** If a 'Dynamic Analysis' dashboard exists  and is free of obvious artifacts, treat it as higher precision evidence than NMF.
 
+1. **Validate NMF components first:** 
+   - Check if Black ≈ Red for each component
+   - Downweight or caveat components where Black and Red diverge significantly
+   
+2. **Assess mixing in NMF components:**
+   - If Orange differs from Black/Red but Black ≈ Red, explain this is expected mixing
+   - Note the spatial locations where mixing occurs (e.g., interfaces, grain boundaries)
+   
+3. **Integrate Dynamic Analysis findings:**
+   - If a region was analyzed by both NMF and Dynamic Analysis, compare them
+   - Do the custom features agree with NMF component distributions?
+   - Does Dynamic Analysis provide higher precision for specific features?
+   
+4. **Prioritize evidence:**
+   - For well-reconstructed NMF components (Black ≈ Red): High confidence
+   - For poorly-reconstructed NMF components (Black ≠ Red): Lower confidence, add caveats
+   - For Dynamic Analysis features with clear spatial structure: High precision for that specific feature
+   
+5. **Build a unified model:**
+   - How do all components and features fit together spatially?
+   - What is the overall chemical/physical architecture?
+   - Are there consistent patterns across different analysis scales?
+
+---
 
 ### OUTPUT FORMAT
 You MUST output a valid JSON object containing "detailed_analysis" and "scientific_claims".
@@ -1290,10 +1411,31 @@ You are a Senior Principal Scientist reviewing a draft analysis of hyperspectral
 **Assumption:** The overall analysis is likely 80-90% correct. Do not nitpick style. Focus on scientific validity.
 
 **Review Checklist:**
-1. **The "Noise" Trap:** Look at the provided NMF Component images. 
+
+1. **The "Noise" Trap:** Look at the provided component images.
    - Does the analysis claim a chemical phase exists for a component that looks like random "salt-and-pepper" noise?
-   - If a "Validation Plot" (Blue Band vs Red Line) is present, does the analysis claim a feature exists where the Red Line is clearly hallucinating far outside the Blue Band?
-2. **Unsupported Claims:** Are there scientific claims made with "High Confidence" that are barely supported by the visual data?
+   - For Dynamic Analysis dashboards: Does the spatial map show salt-and-pepper noise or histogram spike at zero/max?
+
+2. **The "Validation Plot" Check:** If NMF validation plots are present (with Black/Red/Orange/Blue lines), assess each component carefully:
+   
+   **Black line** = Measured data (weighted mean in high-purity region for this component)
+   **Red line** = NMF reconstruction (weighted mean in same high-purity region)
+   **Orange line** = NMF basis component (pure unmixed endmember)
+   **Blue band** = Natural variance (±1σ) in the data
+   
+   **Diagnose the type of issue (if any):**
+   
+   - **Clear Hallucination (REJECT):** Does **Orange show features (peaks, edges, shoulders) that are ABSENT in Black** AND is the high-purity region tiny (<2% of pixels)? → Remove this component entirely.
+   
+   - **Expected Mixing (KEEP with caveat):** Does **Orange differ from Black** but the main features exist in BOTH, Black ≈ Red (good reconstruction), and spatial pattern is structured (not salt-and-pepper)? → Keep but add caveat about expected mixing.
+   
+   - **Poor Reconstruction (DOWNGRADE):** Does **Red diverge from Black** (outside Blue Band)? → Downgrade confidence, note reconstruction quality is moderate.
+   
+   - **Possible Artifact (DOWNGRADE):** Is **Orange amplitude dramatically different from Black** (>5× ratio) despite Black ≈ Red? → Downgrade, note possible correction factor.
+   
+   **Use spatial patterns as a tie-breaker:** Structured patterns (cores, shells, boundaries) are more likely real; salt-and-pepper is likely noise.
+
+3. **Unsupported Claims:** Are there scientific claims made with "High Confidence" that are barely supported by the visual data?
 
 **Output Format:**
 Return a JSON object:
@@ -1319,6 +1461,86 @@ Update your analysis **ONLY** to address the specific points raised in the criti
 
 Return the **complete, updated JSON object** (same format as the original: `detailed_analysis` and `scientific_claims`).
 """
+
+
+SPECTROSCOPY_VALIDATION_INTERPRETATION_INSTRUCTIONS = """
+### 🧪 Quantitative Validation Mode (High-Purity Reconstruction Analysis)
+
+Because this is a focused refinement, the plots use advanced validation to detect artifacts.
+Each figure contains:
+
+**LEFT PANEL: Spatial Abundance Map**
+- Shows where this component is located physically
+- **Red Dashed Contour**: Marks the 'high-purity region' (top 10% of abundance)
+- Only pixels inside this contour are used for the validation on the right
+
+**RIGHT PANEL (TOP): Spectrum Comparison**
+- **Black Line (Measured Spectrum):** The abundance-weighted average of the RAW DATA in the high-purity region. This is the ground truth.
+- **Red Dashed Line (NMF Reconstruction):** What the complete NMF model predicts for the same region (sum of all components weighted by their abundances).
+- **Orange Dotted Line (NMF Basis Component):** The pure unmixed component from NMF (shown as reference to understand mixing).
+- **Blue Shaded Band (±1σ):** The natural variance in the raw data. Shows measurement uncertainty and heterogeneity.
+
+**RIGHT PANEL (BOTTOM): Residual**
+- **Gray Area:** The difference between Measured Spectrum (Black) and NMF Reconstruction (Red)
+- Shows what the NMF model is missing or getting wrong
+
+### ⚠️ CRITICAL INTERPRETATION RULES
+
+**1. VALID COMPONENT (Good Fit):**
+   - Black and Red lines match closely (stay within the Blue Band)
+   - Residuals are small and random (no structured patterns)
+   - Orange may differ slightly from Black/Red (mixing is expected)
+   - **Conclusion:** NMF successfully reconstructs the data in this region
+
+**2. RECONSTRUCTION FAILURE (Bad Fit):**
+   - Black and Red lines diverge significantly (>2σ outside Blue Band)
+   - Residuals show large, structured peaks or systematic bias
+   - **Conclusion:** NMF model is failing to capture the measured spectrum. Need more components or better preprocessing.
+
+**3. HALLUCINATION (Invented Feature):**
+   - Orange line (Basis Component) shows a peak NOT present in Black (Measured)
+   - AND the high-purity region is tiny (<2% of pixels)
+   - **Conclusion:** NMF created a mathematical artifact. This component doesn't represent real chemistry/physics.
+
+**4. MIXING (Expected in Transition Zones):**
+   - Black ≈ Red (reconstruction works)
+   - But Orange differs from both (basis component is 'purer')
+   - **Conclusion:** Valid component. The high-purity region still contains ~5-10% of other components (expected).
+
+### 🎯 KEY INSIGHT
+**If Black ≈ Red → NMF is working correctly** (even if both differ from Orange)
+**If Black ≠ Red → NMF is failing** to reconstruct the measurements
+
+The Orange line (Basis Component) is a reference to help understand what mixing is occurring.
+"""
+
+
+SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS = """
+You are a Quality Assurance Scientist. You wrote code to model the feature: '{feature_desc}'.
+Below is the resulting 'Feature Dashboard'. Left=Map, Right=Histogram.
+
+### YOUR TASK
+Determine if this result captures a REAL physical signal, even if that signal is rare or sparse.
+
+### CRITICAL: HANDLING SPARSE SIGNALS
+In spectroscopy, some features (like impurities) only exist in small regions.
+If the Histogram shows a large pile-up at zero/bounds (background) BUT there is a distinct, smaller population distribution elsewhere, **THIS IS VALID.**
+
+### FAILURE CRITERIA (Reject ONLY if these are true):
+1. **Total Noise:** The map is pure 'static' (salt-and-pepper) with ZERO recognizable structure.
+2. **Total Algorithm Failure:** The histogram is a **SINGLE** sharp spike (Dirac delta) containing 100% of the data.
+3. **Complete Rail-Gazing:** The data is piled up at the min/max edges with **NO secondary distribution** visible.
+
+### SUCCESS CRITERIA (Accept if present):
+- **Structure:** Does the map show ANY structured domains, even if they are small?
+- **Population:** Is there a visible distribution (bell curve, tail, or cluster) separate from the background spike?
+
+### OUTPUT FORMAT
+Return a JSON object with:
+- 'valid': boolean
+- 'critique': string (Briefly explain decision)
+"""
+
 
 # ============================================================================
 # NEW INSTRUCTION PROMPTS FOR BATCH ANALYSIS

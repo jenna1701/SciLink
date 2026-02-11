@@ -1289,7 +1289,7 @@ class AnalysisOrchestratorTools:
         )
 
         # =====================================================================
-        # 11. ASSESS NOVELTY (UPDATED)
+        # 11. ASSESS NOVELTY
         # =====================================================================
         def assess_novelty(analysis_id: str = None, analysis_index: int = -1) -> str:
             """
@@ -1474,6 +1474,97 @@ class AnalysisOrchestratorTools:
                 }
             },
             required=[]
+        )
+
+        # =====================================================================
+        # 12. SET CUSTOM PREPROCESSING INSTRUCTION
+        # =====================================================================
+        def set_preprocessing_instruction(instruction: str, mode: str = "auto") -> str:
+            """
+            Add or update a custom preprocessing instruction in the current metadata.
+            Metadata must already be loaded via load_metadata or convert_metadata.
+            
+            Modes:
+                - "auto": If existing instruction found, return conflict for LLM to resolve
+                - "replace": Overwrite existing instruction
+                - "append": Append new instruction to existing one
+            """
+            print(f"  ⚡ Tool: Setting custom preprocessing instruction...")
+            
+            if self.orch.current_metadata is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No metadata loaded. Use load_metadata or convert_metadata first."
+                })
+            
+            existing = self.orch.current_metadata.get("custom_processing_instruction")
+            
+            # Conflict detection
+            if existing and mode == "auto":
+                return json.dumps({
+                    "status": "conflict",
+                    "message": "Metadata already contains a custom preprocessing instruction.",
+                    "existing_instruction": existing,
+                    "new_instruction": instruction,
+                    "options": [
+                        "Call again with mode='replace' to overwrite the existing instruction.",
+                        "Call again with mode='append' to combine both instructions.",
+                    ],
+                    "hint": "Ask the user which they prefer if unclear."
+                })
+            
+            if existing and mode == "append":
+                combined = f"{existing}\nThen: {instruction}"
+                self.orch.current_metadata["custom_processing_instruction"] = combined
+                return json.dumps({
+                    "status": "success",
+                    "message": "Appended new instruction to existing one.",
+                    "final_instruction": combined
+                })
+            
+            # mode == "replace" or no existing instruction
+            self.orch.current_metadata["custom_processing_instruction"] = instruction
+            
+            result = {
+                "status": "success",
+                "message": "Custom preprocessing instruction set.",
+                "instruction": instruction
+            }
+            if existing:
+                result["note"] = f"Replaced previous instruction: '{existing}'"
+            
+            return json.dumps(result)
+
+        self._register_tool(
+            func=set_preprocessing_instruction,
+            name="set_preprocessing_instruction",
+            description=(
+                "Add or update a custom preprocessing instruction in the currently loaded metadata. "
+                "Use when the user wants custom preprocessing (e.g., baseline division, "
+                "background subtraction, normalization) on top of existing metadata. "
+                "If metadata already has a preprocessing instruction, returns a conflict "
+                "for you to resolve with the user. Supports modes: 'auto' (detect conflict), "
+                "'replace' (overwrite), 'append' (combine both)."
+            ),
+            parameters={
+                "instruction": {
+                    "type": "string",
+                    "description": (
+                        "Natural language preprocessing instruction. Include file paths if "
+                        "referencing external data."
+                    )
+                },
+                "mode": {
+                    "type": "string",
+                    "description": (
+                        "How to handle existing instructions: "
+                        "'auto' (default, detect conflicts), "
+                        "'replace' (overwrite), "
+                        "'append' (combine both)"
+                    )
+                }
+            },
+            required=["instruction"]
         )
 
     def _register_tool(

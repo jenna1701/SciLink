@@ -9,8 +9,6 @@ import cv2
 from typing import Callable
 
 import traceback
-import matplotlib.pyplot as plt
-from io import BytesIO
 
 from ....tools import hyperspectral_tools as tools
 from ....tools.image_processor import load_image
@@ -21,79 +19,98 @@ from ..instruct import (
     SPECTROSCOPY_REFINEMENT_INSTRUCTIONS,
     SPECTROSCOPY_HOLISTIC_SYNTHESIS_INSTRUCTIONS,
     SPECTROSCOPY_REFLECTION_INSTRUCTIONS,
-    SPECTROSCOPY_REFLECTION_UPDATE_INSTRUCTIONS
+    SPECTROSCOPY_REFLECTION_UPDATE_INSTRUCTIONS,
+    SPECTROSCOPY_VALIDATION_INTERPRETATION_INSTRUCTIONS,  
+    SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS,                  
 )
 
 from ....tools.hyperspectral_tools import AGENT_METADATA_KEYS_TO_STRIP
+from ....executors import ExecutionTimeout
 
 
+def build_code_generation_prompt(
+    target_desc: str,
+    h: int, w: int, e: int,
+    axis_units: str,
+    axis_start: float,
+    axis_end: float,
+    processing_note: str
+) -> str:
+    return f"""
+You are a Python Data Scientist specialized in Spectroscopy. 
+The standard NMF tool failed to model a spectral feature described as: "{target_desc}".
+
+Your task: Write a Python function to mathematically model this feature. 
+Since complex features often require multiple parameters (e.g., Peak Position AND Peak Width), your function must be able to return MULTIPLE maps.
+
+### 1. DATA CONTEXT
+- Input Data `hspy_data`: Shape ({h}, {w}, {e}) (Numpy array)
+- X-Axis `axis`: Shape ({e},) (Numpy array). **Units: {axis_units}**
+- **Axis Range:** {axis_start:.2f} to {axis_end:.2f} {axis_units}
+
+### 2. EXECUTION ENVIRONMENT (STRICT)
+Your code will run in a restricted `exec()` sandbox. 
+
+**PRE-IMPORTED LIBRARIES (Available Globally):**
+- `np`: The full NumPy library.
+- `scipy`: The top-level SciPy module.
+- `sklearn`: The top-level Scikit-Learn module.
+
+**PRE-IMPORTED FUNCTIONS (Direct Shortcuts):**
+- `curve_fit`, `nnls` (from scipy.optimize)
+- `linregress` (from scipy.stats)
+- `find_peaks` (from scipy.signal)
+- `gaussian_filter` (from scipy.ndimage)
+
+### 3. CODING CONSTRAINTS
+1. **NO External Imports:** Do not import `os`, `sys`, `matplotlib`, or `warnings`. The sandbox does not support them.
+2. **SciPy Submodules:** If you need a specific SciPy submodule that is NOT in the shortcuts list (e.g., `scipy.interpolate` or `scipy.integrate`), you MUST write `import scipy.interpolate` **inside** your function definition before using it.
+3. **Standard Math:** Use `np.exp`, `np.log`, etc., instead of the `math` library.
+4. **Return Format:** You must return a dictionary, not a print statement or a plot.
+
+### 4. YOUR GOAL
+Write a function `analyze_feature(data, axis)` that:
+1. Reshapes data to (pixels, energy).
+2. Implements the specific math required.
+3. Returns a DICTIONARY containing the results.
+
+### ADDITIONAL NOTES
+The variable `hspy_data` passed to your function contains: **{processing_note}**.
+However, even with pre-processing, experimental data often contains high-frequency shot noise (jitter).
+If you are performing derivative-based operations (like `find_peaks` or `curve_fit`), it is advisable to apply a light smoothing filter
+(e.g., `gaussian_filter(..., sigma=1-2)`) to ensure convergence.
+
+### REQUIRED RETURN FORMAT
+{{
+    "maps": {{
+        "Feature_Name_1": np.ndarray, 
+        "Feature_Name_2": np.ndarray
+    }},
+    "units": {{                 
+        "Feature_Name_1": "{axis_units}",
+        "Feature_Name_2": "a.u."
+    }},    
+    "description": "Brief physics explanation"
+}}
+
+### RESPONSE FORMAT
+Return a JSON object with:
+- "code": The valid Python code string.
+- "explanation": Brief logic summary.
+"""
+
+def _fmt(val, fmt=".4f"):
+    """Format a numeric value, or return 'N/A'."""
+    try:
+        return f"{val:{fmt}}"
+    except (ValueError, TypeError):
+        return "N/A"
+    
 def _sanitize_filename(text: str) -> str:
     """Helper to create safe filenames from labels."""
     # Replace spaces with underscores, remove non-alphanumeric chars except _ and -
     safe_text = re.sub(r'[^\w\-\_]', '', text.replace(" ", "_"))
     return safe_text
-
-def _create_grid_from_images(image_bytes_list: list, logger: logging.Logger) -> bytes:
-    """
-    Stitches a list of JPEG bytes into a single grid image using OpenCV.
-    Used to create a 'Validated Summary Grid' from individual validated plots.
-    """
-    if not image_bytes_list:
-        return None
-        
-    try:
-        # Decode all images
-        images = []
-        for b in image_bytes_list:
-            nparr = np.frombuffer(b, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            if img is not None:
-                images.append(img)
-        
-        if not images:
-            return None
-
-        n_imgs = len(images)
-        
-        # If only one, return it directly (re-encoded)
-        if n_imgs == 1:
-            return image_bytes_list[0]
-
-        # Determine grid size (target ~2 columns)
-        cols = 2
-        rows = (n_imgs + cols - 1) // cols
-        
-        # Find max dimensions to standardize cells
-        max_h = max(img.shape[0] for img in images)
-        max_w = max(img.shape[1] for img in images)
-        
-        # Create blank canvas
-        grid_h = rows * max_h
-        grid_w = cols * max_w
-        grid_img = np.zeros((grid_h, grid_w, 3), dtype=np.uint8) + 255 # White background
-        
-        for idx, img in enumerate(images):
-            r = idx // cols
-            c = idx % cols
-            
-            # Resize current img to fit cell if needed (maintain aspect ratio logic could go here, 
-            # but usually plots are uniform size. We'll center it.)
-            h, w = img.shape[:2]
-            
-            y_offset = r * max_h
-            x_offset = c * max_w
-            
-            # Simple copy (top-left alignment for simplicity, or center)
-            grid_img[y_offset:y_offset+h, x_offset:x_offset+w] = img
-            
-        # Encode back to jpeg
-        retval, buf = cv2.imencode('.jpg', grid_img, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        return buf.tobytes()
-
-    except Exception as e:
-        logger.warning(f"Failed to stitch validation grid: {e}")
-        return None
-
 
 class RunPreprocessingController:
     """
@@ -438,14 +455,19 @@ class RunFinalSpectralUnmixingController:
 class CreateAnalysisPlotsController:
     """
     [🛠️ Tool Step]
-    Generates high-quality visualization pairs for the Agent.
+    Generates high-quality validation plots using reconstruction comparison.
+    
+    UPDATED: Now uses create_validated_component_pair_reconstruction() 
+    to fix the "all components look the same" problem.
     """
     def __init__(self, logger: logging.Logger, settings: dict):
         self.logger = logger
         self.settings = settings
 
     def execute(self, state: dict) -> dict:
-        if state.get("error_dict"): return state
+        if state.get("error_dict"): 
+            return state
+            
         self.logger.info("\n\n🛠️ --- CALLING TOOL: CREATE ANALYSIS PLOTS --- 🛠️\n")
         
         components = state.get("final_components")
@@ -463,22 +485,32 @@ class CreateAnalysisPlotsController:
         final_plots = []
         validated_bytes_list = [] 
         
-        # --- 1. Generate Validated Pairs ---
-        self.logger.info(f"Generating Validated Analysis Plots for {components.shape[0]} components...")
+        # --- 1. Generate Validated Reconstruction Plots ---
+        self.logger.info(
+            f"Generating High-Purity Reconstruction Validation Plots "
+            f"for {components.shape[0]} components..."
+        )
         
         for i in range(components.shape[0]):
-            plot_bytes = tools.create_validated_component_pair(
-                state["hspy_data"], 
-                components[i], 
-                abundance_maps[..., i], 
-                i, 
+            result = tools.create_validated_component_pair_reconstruction(
+                state["hspy_data"],       # Raw data
+                components,               # ALL components (needed for reconstruction)
+                abundance_maps,           # ALL abundance maps
+                i,                        # Current component index
                 state["system_info"],
-                self.logger
+                self.logger,
+                purity_percentile=90.0,   # Top 10% (adjustable)
+                show_basis_component=True # Show orange reference line
             )
+
+            if result is not None:
+                plot_bytes, metrics = result
+            else:
+                plot_bytes, metrics = None, {}
             
             if plot_bytes:
                 label = f"Component {i+1} Analysis"
-                final_plots.append({'label': label, 'bytes': plot_bytes})
+                final_plots.append({'label': label, 'bytes': plot_bytes, 'metrics': metrics})
                 validated_bytes_list.append(plot_bytes)
                 
                 # Save using tool
@@ -490,8 +522,7 @@ class CreateAnalysisPlotsController:
 
         state["component_pair_plots"] = final_plots
         for plot in final_plots:
-            state["analysis_images"].append({"label": plot['label'], "data": plot['bytes']})
-
+            state["analysis_images"].append({"label": plot['label'], "data": plot['bytes'], "metrics": plot.get('metrics', {})})
         # --- 2. Create Summary Grid ---
         try:
             self.logger.info("  (Tool Info: Stitching validated plots into Summary Grid...)")
@@ -509,15 +540,15 @@ class CreateAnalysisPlotsController:
         except Exception as e:
             self.logger.warning(f"Failed to create/save NMF summary plot: {e}")
 
-        # --- 3. Structure Overlays ---
+        # --- 3. Structure Overlays (UNCHANGED) ---
         if state.get("structure_image_path"):
             try:
-                # Load image (Controller logic)
+                # Load image
                 structure_img = load_image(state["structure_image_path"])
                 if structure_img.ndim == 3:
                     structure_img = cv2.cvtColor(structure_img, cv2.COLOR_RGB2GRAY)
                 
-                # Create (Tool logic)
+                # Create overlays
                 overlay_bytes = tools.create_multi_abundance_overlays(
                     structure_img, abundance_maps, threshold_percentile=85.0 
                 )
@@ -547,89 +578,96 @@ class BuildHyperspectralPromptController:
         self.logger = logger
 
     def execute(self, state: dict) -> dict:
-        if state.get("error_dict"): return state
+        if state.get("error_dict"): 
+            return state
         self.logger.info("\n\n📝 --- PREP STEP: BUILDING FINAL PROMPT --- 📝\n")
         
         # 1. Base Instruction & Context
         prompt_parts = [state["instruction_prompt"]]
 
+        # 2. Parent Reasoning (if this is a refinement)
         if state.get("parent_refinement_reasoning"):
-            prompt_parts.append("\n\n### 🔍 CONTEXT: Why are we performing this focused analysis?")
-            prompt_parts.append(f"**Reasoning from previous step:** \"{state['parent_refinement_reasoning']}\"")
-            prompt_parts.append("Use this context to guide your interpretation.")
+            prompt_parts.append(f"""
+
+### 🔍 CONTEXT: Why are we performing this focused analysis?
+
+**Reasoning from previous step:** "{state['parent_refinement_reasoning']}"
+
+Use this context to guide your interpretation.
+""")
         
-        # 2. Data Metadata
+        # 3. Data Metadata
         h, w, e = state["hspy_data"].shape
         _, energy_xlabel, _ = tools.create_energy_axis(e, state["system_info"])
         
-        prompt_parts.append(f"\n\nHyperspectral Data Information:")
-        prompt_parts.append(f"- Data shape: ({h}, {w}, {e})")
-        prompt_parts.append(f"- X-axis: {energy_xlabel}")
+        metadata_info = f"""
+
+Hyperspectral Data Information:
+- Data shape: ({h}, {w}, {e})
+- X-axis: {energy_xlabel}
+"""
         
         if state.get("final_components") is not None:
-            prompt_parts.append(f"- Spectral unmixing method: {state['settings'].get('method', 'nmf').upper()}")
-            prompt_parts.append(f"- Number of components: {state['final_n_components']}")
-            prompt_parts.append(f"- Final Reconstruction Error: {state.get('final_reconstruction_error', 'N/A'):.4f}")
+            metadata_info += f"""- Spectral unmixing method: {state['settings'].get('method', 'nmf').upper()}
+- Number of components: {state['final_n_components']}
+- Final Reconstruction Error: {_fmt(state.get('final_reconstruction_error'))}
+"""
+        
+        prompt_parts.append(metadata_info)
 
-        # 3. Component Analysis (Dynamic Instructions)
+        # 4. Component Analysis (Dynamic Instructions based on depth)
         current_depth = state.get("current_depth", 0)
         
         if state.get("component_pair_plots"):
             prompt_parts.append("\n\n**Spectral Component Analysis:**")
             
             if current_depth == 0:
-                # Standard Instructions for Depth 0
-                prompt_parts.append("Below are the NMF components extracted from the global dataset.")
-                prompt_parts.append("For each component, the LEFT image is the Spectral Signature and the RIGHT image is the Spatial Abundance.")
+                # Standard Instructions for Global Analysis
+                prompt_parts.append("""
+Below are the NMF components extracted from the global dataset.
+For each component, the LEFT image is the Spectral Signature and the RIGHT image is the Spatial Abundance.
+""")
             else:
-                # Validation Instructions for Depth > 0
-                prompt_parts.append("### 🧪 Quantitative Validation Mode (Split-Panel Analysis)")
-                prompt_parts.append("Because this is a focused refinement, the plots are more detailed to help you detect artifacts.")
-                prompt_parts.append("Each figure contains:")
-                
-                prompt_parts.append("\n**1. LEFT: Spatial Distribution**")
-                prompt_parts.append("- Shows where this component is located physically.")
-                
-                prompt_parts.append("\n**2. RIGHT (TOP PANEL): Spectral Fit & Variance**")
-                prompt_parts.append("- **Black Line (Mean):** The abundance-weighted average spectrum of the raw data (Ground Truth).")
-                prompt_parts.append("- **Red Dashed Line (Model):** The NMF component (Mathematical Model).")
-                prompt_parts.append(r"- **Blue Shaded Band:** The Weighted Standard Deviation ($\pm 1\sigma$). This represents the natural heterogeneity of the data in this region.")
-                
-                prompt_parts.append("\n**3. RIGHT (BOTTOM PANEL): Residuals**")
-                prompt_parts.append("- **Gray Area:** The difference between the Data and the Model.")
-
-                prompt_parts.append("\n### ⚠️ CRITICAL INTERPRETATION RULES")
-                prompt_parts.append("Use the **Blue Band** to distinguish between 'Messy Data' and 'Bad Model':")
-                prompt_parts.append("1. **Valid Fit:** If the Red Line (Model) stays mostly **INSIDE** the Blue Band, the component is valid, even if it doesn't match the Black Line perfectly. The mismatch is just natural variation.")
-                prompt_parts.append("2. **Hallucination (Artifact):** If the Red Line creates a peak that goes significantly **OUTSIDE** the Blue Band (and the Black Line is flat there), NMF has 'invented' a feature. **Reject this feature.**")
-                prompt_parts.append("3. **Missed Physics:** If the Bottom Panel (Residual) shows a large, structured peak, NMF failed to capture a real physical/chemical feature present in the data.")
+                prompt_parts.append(SPECTROSCOPY_VALIDATION_INTERPRETATION_INSTRUCTIONS)
 
             # Append the plots
             for plot in state["component_pair_plots"]:
+                metrics = plot.get('metrics', {})
                 prompt_parts.append(f"\n{plot['label']}:")
+                if metrics:
+                    prompt_parts.append(f"  Reconstruction RMSE: {_fmt(metrics.get('rmse'))}")
+                    prompt_parts.append(f"  Cosine Similarity (Measured vs Reconstruction): {_fmt(metrics.get('cosine_similarity'))}")
+                    prompt_parts.append(f"  Cosine Similarity (Measured vs Basis): {_fmt(metrics.get('basis_cosine_similarity'))}")
+                    prompt_parts.append(f"  High-Purity Region: {_fmt(metrics.get('purity_pixel_percent'), '.1f')}% of pixels")
+                    prompt_parts.append(f"  Residual Autocorrelation: {_fmt(metrics.get('residual_autocorrelation'), '.3f')}")
                 prompt_parts.append({"mime_type": "image/jpeg", "data": plot['bytes']})
 
-        # 4. Structure Overlays (if available)
+        # 5. Structure Overlays (if available)
         if state.get("structure_overlay_bytes"):
-            prompt_parts.append("\n\n**Structure-Abundance Correlation Analysis:**")
-            prompt_parts.append("Overlays showing where components are concentrated on the structural image.")
+            prompt_parts.append("""
+
+**Structure-Abundance Correlation Analysis:**
+Overlays showing where components are concentrated on the structural image.
+""")
             prompt_parts.append({"mime_type": "image/jpeg", "data": state["structure_overlay_bytes"]})
             
             # Ensure storage for synthesis
             found = False
             for img in state.get("analysis_images", []):
-                if img.get("label") == "Structure-Abundance Overlays": found = True
+                if img.get("label") == "Structure-Abundance Overlays": 
+                    found = True
             if not found:
                 state["analysis_images"].append({
                     "label": "Structure-Abundance Overlays",
                     "data": state["structure_overlay_bytes"]
                 })
 
-        # 5. System Metadata & Formatting
+        # 6. System Metadata
         if state.get("system_info"):
             sys_info_str = json.dumps(state["system_info"], indent=2)
             prompt_parts.append(f"\n\nAdditional System Information (Metadata):\n{sys_info_str}")
 
+        # 7. Final instructions
         prompt_parts.append("\n\nProvide your analysis in the requested JSON format.")
         
         state["final_prompt_parts"] = prompt_parts
@@ -670,10 +708,13 @@ class SelectRefinementTargetController:
             prompt_parts.append("(No visual results available)")
         
         for img in analysis_images:
-            # Robustly get bytes
-            image_bytes = img.get('data') or img.get('bytes') 
+            image_bytes = img.get('data') or img.get('bytes')
             if image_bytes:
                 prompt_parts.append(f"\n{img['label']}:")
+                # Surface metrics if available (from component plots)
+                metrics = img.get('metrics', {})
+                if metrics:
+                    prompt_parts.append(f"  CosSim: {_fmt(metrics.get('cosine_similarity'))} | Residual AutoCorr: {_fmt(metrics.get('residual_autocorrelation'), '.3f')}")
                 prompt_parts.append({"mime_type": "image/jpeg", "data": image_bytes})
             else:
                 self.logger.warning(f"Could not find image bytes for plot: {img.get('label')}")
@@ -1222,6 +1263,15 @@ class RunDynamicAnalysisController:
     """
     [🧠 + 💻] The 'Code Interpreter' / 'Dynamic Analyst'.
     Generates, executes, and validates Python code to model spectral features.
+
+    Unlike for other agents, we use in-process exec() because:
+
+    - Hyperspectral cubes are large (100MB+). Serializing to disk for a
+      subprocess to reload would add significant I/O overhead.
+    - The generated code is a pure function (data in → arrays out), not a
+      standalone program that needs matplotlib or file I/O.
+    - Results are numpy arrays that would be painful to serialize via stdout.
+
     """
     MAX_RETRIES = 5
     SUCCESS_THRESHOLD = 0.5  # If >50% of maps in a script pass QC, accept the run.
@@ -1288,69 +1338,14 @@ class RunDynamicAnalysisController:
             self.logger.info(f"👉 Task {i}/{len(custom_targets)}: {target_desc}")
 
             # 1. Define Prompt for this specific task
-            base_prompt = f"""
-            You are a Python Data Scientist specialized in Spectroscopy. 
-            The standard NMF tool failed to model a spectral feature described as: "{target_desc}".
-            
-            Your task: Write a Python function to mathematically model this feature. 
-            Since complex features often require multiple parameters (e.g., Peak Position AND Peak Width), your function must be able to return MULTIPLE maps.
-
-            ### 1. DATA CONTEXT
-            - Input Data `hspy_data`: Shape ({h}, {w}, {e}) (Numpy array)
-            - X-Axis `axis`: Shape ({e},) (Numpy array). **Units: {axis_units}**
-            - **Axis Range:** {state['energy_axis'][0]:.2f} to {state['energy_axis'][-1]:.2f} {axis_units}
-
-            ### 2. EXECUTION ENVIRONMENT (STRICT)
-            Your code will run in a restricted `exec()` sandbox. 
-            
-            **PRE-IMPORTED LIBRARIES (Available Globally):**
-            - `np`: The full NumPy library.
-            - `scipy`: The top-level SciPy module.
-            - `sklearn`: The top-level Scikit-Learn module.
-            
-            **PRE-IMPORTED FUNCTIONS (Direct Shortcuts):**
-            - `curve_fit`, `nnls` (from scipy.optimize)
-            - `linregress` (from scipy.stats)
-            - `find_peaks` (from scipy.signal)
-            - `gaussian_filter` (from scipy.ndimage)
-
-            ### 3. CODING CONSTRAINTS
-            1. **NO External Imports:** Do not import `os`, `sys`, `matplotlib`, or `warnings`. The sandbox does not support them.
-            2. **SciPy Submodules:** If you need a specific SciPy submodule that is NOT in the shortcuts list (e.g., `scipy.interpolate` or `scipy.integrate`), you MUST write `import scipy.interpolate` **inside** your function definition before using it.
-            3. **Standard Math:** Use `np.exp`, `np.log`, etc., instead of the `math` library.
-            4. **Return Format:** You must return a dictionary, not a print statement or a plot.
-
-
-            ### 4. YOUR GOAL
-            Write a function `analyze_feature(data, axis)` that:
-            1. Reshapes data to (pixels, energy).
-            2. Implements the specific math required.
-            3. Returns a DICTIONARY containing the results.
-
-            ### ADDITIONAL NOTES
-            The variable `hspy_data` passed to your function contains: **{processing_note}**.
-            However, even with pre-processing, experimental data often contains high-frequency shot noise (jitter).
-            If you are performing derivative-based operations (like `find_peaks` or `curve_fit`), it is advisable to apply a light smoothing filter
-            (e.g., `gaussian_filter(..., sigma=1-2)`) to ensure convergence.
-
-            ### REQUIRED RETURN FORMAT
-            {{
-                "maps": {{
-                    "Feature_Name_1": np.ndarray, 
-                    "Feature_Name_2": np.ndarray
-                }},
-                "units": {{                 
-                    "Feature_Name_1": "{axis_units}",
-                    "Feature_Name_2": "a.u."
-                }},    
-                "description": "Brief physics explanation"
-            }}
-
-            ### RESPONSE FORMAT
-            Return a JSON object with:
-            - "code": The valid Python code string.
-            - "explanation": Brief logic summary.
-            """
+            base_prompt = build_code_generation_prompt(
+                target_desc=target_desc,
+                h=h, w=w, e=e,
+                axis_units=axis_units,
+                axis_start=state['energy_axis'][0],
+                axis_end=state['energy_axis'][-1],
+                processing_note=processing_note
+            )
 
             current_prompt = base_prompt
             retries = 0
@@ -1385,15 +1380,16 @@ class RunDynamicAnalysisController:
                     }
                     
                     # Execute Code
-                    exec(code_str, global_scope, local_scope)
+                    with ExecutionTimeout(seconds=120):
+                        exec(code_str, global_scope, local_scope)
                     
-                    if "analyze_feature" not in local_scope:
-                        raise ValueError("Function 'analyze_feature' was not found in generated code.")
-                    
-                    # --- D. RUN ON DATA ---
-                    self.logger.info("    Executing generated code...")
-                    func = local_scope["analyze_feature"]
-                    result_dict = func(optimal_data, state["energy_axis"])
+                        if "analyze_feature" not in local_scope:
+                            raise ValueError("Function 'analyze_feature' was not found in generated code.")
+                        
+                        # --- D. RUN ON DATA ---
+                        self.logger.info("    Executing generated code...")
+                        func = local_scope["analyze_feature"]
+                        result_dict = func(optimal_data, state["energy_axis"])
                     
                     # Validation
                     if not isinstance(result_dict, dict): raise ValueError("Function return must be a dict.")
@@ -1517,31 +1513,8 @@ class RunDynamicAnalysisController:
         Judge the Dashboard (Map + Histogram) with SPARSE SIGNAL AWARENESS.
         """
         check_prompt = [
-            f"You are a Quality Assurance Scientist. You wrote code to model the feature: '{feature_desc}'.",
-            "Below is the resulting 'Feature Dashboard'. Left=Map, Right=Histogram.",
-            
-            "\n### YOUR TASK",
-            "Determine if this result captures a REAL physical signal, even if that signal is rare or sparse.",
-            
-            "\n### CRITICAL: HANDLING SPARSE SIGNALS",
-            "In spectroscopy, some features (like impurities) only exist in small regions.",
-            "If the Histogram shows a large pile-up at zero/bounds (background) BUT there is a distinct, smaller population distribution elsewhere, **THIS IS VALID.**",
-            
-            "\n### FAILURE CRITERIA (Reject ONLY if these are true):",
-            "1. **Total Noise:** The map is pure 'static' (salt-and-pepper) with ZERO recognizable structure.",
-            "2. **Total Algorithm Failure:** The histogram is a **SINGLE** sharp spike (Dirac delta) containing 100% of the data.",
-            "3. **Complete Rail-Gazing:** The data is piled up at the min/max edges with **NO secondary distribution** visible.",
-            
-            "\n### SUCCESS CRITERIA (Accept if present):",
-            "- **Structure:** Does the map show ANY structured domains, even if they are small?",
-            "- **Population:** Is there a visible distribution (bell curve, tail, or cluster) separate from the background spike?",
-            
-            "\n### OUTPUT FORMAT",
-            "Return a JSON object with:",
-            "- 'valid': boolean",
-            "- 'critique': string (Briefly explain decision)"
+            SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS.format(feature_desc=feature_desc)
         ]
-        
         check_prompt.append({"mime_type": "image/jpeg", "data": dashboard_bytes})
         
         try:

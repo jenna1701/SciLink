@@ -491,6 +491,348 @@ def create_validated_component_pair(
     except Exception as e:
         logger.error(f"Failed to create validated pair: {e}")
         return None
+    
+
+def create_validated_component_pair_reconstruction(
+    hspy_data: np.ndarray, 
+    components: np.ndarray,           
+    abundance_maps: np.ndarray,       
+    component_idx: int,
+    system_info: dict,
+    logger: logging.Logger,
+    purity_percentile: float = 90.0,
+    show_basis_component: bool = True
+) -> tuple[bytes, dict] | None:
+    """
+    Validates NMF by comparing raw data to NMF reconstruction in high-purity regions.
+    
+    This addresses the "all components look the same" problem by:
+    1. Masking to high-purity regions (adaptive or top 10% abundance by default)
+    2. Comparing raw data vs. full NMF reconstruction (apples-to-apples)
+    3. Showing the basis component as reference
+    
+    Args:
+        hspy_data: Raw hyperspectral data (H, W, E)
+        components: ALL NMF components (n_components, E)
+        abundance_maps: ALL abundance maps (H, W, n_components)
+        component_idx: Which component to validate (0-indexed)
+        system_info: Metadata for axis calibration
+        logger: Logger instance
+        purity_percentile: Threshold for high-purity masking (default 90 = top 10%)
+        show_basis_component: Whether to show the orange reference line
+    
+    Returns:
+        Tuple of (JPEG bytes, metrics dict), or None if failed.
+        Metrics dict contains: rmse, max_error, cosine_similarity,
+        basis_cosine_similarity, purity_pixel_percent, residual_autocorrelation
+    """
+    try:
+        h, w, e = hspy_data.shape
+        n_components = components.shape[0]
+        energy_axis, xlabel, _ = create_energy_axis(e, system_info)
+        
+        # Extract this component's data
+        component_spectrum = components[component_idx]
+        abundance_map = abundance_maps[..., component_idx]
+        
+        # =================================================================
+        # STEP 1: COMPUTE FULL NMF RECONSTRUCTION
+        # =================================================================
+        nmf_reconstruction = np.zeros_like(hspy_data)
+        for i in range(n_components):
+            nmf_reconstruction += abundance_maps[..., i, np.newaxis] * components[i]
+        
+        # =================================================================
+        # STEP 2: ADAPTIVE HIGH-PURITY THRESHOLD
+        # =================================================================
+        flat_abundance_all = abundance_map.ravel()
+        positive_values = flat_abundance_all[flat_abundance_all > 1e-6]
+        
+        if len(positive_values) > 0:
+            median_val = np.median(positive_values)
+            mean_val = np.mean(positive_values)
+            
+            # Skewness heuristic: if mean >> median, distribution has a long tail
+            # (localized feature) — use stricter threshold to isolate the tail
+            if mean_val > 2 * median_val:
+                threshold = mean_val + np.std(positive_values)
+                threshold_method = "adaptive-localized"
+                logger.info(
+                    f"  Component {component_idx+1}: Adaptive threshold "
+                    f"(localized feature): {threshold:.4f}"
+                )
+            else:
+                threshold = np.percentile(abundance_map, purity_percentile)
+                threshold_method = "standard-percentile"
+                logger.info(
+                    f"  Component {component_idx+1}: Standard threshold "
+                    f"({purity_percentile}th percentile): {threshold:.4f}"
+                )
+        else:
+            threshold = np.percentile(abundance_map, purity_percentile)
+            threshold_method = "standard-percentile"
+        
+        high_purity_mask_2d = (abundance_map >= threshold)
+        
+        n_pixels_selected = np.sum(high_purity_mask_2d)
+        if n_pixels_selected == 0:
+            logger.warning(
+                f"Component {component_idx+1}: No pixels exceed threshold. "
+                f"Method: {threshold_method}"
+            )
+            return None
+        
+        purity_pixel_percent = 100.0 * n_pixels_selected / (h * w)
+        logger.info(
+            f"  Component {component_idx+1}: Using {n_pixels_selected} pixels "
+            f"({purity_pixel_percent:.1f}% of data)"
+        )
+        
+        # =================================================================
+        # STEP 3: EXTRACT HIGH-PURITY PIXELS
+        # =================================================================
+        flat_raw_data = hspy_data.reshape(-1, e)
+        flat_nmf_reconstruction = nmf_reconstruction.reshape(-1, e)
+        flat_abundance = abundance_map.ravel()
+        flat_mask = high_purity_mask_2d.ravel()
+        
+        high_purity_raw = flat_raw_data[flat_mask]
+        high_purity_nmf = flat_nmf_reconstruction[flat_mask]
+        high_purity_abundance = flat_abundance[flat_mask]
+        
+        # =================================================================
+        # STEP 4: COMPUTE WEIGHTED MEANS
+        # =================================================================
+        total_weight = np.sum(high_purity_abundance)
+        
+        # Ground truth: Weighted mean of RAW data
+        weighted_raw_spectrum = np.dot(high_purity_abundance, high_purity_raw) / total_weight
+        
+        # Model prediction: Weighted mean of NMF RECONSTRUCTION
+        weighted_nmf_spectrum = np.dot(high_purity_abundance, high_purity_nmf) / total_weight
+        
+        # =================================================================
+        # STEP 5: COMPUTE VARIANCE
+        # =================================================================
+        variance_sq = np.average(
+            (high_purity_raw - weighted_raw_spectrum)**2, 
+            axis=0, 
+            weights=high_purity_abundance
+        )
+        std_dev = np.sqrt(variance_sq)
+        
+        # =================================================================
+        # STEP 6: COMPUTE RESIDUALS
+        # =================================================================
+        residual = weighted_raw_spectrum - weighted_nmf_spectrum
+        
+        # =================================================================
+        # STEP 7: SCALE BASIS COMPONENT (Area-based normalization)
+        # =================================================================
+        if show_basis_component:
+            raw_area = np.trapezoid(weighted_raw_spectrum)
+            basis_area = np.trapezoid(component_spectrum)
+            scale_factor = raw_area / (basis_area + 1e-10)
+            scaled_basis_component = component_spectrum * scale_factor
+        
+        # =================================================================
+        # STEP 8: COMPUTE QUANTITATIVE METRICS
+        # =================================================================
+        rmse = float(np.sqrt(np.mean(residual**2)))
+        max_error = float(np.max(np.abs(residual)))
+        
+        # Cosine similarity: measured vs reconstruction
+        norm_raw = np.linalg.norm(weighted_raw_spectrum)
+        norm_nmf = np.linalg.norm(weighted_nmf_spectrum)
+        cosine_similarity = float(
+            np.dot(weighted_raw_spectrum, weighted_nmf_spectrum) 
+            / (norm_raw * norm_nmf + 1e-10)
+        )
+        
+        # Cosine similarity: measured vs basis component
+        if show_basis_component:
+            norm_basis = np.linalg.norm(scaled_basis_component)
+            basis_cosine_similarity = float(
+                np.dot(weighted_raw_spectrum, scaled_basis_component) 
+                / (norm_raw * norm_basis + 1e-10)
+            )
+        else:
+            basis_cosine_similarity = None
+        
+        # Residual autocorrelation (detects structured residuals)
+        if len(residual) > 2:
+            residual_autocorrelation = float(
+                np.corrcoef(residual[:-1], residual[1:])[0, 1]
+            )
+        else:
+            residual_autocorrelation = 0.0
+        
+        metrics = {
+            "rmse": rmse,
+            "max_error": max_error,
+            "cosine_similarity": cosine_similarity,
+            "basis_cosine_similarity": basis_cosine_similarity,
+            "purity_pixel_percent": purity_pixel_percent,
+            "residual_autocorrelation": residual_autocorrelation,
+            "threshold_method": threshold_method,
+            "n_pixels_selected": int(n_pixels_selected),
+        }
+        
+        # =================================================================
+        # PLOTTING
+        # =================================================================
+        fig = plt.figure(figsize=(14, 6))
+        gs = gridspec.GridSpec(2, 2, height_ratios=[3, 1], width_ratios=[1, 1.5])
+        
+        # -----------------------------------------------------------------
+        # PANEL 1: SPATIAL MAP WITH HIGH-PURITY CONTOUR
+        # -----------------------------------------------------------------
+        ax_map = fig.add_subplot(gs[:, 0])
+        
+        im = ax_map.imshow(abundance_map, cmap='viridis')
+        ax_map.set_title(
+            f"Component {component_idx+1} Abundance Map\n"
+            f"Red Contour = High-Purity Region ({purity_pixel_percent:.1f}% of pixels)",
+            fontsize=11, fontweight='bold'
+        )
+        ax_map.axis('off')
+        
+        # Overlay high-purity contour
+        ax_map.contour(
+            high_purity_mask_2d, 
+            levels=[0.5], 
+            colors='red', 
+            linewidths=2.5, 
+            linestyles='--'
+        )
+        
+        plt.colorbar(im, ax=ax_map, fraction=0.046, pad=0.04, label='Abundance')
+        
+        # Pixel count annotation
+        ax_map.text(
+            0.02, 0.02, 
+            f"{n_pixels_selected} pixels\n({purity_pixel_percent:.1f}% of data)",
+            transform=ax_map.transAxes,
+            fontsize=9, 
+            color='red', 
+            weight='bold',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
+        )
+        
+        # -----------------------------------------------------------------
+        # PANEL 2: MAIN SPECTRUM PLOT
+        # -----------------------------------------------------------------
+        ax_spec = fig.add_subplot(gs[0, 1])
+
+        # 1. Variance band (background)
+        ax_spec.fill_between(
+            energy_axis, 
+            weighted_raw_spectrum - std_dev, 
+            weighted_raw_spectrum + std_dev, 
+            color='lightblue',
+            alpha=0.3,
+            label='Natural Variance (±1σ)',
+            zorder=1
+        )
+
+        # 2. Orange basis component
+        if show_basis_component:
+            ax_spec.plot(
+                energy_axis, 
+                scaled_basis_component, 
+                color='darkorange',
+                linestyle=':', 
+                linewidth=4,
+                alpha=1.0,
+                label=f'NMF Basis Component {component_idx+1}',
+                zorder=2,
+            )
+
+        # 3. Red reconstruction
+        ax_spec.plot(
+            energy_axis, 
+            weighted_nmf_spectrum, 
+            color='red', 
+            linestyle='--', 
+            linewidth=4,
+            dashes=(8, 4),
+            alpha=1.0,
+            label='NMF Reconstruction',
+            zorder=4
+        )
+
+        # 4. Black measured (semi-transparent so red/orange show through)
+        ax_spec.plot(
+            energy_axis, 
+            weighted_raw_spectrum, 
+            color='black', 
+            linewidth=2.5,
+            alpha=0.6,
+            label='Measured Spectrum',
+            zorder=5
+        )
+
+        ax_spec.set_title(
+            "High-Purity Region: Measured vs. NMF Reconstruction", 
+            fontsize=12, 
+            fontweight='bold'
+        )
+        ax_spec.legend(loc='best', fontsize=9, framealpha=0.9)
+        ax_spec.grid(True, alpha=0.3)
+        ax_spec.set_ylabel("Intensity", fontsize=10)
+        plt.setp(ax_spec.get_xticklabels(), visible=False)
+        
+        # -----------------------------------------------------------------
+        # PANEL 3: RESIDUAL PLOT
+        # -----------------------------------------------------------------
+        ax_res = fig.add_subplot(gs[1, 1], sharex=ax_spec)
+        
+        ax_res.axhline(0, color='black', linewidth=1, alpha=0.5)
+        
+        ax_res.plot(energy_axis, residual, color='gray', linewidth=1.5)
+        ax_res.fill_between(energy_axis, residual, 0, color='gray', alpha=0.3)
+        
+        # Statistics annotation
+        ax_res.text(
+            0.98, 0.95, 
+            f"RMSE: {rmse:.2f}\nMax |Error|: {max_error:.2f}",
+            transform=ax_res.transAxes,
+            fontsize=9, 
+            verticalalignment='top', 
+            horizontalalignment='right',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+        )
+        
+        ax_res.set_ylabel("Residual\n(Measured - Reconstructed)", fontsize=10)
+        ax_res.set_xlabel(xlabel, fontsize=10)
+        ax_res.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        # =================================================================
+        # SAVE & RETURN
+        # =================================================================
+        buf = BytesIO()
+        plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+        plt.close()
+        buf.seek(0)
+        
+        logger.info(
+            f"  Component {component_idx+1}: Validation plot created. "
+            f"RMSE={rmse:.3f}, Max Error={max_error:.3f}, "
+            f"CosSim={cosine_similarity:.4f}, "
+            f"ResidualAutoCorr={residual_autocorrelation:.3f}"
+        )
+        
+        return resize_image_bytes(buf.getvalue()), metrics
+        
+    except Exception as e:
+        logger.error(
+            f"Failed to create reconstruction validation plot for "
+            f"component {component_idx+1}: {e}",
+            exc_info=True
+        )
+        return None
 
 
 def create_annotated_heatmap(data_map: np.ndarray, title: str, units: str) -> bytes:

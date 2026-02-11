@@ -105,6 +105,17 @@ METADATA_SCHEMA_DICT = {
         "ylabel": {
             "type": ["string", "null"], # Optional
             "description": "Suggested Y-axis label, including units (Primarily for 1D Curves)."
+        },
+        "custom_processing_instruction": {
+            "type": ["string", "null"],
+            "description": (
+                "A natural language instruction for custom data preprocessing. "
+                "Use when the user describes a non-standard preprocessing step such as "
+                "baseline division/subtraction using an external reference file, "
+                "custom normalization, background correction with a specific method, etc. "
+                "Should include file paths if referencing external data. "
+                "Example: 'Divide each spectrum by the baseline in /data/reference.npy and set inf/nan to 0.'"
+            )
         }
     },
     # Universally required fields at the top level
@@ -138,6 +149,12 @@ If Spectroscopy/Hyperspectral: Focus on extracting energy_range (start, end, uni
 If 1D Curve Data (PL, XRD, etc.): Focus on extracting title, data_columns (determining X and Y column names/units), xlabel, and ylabel. energy_range might also apply if the x-axis represents energy. Omit or use null for microscopy fields.
 
 Handle Missing Info: Use null for any optional fields (like experiment.date) or omit entire optional objects (spatial_info, energy_range, data_columns) if the information is missing or clearly not applicable to the described experiment type.
+
+Custom Preprocessing: If the user describes any non-standard preprocessing steps (e.g., "divide by
+a baseline file", "subtract the dark reference at /path/to/dark.npy", "apply rubber-band baseline
+correction", "normalize to the peak at 520 cm^-1"), capture the FULL instruction verbatim in the
+custom_processing_instruction field. Preserve any file paths exactly as written. If no custom
+preprocessing is mentioned, set this field to null.
 
 Required Fields: For universally required fields (experiment_type, experiment.technique, sample.material) that are truly missing even after careful reading, use the string "N/A".
 
