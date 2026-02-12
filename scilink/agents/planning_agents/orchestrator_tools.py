@@ -1219,11 +1219,13 @@ class OrchestratorTools:
         def run_optimization(
             parallel_capable: bool = False, 
             batch_size: int = None,
-            physical_constraints: str = None
+            physical_constraints: str = None,
+            experimental_budget: int = None
         ):
             """
             Runs Bayesian Optimization to suggest next parameters.
-            Supports optional physical constraints for realizable batch design.
+            Supports optional physical constraints for realizable batch design
+            and optional experimental budget for exploration/exploitation control.
             """
             print(f"  ⚡ Tool: Running Bayesian Optimization...")
             
@@ -1377,11 +1379,15 @@ class OrchestratorTools:
                 print(f"    ℹ️  Using batch_size: {batch_size}")
             
             # ============================================
-            # CONSTRAINT-AWARE MODE LOGGING  [NEW]
+            # CONSTRAINT-AWARE & BUDGET-AWARE LOGGING
             # ============================================
             if physical_constraints:
                 mode_desc += " + constraint-aware"
                 print(f"    📐 Physical constraints provided — will use LLM-guided batch design")
+            
+            if experimental_budget is not None:
+                mode_desc += f" + budget={experimental_budget}"
+                print(f"    💰 Experimental budget: {experimental_budget} iteration(s) remaining")
             
             print(f"    📊 Optimization Setup:")
             print(f"       Mode: {mode_desc}")
@@ -1394,7 +1400,7 @@ class OrchestratorTools:
             
             try:
                 # ============================================
-                # CALL BO WITH physical_constraints  [MODIFIED]
+                # CALL BO
                 # ============================================
                 res = self.orch.bo.run_optimization_loop(
                     data_path=str(self.orch.bo_data_path),
@@ -1404,7 +1410,8 @@ class OrchestratorTools:
                     target_cols=self.orch.expected_target_columns,
                     output_dir=str(self.orch.base_dir / "bo_artifacts"),
                     batch_size=int(final_batch_size),
-                    physical_constraints=physical_constraints,  # <-- PASS THROUGH
+                    physical_constraints=physical_constraints,
+                    experimental_budget=experimental_budget,
                     plot_acq=True,
                     save_acq=True,
                 )
@@ -1441,9 +1448,7 @@ class OrchestratorTools:
                 if res.get("acq_data_path"):
                     response["acq_data_path"] = res["acq_data_path"]
                 
-                # ============================================
-                # INCLUDE CONSTRAINED PLANNING METADATA
-                # ============================================
+                # Include constrained planning metadata
                 if res.get("constrained_planning"):
                     cp = res["constrained_planning"]
                     response["constraint_aware"] = True
@@ -1451,6 +1456,10 @@ class OrchestratorTools:
                     response["trade_offs"] = cp.get("trade_offs", "")
                     if cp.get("validation_errors"):
                         response["constraint_warnings"] = cp["validation_errors"]
+                
+                # Include budget context
+                if res.get("budget"):
+                    response["budget"] = res["budget"]
                 
                 return json.dumps(response)
                 
@@ -1472,7 +1481,10 @@ class OrchestratorTools:
                 "when provided, the agent evaluates the acquisition landscape and uses LLM "
                 "reasoning to design a batch that maximizes information gain while respecting "
                 "physical experimental limitations (e.g., plate layouts, discrete reagent stocks, "
-                "shared equipment channels)."
+                "shared equipment channels). "
+                "Supports optional experimental_budget for exploration/exploitation control — "
+                "pass the number of remaining optimization iterations to shift strategy from "
+                "exploration (high budget) to exploitation (low budget)."
             ),
             parameters={
                 "parallel_capable": {
@@ -1498,6 +1510,20 @@ class OrchestratorTools:
                         "- 'Reactor has 4 zones with independent temp but shared pressure'\n"
                         "- 'Gradient limited to linear ramp: min at well A1, max at well H12'\n"
                         "If not provided, standard unconstrained BO is used."
+                    )
+                },
+                "experimental_budget": {
+                    "type": "integer",
+                    "description": (
+                        "Number of remaining optimization iterations (including this one). "
+                        "Controls exploration-vs-exploitation balance:\n"
+                        "- 1 = final shot (pure exploitation, no exploration)\n"
+                        "- 2-3 = critical budget (strongly favor exploitation)\n"
+                        "- Higher values = scaled based on campaign progress\n"
+                        "- Omit for no budget constraint (default behavior).\n"
+                        "Pass when user mentions remaining experiments, budget, 'last round', "
+                        "or 'N more tries'. This counts iterations (calls to run_optimization), "
+                        "not individual experiments within a batch."
                     )
                 }
             },

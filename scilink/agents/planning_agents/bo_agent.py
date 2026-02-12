@@ -27,6 +27,98 @@ from ._deprecation import normalize_params
 
 from .base_agent import BaseAgent
 
+
+def _compute_budget_context(experimental_budget: Optional[int], history: List[Dict]) -> Dict[str, Any]:
+    """
+    Compute budget-aware context for strategy selection.
+    
+    Translates a raw experiment count into a structured context dict that the 
+    LLM can reason about. The phase classification uses both absolute remaining 
+    count and the fraction of total campaign budget to handle edge cases 
+    (e.g., budget=5 means something different on step 2 vs step 50).
+    
+    Args:
+        experimental_budget: Remaining optimization iterations (None = unlimited).
+        history: List of past history entries (used to compute steps completed).
+    
+    Returns:
+        Dict with keys:
+            - budget_total: Remaining iterations (None if unlimited)
+            - steps_completed: Number of BO iterations already done
+            - budget_fraction_remaining: Float in [0, 1] — fraction of full 
+              campaign still available. None if unlimited.
+            - budget_phase: One of "final_shot", "critical", "low", "mid", 
+              "high", "unlimited"
+            - budget_guidance: Human-readable strategy guidance string for the LLM
+    """
+    steps_completed = len(history)
+    
+    if experimental_budget is None:
+        return {
+            "budget_total": None,
+            "steps_completed": steps_completed,
+            "budget_fraction_remaining": None,
+            "budget_phase": "unlimited",
+            "budget_guidance": (
+                "No experimental budget constraint. "
+                "Balance exploration and exploitation normally."
+            ),
+        }
+    
+    total_campaign = steps_completed + experimental_budget
+    fraction_remaining = experimental_budget / total_campaign if total_campaign > 0 else 0.0
+    
+    # Classify into phases based on absolute remaining AND fraction
+    if experimental_budget <= 1:
+        phase = "final_shot"
+        guidance = (
+            "CRITICAL: This is the LAST experiment. You MUST exploit. "
+            "Use 'log_ei' or 'ucb' with very low beta (< 0.3). "
+            "Do NOT use 'max_variance' or 'thompson'. "
+            "Every point must target the most promising region found so far."
+        )
+    elif experimental_budget <= 3:
+        phase = "critical"
+        guidance = (
+            f"Only {experimental_budget} experiments remain. Strongly favor exploitation. "
+            "Use 'log_ei' (preferred) or 'ucb' with low beta (0.3-1.0). "
+            "Avoid 'max_variance'. 'thompson' acceptable only if batch_size > 10. "
+            "Reserve at most 1 point for exploration if batch allows."
+        )
+    elif fraction_remaining < 0.25:
+        phase = "low"
+        guidance = (
+            f"{experimental_budget} experiments remain ({fraction_remaining:.0%} of campaign budget). "
+            "Late-stage optimization — lean toward exploitation. "
+            "Use 'log_ei' or 'ucb' with moderate beta (1.0-2.0). "
+            "'max_variance' only if model calibration is poor."
+        )
+    elif fraction_remaining < 0.6:
+        phase = "mid"
+        guidance = (
+            f"{experimental_budget} experiments remain ({fraction_remaining:.0%} of campaign budget). "
+            "Mid-campaign — balance exploration and exploitation. "
+            "'log_ei' is a strong default. 'ucb' with beta ~2.0 also appropriate. "
+            "'max_variance' acceptable if data is sparse or model uncertain."
+        )
+    else:
+        phase = "high"
+        guidance = (
+            f"{experimental_budget} experiments remain ({fraction_remaining:.0%} of campaign budget). "
+            "Early-stage — exploration is valuable. "
+            "'max_variance' is appropriate if few data points exist. "
+            "'log_ei' or 'thompson' for balanced exploration with some exploitation."
+        )
+    
+    return {
+        "budget_total": experimental_budget,
+        "steps_completed": steps_completed,
+        "budget_fraction_remaining": round(fraction_remaining, 3),
+        "budget_phase": phase,
+        "budget_guidance": guidance,
+    }
+
+
 class BOAgent(BaseAgent):
     """
     Autonomous Agent for Bayesian Optimization (BO) designed for "Stop-and-Go" experimental loops.
@@ -130,7 +222,8 @@ class BOAgent(BaseAgent):
             "data_path": None,
             "optimization_history": [],
             "current_config": None,
-            "data_points_seen": 0
+            "data_points_seen": 0,
+            "experimental_budget": None,
         }
         
     def _load_history(self) -> List[Dict]:
@@ -377,6 +470,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         data_summary_str: str,
         current_best: Dict[str, float],
         current_best_value: Dict[str, float],
+        budget_ctx: Dict[str, Any],
         is_moo: bool = False,
         pareto_front: Optional[List[Dict]] = None
     ) -> Tuple[Optional[List[Dict[str, float]]], Optional[Dict[str, Any]], Optional[str]]:
@@ -395,6 +489,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             data_summary_str: df.describe() as markdown
             current_best: Best parameters found so far
             current_best_value: Best objective value(s) found so far
+            budget_ctx: Budget context from _compute_budget_context
             is_moo: Multi-objective flag
             pareto_front: Pareto front points for MOO
             
@@ -419,6 +514,50 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             f"\n## Physical Constraints\n{physical_constraints}",
         ]
         
+        # Budget context for constrained planner
+        if budget_ctx["budget_phase"] != "unlimited":
+            if budget_ctx["budget_phase"] in ("final_shot", "critical"):
+                budget_block = (
+                    f"\n## ⚠️ Experimental Budget — CRITICAL\n"
+                    f"- Remaining iterations (including this batch): {budget_ctx['budget_total']}\n"
+                    f"- Campaign phase: **{budget_ctx['budget_phase']}**\n"
+                    f"- {budget_ctx['budget_guidance']}\n"
+                    f"\n**THIS OVERRIDES DESIGN PRINCIPLE #1 (Maximize Coverage).**\n"
+                    f"This is the LAST batch. Do NOT spread experiments uniformly across "
+                    f"the parameter space. Instead:\n"
+                    f"1. **Concentrate ≥60% of experiments** in the top 3-5 acquisition regions. "
+                    f"These are the regions most likely to contain the optimum.\n"
+                    f"2. **IMPORTANT — Include the predicted optimum.** The acquisition function "
+                    f"assigns LOW values to already-observed locations (because uncertainty is low "
+                    f"there). But the Current Best parameters (see below) and the GP-predicted peak "
+                    f"are still the most promising locations. Allocate 3-5 experiments AT or very "
+                    f"near the Current Best parameters (snapped to feasible values). This is "
+                    f"essential because: (a) confirming reproducibility of the best result has "
+                    f"high scientific value, and (b) the true optimum may coincide with an observed "
+                    f"point that the acquisition function undervalues.\n"
+                    f"3. **Do NOT allocate experiments** to low-acquisition regions just for "
+                    f"coverage. Every experiment in a low-value region is wasted.\n"
+                    f"4. **Non-uniform parameter allocation is expected.** If the acquisition "
+                    f"landscape peaks at specific parameter combinations, most experiments should "
+                    f"cluster there — not be evenly distributed across all feasible levels.\n"
+                    f"5. Look at the Acquisition Landscape table above. The Acq. Value column "
+                    f"tells you where to concentrate. Regions ranked 1-5 should get the bulk "
+                    f"of the experiments.\n"
+                    f"6. **Allocation guideline:** ~5 experiments replicating current best, "
+                    f"~60% of remaining on top acquisition regions, ~40% of remaining on "
+                    f"next-best regions."
+                )
+            else:
+                budget_block = (
+                    f"\n## Experimental Budget\n"
+                    f"- Remaining experiments (including this batch): {budget_ctx['budget_total']}\n"
+                    f"- Campaign phase: **{budget_ctx['budget_phase']}**\n"
+                    f"- {budget_ctx['budget_guidance']}\n"
+                    f"\n**Budget implication for batch design:** "
+                    f"Balance coverage with exploitation based on remaining budget."
+                )
+            prompt_parts.append(budget_block)
+        
         if is_moo and pareto_front:
             prompt_parts.append(
                 f"\n## Current Pareto Front ({len(pareto_front)} points)\n"
@@ -441,92 +580,126 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         
         print(f"  - 🏗️ BO Agent: Planning constrained batch ({batch_size} experiments)...")
         
-        try:
-            resp = self.model.generate_content(
-                prompt_parts, 
-                generation_config=self.generation_config
-            )
-            constrained_batch, parse_error = parse_json_from_response(resp)
-            
-            if parse_error:
-                return None, None, f"JSON parse error: {parse_error}"
-            
-            if not constrained_batch or "batch" not in constrained_batch:
-                return None, None, "LLM response missing 'batch' key"
-            
-            batch_items = constrained_batch["batch"]
-            
-            if not batch_items:
-                return None, None, "LLM returned empty batch"
-            
-            # Validate and extract recommendations
-            recommendations = []
-            validation_errors = []
-            
-            for i, item in enumerate(batch_items):
-                params = item.get("params", {})
+        max_retries = 3
+        last_error = None
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                if attempt > 1:
+                    print(f"  - 🔄 Retry {attempt}/{max_retries}...")
                 
-                if not params:
-                    validation_errors.append(f"Experiment {i+1}: missing params")
-                    continue
+                resp = self.model.generate_content(
+                    prompt_parts, 
+                    generation_config=self.generation_config
+                )
+                constrained_batch, parse_error = parse_json_from_response(resp)
                 
-                # Check all input columns present
-                missing_cols = [c for c in input_cols if c not in params]
-                if missing_cols:
-                    validation_errors.append(
-                        f"Experiment {i+1}: missing columns {missing_cols}"
+                if parse_error:
+                    last_error = f"JSON parse error: {parse_error}"
+                    logging.warning(
+                        f"Constrained batch attempt {attempt}: {last_error}"
                     )
                     continue
                 
-                # Check values within bounds (with tolerance for constraint snapping)
-                tolerance = 0.01
-                for col, bounds in zip(input_cols, input_bounds):
-                    val = float(params[col])
-                    param_range = bounds[1] - bounds[0]
-                    tol = param_range * tolerance if param_range > 0 else 0.01
-                    if val < bounds[0] - tol or val > bounds[1] + tol:
-                        validation_errors.append(
-                            f"Experiment {i+1}: {col}={val} outside bounds "
-                            f"[{bounds[0]}, {bounds[1]}]"
-                        )
+                if not constrained_batch or "batch" not in constrained_batch:
+                    last_error = "LLM response missing 'batch' key"
+                    logging.warning(
+                        f"Constrained batch attempt {attempt}: {last_error}"
+                    )
+                    continue
                 
-                rec = {col: float(params[col]) for col in input_cols}
-                recommendations.append(rec)
-            
-            if validation_errors:
-                for err in validation_errors:
-                    print(f"    - ⚠️  {err}")
-            
-            if not recommendations:
-                return None, None, f"No valid experiments in batch. Errors: {validation_errors}"
-            
-            # Warn if we got fewer than requested — do NOT pad with unconstrained
-            # values since they won't respect discrete constraints
-            if len(recommendations) < batch_size:
-                shortfall = batch_size - len(recommendations)
-                print(
-                    f"    - ⚠️  Got {len(recommendations)}/{batch_size} valid experiments. "
-                    f"    {shortfall} slots unfilled (unconstrained padding disabled)."
+                batch_items = constrained_batch["batch"]
+                
+                if not batch_items:
+                    last_error = "LLM returned empty batch"
+                    logging.warning(
+                        f"Constrained batch attempt {attempt}: {last_error}"
+                    )
+                    continue
+                
+                # Validate and extract recommendations
+                recommendations = []
+                validation_errors = []
+                
+                for i, item in enumerate(batch_items):
+                    params = item.get("params", {})
+                    
+                    if not params:
+                        validation_errors.append(f"Experiment {i+1}: missing params")
+                        continue
+                    
+                    # Check all input columns present
+                    missing_cols = [c for c in input_cols if c not in params]
+                    if missing_cols:
+                        validation_errors.append(
+                            f"Experiment {i+1}: missing columns {missing_cols}"
+                        )
+                        continue
+                    
+                    # Check values within bounds (with tolerance for constraint snapping)
+                    tolerance = 0.01
+                    for col, bounds in zip(input_cols, input_bounds):
+                        val = float(params[col])
+                        param_range = bounds[1] - bounds[0]
+                        tol = param_range * tolerance if param_range > 0 else 0.01
+                        if val < bounds[0] - tol or val > bounds[1] + tol:
+                            validation_errors.append(
+                                f"Experiment {i+1}: {col}={val} outside bounds "
+                                f"[{bounds[0]}, {bounds[1]}]"
+                            )
+                    
+                    rec = {col: float(params[col]) for col in input_cols}
+                    recommendations.append(rec)
+                
+                if validation_errors:
+                    for err in validation_errors:
+                        print(f"    - ⚠️  {err}")
+                
+                if not recommendations:
+                    last_error = f"No valid experiments in batch. Errors: {validation_errors}"
+                    logging.warning(
+                        f"Constrained batch attempt {attempt}: {last_error}"
+                    )
+                    continue
+                
+                # Warn if we got fewer than requested — do NOT pad with unconstrained
+                # values since they won't respect discrete constraints
+                if len(recommendations) < batch_size:
+                    shortfall = batch_size - len(recommendations)
+                    print(
+                        f"    - ⚠️  Got {len(recommendations)}/{batch_size} valid experiments. "
+                        f"    {shortfall} slots unfilled (unconstrained padding disabled)."
+                    )
+                
+                metadata = {
+                    "allocation_strategy": constrained_batch.get("allocation_strategy", ""),
+                    "coverage_summary": constrained_batch.get("coverage_summary", ""),
+                    "trade_offs": constrained_batch.get("trade_offs", ""),
+                    "validation_points": constrained_batch.get("validation_points", ""),
+                    "pareto_strategy": constrained_batch.get("pareto_strategy", ""),
+                    "valid_count": len(recommendations),
+                    "requested_count": batch_size,
+                    "shortfall": max(0, batch_size - len(recommendations)),
+                    "validation_errors": validation_errors if validation_errors else None,
+                    "attempts": attempt,
+                }
+                
+                print(f"  - ✅ Constrained batch planned: {len(recommendations)} experiments"
+                      + (f" (attempt {attempt})" if attempt > 1 else ""))
+                return recommendations[:batch_size], metadata, None
+                
+            except Exception as e:
+                last_error = str(e)
+                logging.warning(
+                    f"Constrained batch attempt {attempt} exception: {e}"
                 )
-            
-            metadata = {
-                "allocation_strategy": constrained_batch.get("allocation_strategy", ""),
-                "coverage_summary": constrained_batch.get("coverage_summary", ""),
-                "trade_offs": constrained_batch.get("trade_offs", ""),
-                "validation_points": constrained_batch.get("validation_points", ""),
-                "pareto_strategy": constrained_batch.get("pareto_strategy", ""),
-                "valid_count": len(recommendations),
-                "requested_count": batch_size,
-                "shortfall": max(0, batch_size - len(recommendations)),
-                "validation_errors": validation_errors if validation_errors else None,
-            }
-            
-            print(f"  - ✅ Constrained batch planned: {len(recommendations)} experiments")
-            return recommendations[:batch_size], metadata, None
-            
-        except Exception as e:
-            logging.error(f"Constrained batch planning error: {e}", exc_info=True)
-            return None, None, str(e)
+                if attempt == max_retries:
+                    logging.error(
+                        f"Constrained batch planning failed after {max_retries} attempts",
+                        exc_info=True
+                    )
+        
+        return None, None, f"Failed after {max_retries} attempts. Last error: {last_error}"
 
     # =====================================================================
     # Main Optimization Loop
@@ -536,6 +709,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                              input_cols: List[str], input_bounds: List[List[float]], 
                              target_cols: List[str], output_dir: str = "./bo_artifacts",
                              batch_size: int = 1,
+                             experimental_budget: Optional[int] = None,
                              physical_constraints: Optional[str] = None,
                              save_acq: bool = True,
                              plot_acq: bool = True) -> Dict[str, Any]:
@@ -552,6 +726,19 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             batch_size: Number of candidates to recommend. When physical_constraints 
                 is provided, the constrained planner uses this as the target number
                 of experiments to design on the plate.
+            experimental_budget: Optional number of remaining experiments (iterations) 
+                in the campaign, INCLUDING this one. Controls the 
+                exploration-vs-exploitation balance:
+                - None (default): No budget constraint; standard behavior.
+                - 1: Final experiment — forces pure exploitation.
+                - 2-3: Critical budget — strongly favors exploitation.
+                - Higher values: Scaled guidance based on fraction of total 
+                  campaign completed.
+                The budget is passed to the LLM as strategic context in the 
+                strategy configuration and constrained batch planning prompts.
+                Note: this counts optimization iterations (calls to this method), 
+                not individual experiments. A batch_size=10 call with 
+                experimental_budget=2 means 2 more calls (up to 20 experiments).
             physical_constraints: Optional natural language description of physical 
                 experimental constraints. When provided, the agent evaluates the 
                 acquisition landscape and uses LLM reasoning to design a batch that 
@@ -566,9 +753,9 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 Supported for single-objective only; ignored for multi-objective.
             
         Returns:
-            Dict with status, recommendations, strategy, plot paths, and optionally
-            acquisition function plot/data paths (single-objective only) and
-            constrained planning metadata (when physical_constraints provided).
+            Dict with status, recommendations, strategy, plot paths, budget context,
+            and optionally acquisition function plot/data paths (single-objective only)
+            and constrained planning metadata (when physical_constraints provided).
         """
         if output_dir is None:
             output_dir = str(self.output_dir)
@@ -596,6 +783,17 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         is_moo = len(target_cols) > 1
         history = self._load_history()
 
+        # Compute budget context
+        budget_ctx = _compute_budget_context(experimental_budget, history)
+        self.state["experimental_budget"] = experimental_budget
+        
+        if budget_ctx["budget_phase"] != "unlimited":
+            print(
+                f"  - 💰 Budget: {budget_ctx['budget_total']} iterations remaining "
+                f"(phase: {budget_ctx['budget_phase']}, "
+                f"{budget_ctx['budget_fraction_remaining']:.0%} of campaign left)"
+            )
+
         # 2. Configure Strategy (LLM)
         trend_context = f"Last 5 strategies: {[h.get('config', {}).get('rationale', 'N/A') for h in history[-5:]]}" if history else "No history."
         
@@ -607,6 +805,13 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             f"Meta-Data Trend: {trend_context}",
             f"Data Summary:\n{df.describe().to_markdown()}"
         ]
+        
+        # Budget context for strategy LLM
+        prompt_parts.append(
+            f"\n**Experimental Budget:**\n{budget_ctx['budget_guidance']}\n"
+            f"Steps completed so far: {budget_ctx['steps_completed']}. "
+            f"Data points in dataset: {len(df)}."
+        )
         
         # Inform strategy LLM about constraints (for better acq strategy selection)
         if physical_constraints:
@@ -697,6 +902,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 data_summary_str=df.describe().to_markdown(),
                 current_best=current_best,
                 current_best_value=current_best_value,
+                budget_ctx=budget_ctx,
                 is_moo=is_moo,
                 pareto_front=pareto_front
             )
@@ -770,6 +976,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             "config": valid_config, 
             "recommendation_batch": recommendations, 
             "inspection": inspection,
+            "budget": budget_ctx,
         }
         # Include acquisition paths in history when available
         if acq_plot_path or acq_data_path:
@@ -797,6 +1004,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             "next_parameters": recommendations[0] if batch_size == 1 else recommendations,
             "strategy": valid_config,
             "plot_path": plot_path,
+            "budget": budget_ctx,
         }
         if acq_plot_path:
             result["acq_plot_path"] = acq_plot_path
@@ -816,6 +1024,8 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 "input_cols": input_cols,
                 "target_cols": target_cols,
                 "batch_size": batch_size,
+                "experimental_budget": experimental_budget,
+                "budget_phase": budget_ctx["budget_phase"],
                 "physical_constraints": physical_constraints is not None,
                 "save_acq": save_acq,
                 "plot_acq": plot_acq,

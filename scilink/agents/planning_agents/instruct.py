@@ -133,7 +133,6 @@ You MUST include the following fields, populated based on general knowledge:
 - "source_documents": (List of Strings) An empty list [].
 """
 
-
 BO_CONFIG_SOO_PROMPT = """
 You are a Principal Investigator configuring a Single-Objective Bayesian Optimization experiment.
 
@@ -141,28 +140,38 @@ You are a Principal Investigator configuring a Single-Objective Bayesian Optimiz
 1. **Context:** User's objective and the **Fixed Batch Size** constraint.
 2. **Trend:** History of previous steps.
 3. **Data:** Statistics of current dataset.
+4. **Experimental Budget:** How many optimization iterations remain in the campaign,
+   along with a recommended phase and guidance. **You MUST follow the budget guidance
+   when selecting a strategy.** Ignoring budget constraints wastes irreplaceable experiments.
 
 **TASK:** Return a SINGLE JSON object to configure the math.
 
 ---
-**MENU 1: ACQUISITION STRATEGY (Select based on Research Phase)**
+**MENU 1: ACQUISITION STRATEGY (Select based on Research Phase AND Budget)**
 
 * `"log_ei"`: **Balanced Progress (Default).**
     * *Best for:* Mid-stage optimization. Automatically balances exploration and exploitation.
     * *Constraint:* Only efficient for **small batch sizes (< 10)**.
+    * *Budget:* Safe choice at ANY budget level. Preferred when budget is low.
 
 * `"max_variance"`: **Pure Exploration (Active Learning).**
     * *Use when:* **"Cold Start"** (Day 0-1) or when the model is confused (high error).
     * *Why:* Ignores objective value. Picks points strictly to reduce model uncertainty. "Draw the map before hunting for treasure."
+    * *Budget:* ⚠️ **NEVER use when budget ≤ 3.** Only appropriate when budget is high 
+      AND data is genuinely sparse. Exploration with no budget to exploit later is waste.
 
 * `"ucb"`: **Strategic Override (Tunable).** Requires `beta` (float).
     * *Use when:* You want to force a specific behavior.
     * `beta` < 0.5: **Exploit.** Zoom in on the best point found so far.
     * `beta` > 4.0: **Optimistic Explore.** Explore regions that *might* be high performing (High Mean + High Var).
+    * *Budget:* When budget is low (≤ 3), use `beta` < 1.0. When budget is 1 (final shot), 
+      use `beta` < 0.3 for maximum exploitation.
 
 * `"thompson"`: **High-Throughput / Batching.**
     * *Best for:* **Large batch sizes (> 10)**.
     * *Why:* Computationally fast; ensures diversity via probability sampling.
+    * *Budget:* Acceptable at moderate+ budgets. ⚠️ Avoid at budget = 1 (too stochastic 
+      for a final shot).
     
 **MENU 2: KERNEL (Physics)**
 * `"matern_2.5"`: **(Default)** Standard physical processes. Smooth but allows local variation.
@@ -174,6 +183,13 @@ You are a Principal Investigator configuring a Single-Objective Bayesian Optimiz
 * `"learnable"`: Unsure of measurement quality.
 * `"high_noise"`: Data has shown erratic jumps.
 
+**BUDGET DECISION RULES (in priority order):**
+1. If budget = 1: Use `log_ei` or `ucb` with beta < 0.3. Nothing else.
+2. If budget ≤ 3: Use `log_ei` or `ucb` with beta < 1.0. No `max_variance`.
+3. If budget is low (<25% of campaign): Favor exploitation (`log_ei`, low-beta `ucb`).
+4. If budget is high AND data is sparse: `max_variance` is acceptable.
+5. If batch_size > 10 AND budget > 3: `thompson` is acceptable.
+
 **OUTPUT FORMAT:**
 {
   "model_config": { "kernel": "matern_2.5", "noise": "fixed_low" },
@@ -181,7 +197,7 @@ You are a Principal Investigator configuring a Single-Objective Bayesian Optimiz
       "type": "ucb", 
       "params": { "beta": 0.1 } 
   },
-  "rationale": "We found a promising peak. Using UCB with low beta (0.1) to aggressively exploit this region with a batch of 8 points."
+  "rationale": "Budget is critical (2 remaining). We found a promising peak. Using UCB with low beta (0.1) to aggressively exploit this region with a batch of 8 points."
 }
 """
 
@@ -192,6 +208,9 @@ You are a Principal Investigator configuring a Multi-Objective Optimization expe
 1. **Context:** User's objective and **Fixed Batch Size** constraint.
 2. **Trend:** History of previous steps.
 3. **Data:** Statistics of current dataset.
+4. **Experimental Budget:** How many optimization iterations remain in the campaign,
+   along with a recommended phase and guidance. **You MUST follow the budget guidance
+   when selecting a strategy.** Ignoring budget constraints wastes irreplaceable experiments.
 
 **TASK:** Return a SINGLE JSON object.
 
@@ -199,11 +218,19 @@ You are a Principal Investigator configuring a Multi-Objective Optimization expe
 **MENU 1: ACQUISITION STRATEGY (MOO)**
 * `"pareto"`: **(Default)** qNEHVI. Best for general purpose frontier expansion.
     * *Works for:* Any batch size.
+    * *Budget:* Safe at all budget levels. At low budgets, it naturally focuses on 
+      high-value Pareto improvements.
+
 * `"weighted"`: Linear Scalarization. Requires `weights` list (e.g., `[0.5, 0.5]`) and `beta`.
     * *Description:* Scalarizes objectives -> applies UCB.
     * `beta` ~ 0.1: Exploitative on the weighted sum.
     * `beta` > 5.0: Explorative on the weighted sum.
+    * *Budget:* When budget is low (≤ 3), use low `beta` (< 1.0). For final shot, 
+      use `beta` < 0.3 with weights targeting the most important objective.
+
 * `"max_variance"`: Uncertainty sampling (Pure exploration).
+    * *Budget:* ⚠️ **NEVER use when budget ≤ 3.** Only when budget is high AND 
+      frontier coverage is genuinely poor.
 
 **MENU 2: KERNEL (Physics)**
 * `"matern_2.5"`: **(Default)** Standard physical processes. Smooth but allows local variation.
@@ -215,14 +242,20 @@ You are a Principal Investigator configuring a Multi-Objective Optimization expe
 * `"learnable"`: Unsure of measurement quality.
 * `"high_noise"`: Data has shown erratic jumps.
 
+**BUDGET DECISION RULES (in priority order):**
+1. If budget = 1: Use `pareto` or `weighted` with beta < 0.3. Nothing else.
+2. If budget ≤ 3: Use `pareto` or `weighted` with beta < 1.0. No `max_variance`.
+3. If budget is low (<25% of campaign): Favor `pareto` or exploit-heavy `weighted`.
+4. If budget is high AND frontier is sparse: `max_variance` is acceptable.
+
 **OUTPUT FORMAT:**
 {
   "model_config": { "kernel": "matern_2.5", "noise": "fixed_low" },
   "acquisition_strategy": {
     "type": "weighted",
-    "params": { "weights": [0.8, 0.2], "beta": 2.0 }
+    "params": { "weights": [0.8, 0.2], "beta": 0.1 }
   },
-  "rationale": "Prioritizing Yield (0.8) over Purity (0.2). Using balanced UCB (beta=2.0) on this weighted objective."
+  "rationale": "Only 2 experiments remain. Prioritizing Yield (0.8) over Purity (0.2). Using low beta (0.1) to exploit the best trade-off region found so far."
 }
 """
 
@@ -285,16 +318,24 @@ as possible while strictly respecting all physical constraints.
    - Each region has a center point, acquisition value (higher = more valuable to sample), 
      and a spread indicating how broad the region is.
    - These regions were identified by the fitted Gaussian Process model.
+   - **Use the Acq. Value column to decide where to concentrate experiments.**
+     Regions with 2x higher acquisition value should get roughly 2x more experiments.
 3. **Physical Constraints:** Natural language description of experimental setup limitations.
 4. **Batch Size:** Total number of experiments to fill.
 5. **Current Best:** The best experimental result found so far (for reference).
 6. **Unconstrained BO Suggestions:** What standard BO would recommend without constraints (for reference).
 7. **Data Summary:** Statistics of the current dataset.
+8. **Experimental Budget** (if provided): How many iterations remain. Critical for allocation strategy.
 
 **DESIGN PRINCIPLES:**
-1. **Maximize Coverage:** Spread experiments across multiple high-value regions rather than 
-   clustering in just one. Diminishing returns apply — the 5th point in one region is less 
-   valuable than the 1st point in a new region.
+1. **Allocate Proportionally to Acquisition Value:** Distribute experiments across regions 
+   in proportion to their acquisition values. High-value regions should receive MORE experiments 
+   than low-value regions. Do NOT spread experiments uniformly across all parameter levels — 
+   that wastes capacity on low-value areas. If the acquisition landscape peaks at specific 
+   parameter combinations, concentrate experiments there.
+   - **Budget caveat:** When the experimental budget section says "final_shot" or "critical", 
+     concentrate ≥60% of experiments in the top 3-5 regions. Uniform coverage is explicitly wrong 
+     for final-shot scenarios.
 2. **Respect Constraints Absolutely:** Never violate a physical constraint. If a high-value 
    region is infeasible, skip it and document why.
 3. **Snap to Feasible Values:** When a parameter is constrained to discrete values (e.g., 
@@ -317,7 +358,7 @@ Return a single valid JSON object:
   ],
   "coverage_summary": "Covered 5 of top 8 regions. Regions 4,7 infeasible...",
   "trade_offs": "Region 1 center suggests Conc=3.7mM but only 2.5 and 5.0 available...",
-  "allocation_strategy": "32 wells at 0.5mM, 32 at 1.0mM, 32 at 2.0mM. High-acq regions (1,2,3) get all three concentrations. Low-value regions get single concentration for coverage.",
+  "allocation_strategy": "60% of experiments (58) in top 3 regions (high Temp, high pH, high Catalyst). 25% (24) in regions 4-8. 15% (14) for boundary probes and validation replicates.",
   "validation_points": "Experiments 95-96 replicate current best."
 }
 """
@@ -335,20 +376,27 @@ physical constraints that prevent arbitrary parameter combinations.
 **INPUTS:**
 1. **Optimization Objective:** The scientific goal with multiple targets.
 2. **Acquisition Landscape:** Ranked regions by expected hypervolume improvement.
+   - **Use the Acq. Value column to decide where to concentrate experiments.**
+     Regions with higher values should receive proportionally more experiments.
 3. **Physical Constraints:** Experimental setup limitations.
 4. **Batch Size:** Number of experiments to design.
 5. **Current Pareto Front:** The non-dominated solutions found so far.
 6. **Unconstrained BO Suggestions:** Standard BO recommendations (for reference).
 7. **Data Summary:** Statistics of the current dataset.
+8. **Experimental Budget** (if provided): How many iterations remain. Critical for allocation strategy.
 
 **MULTI-OBJECTIVE DESIGN PRINCIPLES:**
-1. **Pareto Diversity:** Distribute experiments to expand DIFFERENT parts of the 
-   Pareto front. Don't cluster all points in one trade-off region.
-2. **Gap Filling:** If the current Pareto front has gaps (sparse regions), 
+1. **Allocate Proportionally to Acquisition Value:** Do NOT spread experiments uniformly. 
+   Concentrate experiments in regions with highest expected hypervolume improvement.
+   - **Budget caveat:** When the experimental budget section says "final_shot" or "critical",
+     concentrate ≥60% of experiments in the top 3-5 regions.
+2. **Pareto Diversity:** Within the high-value regions, distribute experiments to expand 
+   DIFFERENT parts of the Pareto front. Don't cluster all points in one trade-off region.
+3. **Gap Filling:** If the current Pareto front has gaps (sparse regions), 
    prioritize filling those gaps even if acquisition values are slightly lower.
-3. **Extreme Points:** Include 1-2 experiments that push individual objectives 
+4. **Extreme Points:** Include 1-2 experiments that push individual objectives 
    to their limits (anchor points) if batch size allows.
-4. **Constraint Handling:** Same as single-objective — snap to feasible values, 
+5. **Constraint Handling:** Same as single-objective — snap to feasible values, 
    skip infeasible regions, document in summary.
 
 **CRITICAL — OUTPUT FORMAT:**
@@ -363,7 +411,7 @@ Return a single valid JSON object:
     {"experiment_id": 2, "params": {"Temperature_C": 45.0, "pH": 5.5, "Concentration_mM": 1.0}},
     {"experiment_id": 3, "params": {"Temperature_C": 50.0, "pH": 6.0, "Concentration_mM": 2.0}}
   ],
-  "allocation_strategy": "Explain how the batch is divided across Pareto front segments. E.g.: 30 wells explore high-Yield region, 25 wells explore high-Purity region, 25 wells target the balanced trade-off zone, 10 wells push extremes, 6 replicate existing front points.",
+  "allocation_strategy": "60% of wells target top 3 acquisition regions. 25% fill Pareto front gaps. 15% for extreme points and validation.",
   "coverage_summary": "Which regions/Pareto segments are covered. E.g.: Targeted 3 distinct front segments. Region 4 infeasible due to temperature constraint.",
   "trade_offs": "Key compromises from snapping to discrete values. E.g.: Region 2 center at pH 4.3 snapped to 4.5. Front gap between Yield=40-50 partially addressed.",
   "pareto_strategy": "Overall Pareto expansion plan. E.g.: 60% explores frontier gaps, 25% pushes extremes, 15% validates existing front.",
