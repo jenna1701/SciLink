@@ -1,10 +1,11 @@
 import pandas as pd
+import numpy as np
 import json
 import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import PIL.Image as PIL_Image
 
 from ...auth import get_internal_proxy_key
@@ -14,7 +15,9 @@ from .instruct import (
     BO_CONFIG_SOO_PROMPT,
     BO_CONFIG_MOO_PROMPT,
     BO_VISUAL_INSPECTION_PROMPT,
-    BO_VISUAL_INSPECTION_MOO_PROMPT
+    BO_VISUAL_INSPECTION_MOO_PROMPT,
+    BO_CONSTRAINED_BATCH_PROMPT,
+    BO_CONSTRAINED_BATCH_PROMPT_MOO
 )
 
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
@@ -152,10 +155,388 @@ class BOAgent(BaseAgent):
         clean["model_config"] = m_conf
         return clean
 
+    # =====================================================================
+    # Acquisition Landscape Summarization (for constrained batch planning)
+    # =====================================================================
+
+    def _summarize_acquisition_landscape(
+        self,
+        optimizer,
+        input_cols: List[str],
+        input_bounds: List[List[float]],
+        is_moo: bool = False,
+        n_regions: int = 15,
+        grid_resolution: int = 40
+    ) -> str:
+        """
+        Evaluate the acquisition function on a dense grid, cluster high-value 
+        regions, and return a markdown summary table for LLM consumption.
+        
+        The summary gives the LLM a ranked "menu" of where the model expects the 
+        most value, so it can map these regions onto physical constraints.
+        
+        Args:
+            optimizer: Fitted optimizer object (from bo_tools.get_optimizer)
+            input_cols: List of input parameter names
+            input_bounds: List of [min, max] per parameter
+            is_moo: Whether this is multi-objective optimization
+            n_regions: Number of top regions to report
+            grid_resolution: Points per dimension for grid evaluation
+            
+        Returns:
+            Markdown-formatted string with ranked regions table
+        """
+        n_dims = len(input_cols)
+        
+        # 1. Build evaluation grid
+        #    Full grid for low dimensions, Latin Hypercube for high dimensions
+        if n_dims <= 3:
+            axes = [
+                np.linspace(bounds[0], bounds[1], grid_resolution) 
+                for bounds in input_bounds
+            ]
+            mesh = np.meshgrid(*axes, indexing='ij')
+            grid_points = np.column_stack([m.ravel() for m in mesh])
+        else:
+            # Latin Hypercube Sampling — cap total evaluations
+            n_samples = min(grid_resolution ** 2, 5000)
+            grid_points = np.random.rand(n_samples, n_dims)
+            for d in range(n_dims):
+                lo, hi = input_bounds[d]
+                grid_points[:, d] = lo + grid_points[:, d] * (hi - lo)
+        
+        # 2. Evaluate acquisition function at all grid points
+        #    Try direct acquisition evaluation first, then fall back to variance
+        try:
+            acq_values = optimizer.evaluate_acquisition(grid_points)
+        except (AttributeError, NotImplementedError):
+            try:
+                _, acq_values = optimizer.predict(grid_points)
+                print("    - ℹ️  Using posterior variance as acquisition proxy")
+            except Exception as e:
+                print(f"    - ⚠️  Cannot evaluate acquisition landscape: {e}")
+                return self._fallback_landscape_summary(optimizer, input_cols, input_bounds)
+        
+        if acq_values is None or len(acq_values) == 0:
+            return "Acquisition landscape evaluation returned no data."
+        
+        acq_values = np.array(acq_values).ravel()
+        
+        # 3. Cluster into regions
+        regions = self._cluster_acquisition_regions(
+            grid_points, acq_values, input_cols, input_bounds, n_regions
+        )
+        
+        # 4. Format as markdown table
+        header_cols = " | ".join(input_cols)
+        header = f"| Rank | {header_cols} | Acq. Value | Spread | Notes |"
+        separator = "|" + "|".join(["---"] * (len(input_cols) + 4)) + "|"
+        
+        rows = []
+        for i, region in enumerate(regions):
+            param_strs = " | ".join(
+                f"{region['center'][j]:.4f}" for j in range(len(input_cols))
+            )
+            spread_str = ", ".join(
+                f"{s:.3f}" for s in region.get('spread', [0.0] * len(input_cols))
+            )
+            notes = region.get('notes', '')
+            rows.append(
+                f"| {i+1} | {param_strs} | {region['acq_value']:.5f} | {spread_str} | {notes} |"
+            )
+        
+        table = header + "\n" + separator + "\n" + "\n".join(rows)
+        
+        summary = f"""### Acquisition Landscape Summary
+Total grid points evaluated: {len(grid_points)}
+Number of dimensions: {n_dims}
+Acquisition value range: [{acq_values.min():.5f}, {acq_values.max():.5f}]
+
+#### Top {len(regions)} Regions (ranked by acquisition value)
+{table}
+
+**Interpretation:** Higher acquisition value = the model expects more information gain 
+or improvement from sampling that region. "Spread" indicates how broad the high-value 
+zone is around each center (per parameter). Wider spread = more forgiving placement.
+"""
+        return summary
+
+    def _cluster_acquisition_regions(
+        self,
+        grid_points: np.ndarray,
+        acq_values: np.ndarray,
+        input_cols: List[str],
+        input_bounds: List[List[float]],
+        n_regions: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Identify distinct high-value regions via greedy peak selection 
+        with exclusion zones. Prevents the LLM from seeing a table of 
+        near-duplicate points that all cluster in one area.
+        
+        Args:
+            grid_points: (N, D) array of evaluated points
+            acq_values: (N,) array of acquisition values
+            input_cols: Parameter names (for boundary detection notes)
+            input_bounds: Parameter bounds
+            n_regions: Max number of regions to return
+            
+        Returns:
+            List of region dicts with center, acq_value, spread, notes
+        """
+        n_dims = len(input_cols)
+        
+        # Normalize coordinates to [0, 1] for distance computation
+        bounds_array = np.array(input_bounds)
+        ranges = bounds_array[:, 1] - bounds_array[:, 0]
+        ranges[ranges == 0] = 1.0
+        normalized = (grid_points - bounds_array[:, 0]) / ranges
+        
+        # Minimum separation between region centers (in normalized space)
+        min_separation = 0.15
+        
+        sorted_idx = np.argsort(-acq_values)
+        
+        regions = []
+        selected_centers = []
+        
+        for idx in sorted_idx:
+            if len(regions) >= n_regions:
+                break
+            
+            candidate = normalized[idx]
+            
+            # Check distance to already-selected centers
+            too_close = False
+            for center in selected_centers:
+                dist = np.sqrt(np.sum((candidate - center) ** 2))
+                if dist < min_separation:
+                    too_close = True
+                    break
+            
+            if too_close:
+                continue
+            
+            selected_centers.append(candidate)
+            
+            # Compute spread: std of nearby high-value points
+            distances = np.sqrt(np.sum((normalized - candidate) ** 2, axis=1))
+            high_value_mask = (distances < min_separation * 2) & (acq_values > acq_values[idx] * 0.5)
+            
+            if high_value_mask.sum() > 1:
+                spread = np.std(grid_points[high_value_mask], axis=0).tolist()
+            else:
+                spread = [0.0] * n_dims
+            
+            # Boundary detection
+            center_raw = grid_points[idx]
+            notes_parts = []
+            for d in range(n_dims):
+                lo, hi = input_bounds[d]
+                param_range = hi - lo
+                if param_range > 0:
+                    if (center_raw[d] - lo) / param_range < 0.05:
+                        notes_parts.append(f"{input_cols[d]} at lower bound")
+                    elif (hi - center_raw[d]) / param_range < 0.05:
+                        notes_parts.append(f"{input_cols[d]} at upper bound")
+            
+            regions.append({
+                'center': grid_points[idx].tolist(),
+                'acq_value': float(acq_values[idx]),
+                'spread': spread,
+                'notes': "; ".join(notes_parts) if notes_parts else ""
+            })
+        
+        return regions
+
+    def _fallback_landscape_summary(self, optimizer, input_cols, input_bounds) -> str:
+        """
+        Minimal fallback when acquisition evaluation is unavailable.
+        The LLM will rely on unconstrained suggestions and data summary instead.
+        """
+        return (
+            "### Acquisition Landscape Summary\n"
+            "⚠️ Direct acquisition function evaluation not available for this optimizer.\n"
+            "Use the unconstrained BO suggestions and data summary below "
+            "to design the constrained batch.\n"
+        )
+
+    # =====================================================================
+    # Constrained Batch Planning
+    # =====================================================================
+
+    def _plan_constrained_batch(
+        self,
+        objective_text: str,
+        input_cols: List[str],
+        input_bounds: List[List[float]],
+        batch_size: int,
+        acq_summary: str,
+        physical_constraints: str,
+        unconstrained_recommendations: List[Dict[str, float]],
+        data_summary_str: str,
+        current_best: Dict[str, float],
+        current_best_value: Dict[str, float],
+        is_moo: bool = False,
+        pareto_front: Optional[List[Dict]] = None
+    ) -> Tuple[Optional[List[Dict[str, float]]], Optional[Dict[str, Any]], Optional[str]]:
+        """
+        Use LLM to design a physically constrained experiment batch informed by 
+        the acquisition landscape.
+        
+        Args:
+            objective_text: Scientific optimization objective
+            input_cols: Parameter names
+            input_bounds: Parameter bounds
+            batch_size: Number of experiments to design
+            acq_summary: Markdown summary from _summarize_acquisition_landscape
+            physical_constraints: Natural language constraint description
+            unconstrained_recommendations: Standard BO output (for reference/fallback)
+            data_summary_str: df.describe() as markdown
+            current_best: Best parameters found so far
+            current_best_value: Best objective value(s) found so far
+            is_moo: Multi-objective flag
+            pareto_front: Pareto front points for MOO
+            
+        Returns:
+            Tuple of (recommendations_list, metadata_dict, error_string_or_None)
+        """
+        prompt_template = BO_CONSTRAINED_BATCH_PROMPT_MOO if is_moo else BO_CONSTRAINED_BATCH_PROMPT
+        
+        prompt_parts = [
+            prompt_template,
+            f"## Optimization Objective\n{objective_text}",
+            f"## Batch Size\n{batch_size} experiments to design",
+            f"\n## REQUIRED Parameter Names (use these EXACT keys in params)\n"
+            f"{json.dumps(input_cols)}\n"
+            f"Every experiment in the batch must have ALL of these keys in its \"params\" dict. "
+            f"Use these exact strings — do not rename, abbreviate, or expand them.",
+            f"\n## Parameter Bounds\n" + "\n".join(
+                f"- {col}: [{bounds[0]}, {bounds[1]}]" 
+                for col, bounds in zip(input_cols, input_bounds)
+            ),
+            f"\n## Acquisition Landscape\n{acq_summary}",
+            f"\n## Physical Constraints\n{physical_constraints}",
+        ]
+        
+        if is_moo and pareto_front:
+            prompt_parts.append(
+                f"\n## Current Pareto Front ({len(pareto_front)} points)\n"
+                f"{json.dumps(pareto_front[:20], indent=2)}"
+            )
+        elif current_best:
+            prompt_parts.append(
+                f"\n## Current Best Parameters\n{json.dumps(current_best)}"
+            )
+            if current_best_value:
+                prompt_parts.append(
+                    f"\n## Current Best Result\n{json.dumps(current_best_value)}"
+                )
+        
+        prompt_parts.append(
+            f"\n## Unconstrained BO Suggestions (for reference)\n"
+            f"{json.dumps(unconstrained_recommendations, indent=2)}"
+        )
+        prompt_parts.append(f"\n## Data Summary\n{data_summary_str}")
+        
+        print(f"  - 🏗️ BO Agent: Planning constrained batch ({batch_size} experiments)...")
+        
+        try:
+            resp = self.model.generate_content(
+                prompt_parts, 
+                generation_config=self.generation_config
+            )
+            constrained_batch, parse_error = parse_json_from_response(resp)
+            
+            if parse_error:
+                return None, None, f"JSON parse error: {parse_error}"
+            
+            if not constrained_batch or "batch" not in constrained_batch:
+                return None, None, "LLM response missing 'batch' key"
+            
+            batch_items = constrained_batch["batch"]
+            
+            if not batch_items:
+                return None, None, "LLM returned empty batch"
+            
+            # Validate and extract recommendations
+            recommendations = []
+            validation_errors = []
+            
+            for i, item in enumerate(batch_items):
+                params = item.get("params", {})
+                
+                if not params:
+                    validation_errors.append(f"Experiment {i+1}: missing params")
+                    continue
+                
+                # Check all input columns present
+                missing_cols = [c for c in input_cols if c not in params]
+                if missing_cols:
+                    validation_errors.append(
+                        f"Experiment {i+1}: missing columns {missing_cols}"
+                    )
+                    continue
+                
+                # Check values within bounds (with tolerance for constraint snapping)
+                tolerance = 0.01
+                for col, bounds in zip(input_cols, input_bounds):
+                    val = float(params[col])
+                    param_range = bounds[1] - bounds[0]
+                    tol = param_range * tolerance if param_range > 0 else 0.01
+                    if val < bounds[0] - tol or val > bounds[1] + tol:
+                        validation_errors.append(
+                            f"Experiment {i+1}: {col}={val} outside bounds "
+                            f"[{bounds[0]}, {bounds[1]}]"
+                        )
+                
+                rec = {col: float(params[col]) for col in input_cols}
+                recommendations.append(rec)
+            
+            if validation_errors:
+                for err in validation_errors:
+                    print(f"    - ⚠️  {err}")
+            
+            if not recommendations:
+                return None, None, f"No valid experiments in batch. Errors: {validation_errors}"
+            
+            # Warn if we got fewer than requested — do NOT pad with unconstrained
+            # values since they won't respect discrete constraints
+            if len(recommendations) < batch_size:
+                shortfall = batch_size - len(recommendations)
+                print(
+                    f"    - ⚠️  Got {len(recommendations)}/{batch_size} valid experiments. "
+                    f"    {shortfall} slots unfilled (unconstrained padding disabled)."
+                )
+            
+            metadata = {
+                "allocation_strategy": constrained_batch.get("allocation_strategy", ""),
+                "coverage_summary": constrained_batch.get("coverage_summary", ""),
+                "trade_offs": constrained_batch.get("trade_offs", ""),
+                "validation_points": constrained_batch.get("validation_points", ""),
+                "pareto_strategy": constrained_batch.get("pareto_strategy", ""),
+                "valid_count": len(recommendations),
+                "requested_count": batch_size,
+                "shortfall": max(0, batch_size - len(recommendations)),
+                "validation_errors": validation_errors if validation_errors else None,
+            }
+            
+            print(f"  - ✅ Constrained batch planned: {len(recommendations)} experiments")
+            return recommendations[:batch_size], metadata, None
+            
+        except Exception as e:
+            logging.error(f"Constrained batch planning error: {e}", exc_info=True)
+            return None, None, str(e)
+
+    # =====================================================================
+    # Main Optimization Loop
+    # =====================================================================
+
     def run_optimization_loop(self, data_path: str, objective_text: str, 
                              input_cols: List[str], input_bounds: List[List[float]], 
                              target_cols: List[str], output_dir: str = "./bo_artifacts",
                              batch_size: int = 1,
+                             physical_constraints: Optional[str] = None,
                              save_acq: bool = True,
                              plot_acq: bool = True) -> Dict[str, Any]:
         """
@@ -168,7 +549,17 @@ class BOAgent(BaseAgent):
             input_bounds: List of [min, max] bounds for each input.
             target_cols: List of target/objective column names.
             output_dir: Directory for saving artifacts.
-            batch_size: Number of candidates to recommend.
+            batch_size: Number of candidates to recommend. When physical_constraints 
+                is provided, the constrained planner uses this as the target number
+                of experiments to design on the plate.
+            physical_constraints: Optional natural language description of physical 
+                experimental constraints. When provided, the agent evaluates the 
+                acquisition landscape and uses LLM reasoning to design a batch that 
+                maximizes information gain while respecting the constraints. Examples:
+                - "96-well plate: rows share temperature (8 values), columns share pH (12 values)"
+                - "Only 5 catalyst concentrations available: 0.1, 0.5, 1.0, 2.0, 5.0 mM"
+                - "Reactor zones A,B share cooling; C,D share heating. Max 4 temps total."
+                When None, standard unconstrained BO is used (original behavior).
             save_acq: If True, saves acquisition function landscape data to .npz file.
                 Supported for single-objective only; ignored for multi-objective.
             plot_acq: If True, generates and saves a plot of the acquisition function.
@@ -176,7 +567,8 @@ class BOAgent(BaseAgent):
             
         Returns:
             Dict with status, recommendations, strategy, plot paths, and optionally
-            acquisition function plot/data paths (single-objective only).
+            acquisition function plot/data paths (single-objective only) and
+            constrained planning metadata (when physical_constraints provided).
         """
         if output_dir is None:
             output_dir = str(self.output_dir)
@@ -216,6 +608,15 @@ class BOAgent(BaseAgent):
             f"Data Summary:\n{df.describe().to_markdown()}"
         ]
         
+        # Inform strategy LLM about constraints (for better acq strategy selection)
+        if physical_constraints:
+            prompt_parts.append(
+                f"\n**Physical Constraints (informational for strategy selection):**\n"
+                f"{physical_constraints}\n"
+                f"Note: A separate step will handle constraint-aware batch design. "
+                f"Focus on selecting the best kernel, noise, and acquisition strategy."
+            )
+        
         print(f"  - 🤖 BO Agent: Configuring strategy (Batch={batch_size})...")
         resp = self.model.generate_content(prompt_parts, generation_config=self.generation_config)
         raw_config, parse_error = parse_json_from_response(resp)
@@ -237,7 +638,7 @@ class BOAgent(BaseAgent):
             feature_names=input_cols
         )
 
-        # 4. Recommend
+        # 4. Recommend (Unconstrained)
         acq_conf = valid_config.get("acquisition_strategy", {})
         strategy_name = acq_conf.get("type", "pareto" if is_moo else "log_ei")
         
@@ -247,6 +648,72 @@ class BOAgent(BaseAgent):
             strategy=strategy_name,
             params=acq_conf.get("params", {})
         )
+
+        # Build unconstrained recommendations (used as reference and fallback)
+        unconstrained_recommendations = []
+        for row in next_x_batch:
+            unconstrained_recommendations.append({k: float(v) for k, v in zip(input_cols, row)})
+
+        # 4b. Constrained Batch Planning
+        constrained_metadata = None
+        
+        if physical_constraints:
+            print(f"  - 📐 Physical constraints detected. Generating acquisition landscape...")
+            
+            acq_summary = self._summarize_acquisition_landscape(
+                optimizer=optimizer,
+                input_cols=input_cols,
+                input_bounds=input_bounds,
+                is_moo=is_moo
+            )
+            
+            # Get current best for context
+            if is_moo:
+                current_best = {}
+                current_best_value = {}
+                try:
+                    pareto_indices = optimizer.get_pareto_indices() if hasattr(optimizer, 'get_pareto_indices') else []
+                    pareto_front = [
+                        {**{k: float(v) for k, v in zip(input_cols, X[i])},
+                         **{k: float(v) for k, v in zip(target_cols, y[i])}}
+                        for i in pareto_indices
+                    ] if len(pareto_indices) > 0 else []
+                except Exception:
+                    pareto_front = []
+            else:
+                best_idx = int(np.argmax(y[:, 0]))
+                current_best = {k: float(v) for k, v in zip(input_cols, X[best_idx])}
+                current_best_value = {target_cols[0]: float(y[best_idx, 0])}
+                pareto_front = None
+            
+            constrained_recs, constrained_metadata, constraint_error = self._plan_constrained_batch(
+                objective_text=objective_text,
+                input_cols=input_cols,
+                input_bounds=input_bounds,
+                batch_size=batch_size,
+                acq_summary=acq_summary,
+                physical_constraints=physical_constraints,
+                unconstrained_recommendations=unconstrained_recommendations,
+                data_summary_str=df.describe().to_markdown(),
+                current_best=current_best,
+                current_best_value=current_best_value,
+                is_moo=is_moo,
+                pareto_front=pareto_front
+            )
+            
+            if constraint_error:
+                print(f"  - ⚠️  Constrained planning failed: {constraint_error}")
+                print(f"  - ↩️  Falling back to unconstrained recommendations")
+                recommendations = unconstrained_recommendations
+            else:
+                recommendations = constrained_recs
+                next_x_batch = np.array([
+                    [rec[col] for col in input_cols] 
+                    for rec in recommendations
+                ])
+                print(f"  - ✅ Using constrained batch ({len(recommendations)} experiments)")
+        else:
+            recommendations = unconstrained_recommendations
 
         # 5. Diagnostics
         step_num = len(history) + 1
@@ -298,10 +765,6 @@ class BOAgent(BaseAgent):
             inspection = {"status": "skipped", "reason": str(e)}
 
         # 7. Save History
-        recommendations = []
-        for row in next_x_batch:
-            recommendations.append({k: float(v) for k, v in zip(input_cols, row)})
-            
         log_entry = {
             "step": step_num, 
             "config": valid_config, 
@@ -315,6 +778,12 @@ class BOAgent(BaseAgent):
                 "plot_path": acq_plot_path,
                 "data_path": acq_data_path,
             }
+        # Include constrained planning metadata in history
+        if constrained_metadata:
+            log_entry["constrained_planning"] = constrained_metadata
+        if physical_constraints:
+            log_entry["physical_constraints"] = physical_constraints
+            
         self._save_history(log_entry)
 
         # 8. Output
@@ -333,6 +802,11 @@ class BOAgent(BaseAgent):
             result["acq_plot_path"] = acq_plot_path
         if acq_data_path:
             result["acq_data_path"] = acq_data_path
+        # Include constrained planning info in result
+        if constrained_metadata:
+            result["constrained_planning"] = constrained_metadata
+        if physical_constraints:
+            result["constraint_aware"] = True
         
         # Log this action to state
         self._log_action(
@@ -342,6 +816,7 @@ class BOAgent(BaseAgent):
                 "input_cols": input_cols,
                 "target_cols": target_cols,
                 "batch_size": batch_size,
+                "physical_constraints": physical_constraints is not None,
                 "save_acq": save_acq,
                 "plot_acq": plot_acq,
             },
