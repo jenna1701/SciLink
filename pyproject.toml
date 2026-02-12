@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scilink"
-version = "0.0.11"
+version = "0.0.12"
 authors = [
   { name="SciLink Team", email="maxim.ziatdinov@gmail.com" },
 ]
 description = "A framework for bridging experimental observations with literature analysis and computational materials modeling via large language models"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
