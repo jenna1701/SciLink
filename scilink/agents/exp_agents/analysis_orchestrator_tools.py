@@ -758,19 +758,25 @@ class AnalysisOrchestratorTools:
         def run_analysis(
             data_path: str = None,
             agent_id: int = None,
-            analysis_goal: str = None
+            analysis_goal: str = None,
+            auxiliary_data: str = None,
+            auxiliary_label: str = None
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
-            
+
             Each analysis run creates a unique output directory under results/
             to ensure traceability and prevent output collisions when analyzing
             multiple datasets with the same agent.
-            
+
             For agents that execute LLM-generated code (CurveFitting, Hyperspectral),
             a sandbox check is performed. If no sandbox is detected, the user is
             prompted to confirm before proceeding.
-            
+
+            For CurveFitting agent: auxiliary_data and auxiliary_label can provide
+            a complementary dataset (e.g. TGA curve alongside DSC, or a microscopy
+            image) as context for the analysis without fitting it.
+
             Output directory format: results/analysis_{dataset_name}_{timestamp}_{counter}/
             """
             print(f"  ⚡ Tool: Running analysis...")
@@ -905,10 +911,15 @@ class AnalysisOrchestratorTools:
                             print(f"      ... and {len(actual_data_input) - 3} more")
                 
                 # === Run analysis ===
-                result = agent.analyze(
-                    data=actual_data_input,
-                    system_info=self.orch.current_metadata
-                )
+                analyze_kwargs = {
+                    "data": actual_data_input,
+                    "system_info": self.orch.current_metadata,
+                }
+                if auxiliary_data is not None:
+                    analyze_kwargs["auxiliary_data"] = auxiliary_data
+                if auxiliary_label is not None:
+                    analyze_kwargs["auxiliary_label"] = auxiliary_label
+                result = agent.analyze(**analyze_kwargs)
                 
                 # === Store result ===
                 analysis_record = {
@@ -960,6 +971,8 @@ class AnalysisOrchestratorTools:
                 "Execute analysis with the selected or specified agent. "
                 "Each run creates a unique output directory (analysis_{dataset_name}_{timestamp}) "
                 "for traceability. Requires data path and metadata to be set. "
+                "For CurveFitting agent, optional auxiliary_data provides a complementary "
+                "dataset (e.g. TGA alongside DSC, or microscopy image) as context. "
                 "Returns analysis_id and output_directory for reference."
             ),
             parameters={
@@ -974,6 +987,14 @@ class AnalysisOrchestratorTools:
                 "analysis_goal": {
                     "type": "string",
                     "description": "Specific analysis objective (saved with results for traceability)"
+                },
+                "auxiliary_data": {
+                    "type": "string",
+                    "description": "Path to auxiliary dataset (1D curve or image) for CurveFitting agent context"
+                },
+                "auxiliary_label": {
+                    "type": "string",
+                    "description": "Description of auxiliary data, e.g. 'TGA curve collected simultaneously during DSC'"
                 }
             },
             required=[]
