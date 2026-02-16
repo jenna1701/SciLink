@@ -69,6 +69,26 @@ def build_verification_prompt_with_history(
     return "\n".join(lines)
 
 
+def _append_auxiliary_context(prompt: list, state: dict) -> None:
+    """Append auxiliary reference data to an LLM prompt if available."""
+    if not state.get("auxiliary_plot_bytes"):
+        return
+    label = state.get("auxiliary_label", "Auxiliary data")
+    summary = state.get("auxiliary_summary", "")
+    prompt.append(f"\n## Auxiliary Reference Data: {label}")
+    prompt.append(
+        f"The user provided this auxiliary reference data: {label}. "
+        "Take it into account in your analysis and interpretation, but do NOT "
+        "fit or quantitatively analyze this auxiliary data."
+    )
+    if summary:
+        prompt.append(f"\nData summary: {summary}")
+    prompt.append({
+        "mime_type": state.get("auxiliary_mime_type", "image/png"),
+        "data": state["auxiliary_plot_bytes"]
+    })
+
+
 class AnalyzeDataController:
     """Compute data statistics and create initial visualization."""
 
@@ -501,7 +521,9 @@ class HumanFeedbackRefinementController:
 
         if state.get("analysis_hints"):
             prompt.append(f"\n## User Guidance\n{state['analysis_hints']}")
-        
+
+        _append_auxiliary_context(prompt, state)
+
         if not state.get("is_single_spectrum", True):
             prompt.append(f"\n## Series Context\nThis is the first spectrum in a series of {state.get('num_spectra', 1)}. "
                          "The fitting model you choose will be applied to ALL spectra in the series.")
@@ -542,6 +564,8 @@ class HumanFeedbackRefinementController:
 
         if state.get("analysis_hints"):
             prompt.append(f"\n## Original Guidance\n{state['analysis_hints']}")
+
+        _append_auxiliary_context(prompt, state)
 
         response = self.model.generate_content(prompt, generation_config=self.generation_config)
         result, error = self._parse(response)
@@ -622,7 +646,7 @@ class UnifiedSeriesProcessingController:
     - For series: detects statistical outliers that may indicate interesting physics
     """
     
-    MAX_ATTEMPTS = 3
+    MAX_ATTEMPTS = 5
     DEFAULT_R2_THRESHOLD = 0.95
     DEFAULT_MAX_MODEL_RETRIES = 3
     DEFAULT_OUTLIER_SIGMA = 2.0
@@ -2596,11 +2620,13 @@ Return JSON with:
         
         if state.get("literature_context"):
             prompt_parts.extend(["\n## Literature", state["literature_context"]])
-        
+
+        _append_auxiliary_context(prompt_parts, state)
+
         try:
             response = self.model.generate_content(contents=prompt_parts, generation_config=self.generation_config, safety_settings=self.safety_settings)
             result_json, error_dict = self._parse(response)
-            
+
             if error_dict:
                 self.logger.error(f"Synthesis failed: {error_dict}")
                 state["synthesis_result"] = {"error": str(error_dict)}
@@ -2667,7 +2693,9 @@ Return JSON with:
                     with open(file_path, 'rb') as f:
                         prompt_parts.append(f"\n{Path(file_path).name}:")
                         prompt_parts.append({"mime_type": "image/png", "data": f.read()})
-        
+
+        _append_auxiliary_context(prompt_parts, state)
+
         try:
             response = self.model.generate_content(contents=prompt_parts, generation_config=self.generation_config, safety_settings=self.safety_settings)
             result_json, error_dict = self._parse(response)

@@ -231,6 +231,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Curve fitting specific
         hints: str | None = None,
         series_metadata: Optional[dict] = None,
+        auxiliary_data: Optional[str] = None,
+        auxiliary_label: Optional[str] = None,
         # Quality control overrides (optional)
         r2_threshold: Optional[float] = None,
         max_model_retries: Optional[int] = None,
@@ -256,6 +258,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "values": [300, 350, 400],     # x-axis values
                     "unit": "K"                     # unit for values
                 }
+            auxiliary_data: Optional path to an auxiliary dataset (1D curve file
+                or 2D image) from the same sample/experiment. Not fitted or
+                analyzed in detail, but provided to the LLM as context for
+                planning and interpreting the main analysis. Supports .csv,
+                .txt, .npy, .png, .jpg, .tif, etc.
+            auxiliary_label: Description of the auxiliary data, e.g. "TGA curve
+                collected simultaneously during the DSC measurement" or
+                "SEM image of sample surface". Defaults to filename stem.
             r2_threshold: Override default R² threshold for this analysis
             max_model_retries: Override default max retries for this analysis
             outlier_sigma: Override default outlier sigma for this analysis
@@ -285,6 +295,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             
             # Numpy stack (3D array: n_spectra x 2 x n_points)
             result = agent.analyze(my_spectra_stack)
+
+            # With auxiliary data for context
+            result = agent.analyze(
+                "dsc_curve.csv",
+                auxiliary_data="tga_curve.csv",
+                auxiliary_label="TGA curve collected simultaneously during DSC"
+            )
         """
         # Use provided overrides or fall back to instance defaults
         effective_r2_threshold = r2_threshold if r2_threshold is not None else self.r2_threshold
@@ -382,6 +399,18 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Compute statistics for first spectrum
         data_statistics = self._compute_statistics(processed_first_spectrum)
         
+        # Load auxiliary data if provided
+        aux_state = {
+            "auxiliary_plot_bytes": None,
+            "auxiliary_label": None,
+            "auxiliary_summary": None,
+            "auxiliary_mime_type": None,
+        }
+        if auxiliary_data:
+            aux_state = self._load_auxiliary_data(auxiliary_data, auxiliary_label)
+            if aux_state.get("auxiliary_plot_bytes"):
+                self.logger.info(f"   Auxiliary data loaded: {aux_state['auxiliary_label']}")
+
         # Build initial state
         state = {
             # Input data
@@ -390,18 +419,21 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "input_type": input_type,
             "num_spectra": num_spectra,
             "is_single_spectrum": is_single_spectrum,
-            
+
             # System info
             "system_info": self._handle_system_info(system_info),
             "series_metadata": series_metadata or {},
             "analysis_hints": hints,
-            
+
+            # Auxiliary reference data
+            **aux_state,
+
             # First spectrum (for planning)
             "data_path": spectrum_paths[0] if spectrum_paths else first_spectrum_name,
             "curve_data": processed_first_spectrum,
             "original_plot_bytes": original_plot_bytes,
             "data_statistics": data_statistics,
-            
+
             # Pipeline state
             "analysis_images": [{"label": "First Spectrum", "data": original_plot_bytes}],
             "result_json": {},
@@ -508,6 +540,121 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "y_std": float(np.nanstd(y)),
             "has_nans": bool(np.any(np.isnan(curve_data))),
         }
+
+    def _load_auxiliary_data(
+        self, auxiliary_data: str, auxiliary_label: Optional[str]
+    ) -> dict:
+        """
+        Load auxiliary data and return state fields for pipeline injection.
+
+        Supports 1D curve files (.csv, .txt, .dat, .tsv) and images
+        (.png, .jpg, .tif, etc.). For .npy files, inspects array shape
+        to distinguish curves from images.
+
+        Returns dict with auxiliary_plot_bytes, auxiliary_label,
+        auxiliary_summary, and auxiliary_mime_type (all None on failure).
+        """
+        result = {
+            "auxiliary_plot_bytes": None,
+            "auxiliary_label": auxiliary_label or Path(auxiliary_data).stem,
+            "auxiliary_summary": None,
+            "auxiliary_mime_type": None,
+        }
+
+        if not os.path.exists(auxiliary_data):
+            self.logger.warning(f"Auxiliary data file not found: {auxiliary_data}")
+            return result
+
+        ext = Path(auxiliary_data).suffix.lower()
+        image_extensions = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
+        curve_extensions = {'.csv', '.txt', '.dat', '.tsv'}
+
+        try:
+            is_curve = False
+            is_image = False
+
+            if ext == '.npy':
+                arr = np.load(auxiliary_data)
+                if arr.ndim == 1:
+                    is_curve = True
+                elif arr.ndim == 2 and min(arr.shape) <= 2:
+                    is_curve = True
+                else:
+                    is_image = True
+            elif ext in curve_extensions:
+                is_curve = True
+            elif ext in image_extensions:
+                is_image = True
+            else:
+                self.logger.warning(
+                    f"Unrecognized auxiliary file extension: {ext}"
+                )
+                return result
+
+            if is_curve:
+                if ext == '.npy':
+                    curve = np.load(auxiliary_data)
+                    if curve.ndim == 1:
+                        curve = np.column_stack(
+                            [np.arange(len(curve)), curve]
+                        )
+                    elif curve.shape[0] == 2:
+                        curve = curve.T
+                    # else shape (n, 2) already correct
+                else:
+                    curve = load_curve_data(auxiliary_data)
+                    if curve.ndim == 2 and curve.shape[0] == 2:
+                        curve = curve.T
+
+                # Ensure shape (n, 2) for plotting
+                if curve.ndim == 2 and curve.shape[1] == 2:
+                    x, y = curve[:, 0], curve[:, 1]
+                elif curve.ndim == 2 and curve.shape[0] == 2:
+                    x, y = curve[0], curve[1]
+                else:
+                    x = np.arange(curve.shape[-1])
+                    y = curve.flatten()
+
+                result["auxiliary_summary"] = (
+                    f"1D curve with {len(x)} points. "
+                    f"X range: [{float(np.nanmin(x)):.4g}, {float(np.nanmax(x)):.4g}]. "
+                    f"Y range: [{float(np.nanmin(y)):.4g}, {float(np.nanmax(y)):.4g}]."
+                )
+
+                plot_info = {"title": result["auxiliary_label"]}
+                plot_data = np.column_stack([x, y])
+                result["auxiliary_plot_bytes"] = plot_curve_to_bytes(
+                    plot_data, plot_info
+                )
+                result["auxiliary_mime_type"] = "image/png"
+
+            elif is_image:
+                from ...tools.image_processor import (
+                    load_image,
+                    convert_numpy_to_jpeg_bytes,
+                )
+
+                img = load_image(auxiliary_data)
+                result["auxiliary_summary"] = (
+                    f"Image with shape {img.shape} "
+                    f"(dtype: {img.dtype})."
+                )
+                if img.ndim == 3:
+                    import cv2
+                    img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                    result["auxiliary_plot_bytes"] = (
+                        convert_numpy_to_jpeg_bytes(img_gray)
+                    )
+                else:
+                    result["auxiliary_plot_bytes"] = (
+                        convert_numpy_to_jpeg_bytes(img)
+                    )
+                result["auxiliary_mime_type"] = "image/jpeg"
+
+        except Exception as e:
+            self.logger.warning(f"Failed to load auxiliary data: {e}")
+
+        return result
 
     def _compile_results(self, state: dict) -> Dict[str, Any]:
         """Compile results into a consistent output structure."""
