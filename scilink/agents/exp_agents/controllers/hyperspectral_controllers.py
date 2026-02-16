@@ -34,8 +34,17 @@ def build_code_generation_prompt(
     axis_units: str,
     axis_start: float,
     axis_end: float,
-    processing_note: str
+    processing_note: str,
+    hints: str | None = None
 ) -> str:
+    hints_section = ""
+    if hints:
+        hints_section = f"""
+
+### 5. USER GUIDANCE
+The user has indicated interest in: {hints}
+Prioritize this guidance in your analysis, but also capture any other significant features present in the data.
+"""
     return f"""
 You are a Python Data Scientist specialized in Spectroscopy. 
 The standard NMF tool failed to model a spectral feature described as: "{target_desc}".
@@ -82,7 +91,7 @@ The variable `hspy_data` passed to your function contains: **{processing_note}**
 However, even with pre-processing, experimental data often contains high-frequency shot noise (jitter).
 If you are performing derivative-based operations (like `find_peaks` or `curve_fit`), it is advisable to apply a light smoothing filter
 (e.g., `gaussian_filter(..., sigma=1-2)`) to ensure convergence.
-
+{hints_section}
 ### REQUIRED RETURN FORMAT
 {{
     "maps": {{
@@ -198,6 +207,14 @@ class GetInitialComponentParamsController:
         if state.get("system_info"):
             sys_info_str = json.dumps(state["system_info"], indent=2)
             prompt_parts.append(f"\n\n--- System Information ---\n{sys_info_str}")
+
+        if state.get("analysis_hints"):
+            prompt_parts.append(
+                f"\n\n--- User Guidance ---\n"
+                f"The user has provided the following guidance for this analysis. "
+                f"Prioritize these suggestions but also report any other significant features you discover.\n"
+                f"{state['analysis_hints']}"
+            )
 
         prompt_parts.append("\n\nBased on the system description and data characteristics, choose the decomposition method and estimate the optimal number of spectral components.")
 
@@ -397,6 +414,14 @@ class GetFinalComponentSelectionController:
         for viz in state.get("component_test_visuals", []):
             prompt_parts.append(f"\n\n**{viz['label']}:**")
             prompt_parts.append({"mime_type": "image/jpeg", "data": viz['image']})
+
+        if state.get("analysis_hints"):
+            prompt_parts.append(
+                f"\n\n--- User Guidance ---\n"
+                f"The user has provided the following guidance for this analysis. "
+                f"Prioritize these suggestions but also report any other significant features you discover.\n"
+                f"{state['analysis_hints']}"
+            )
 
         prompt_parts.append(f"\n\nBased on the elbow plot AND the visual examples, decide the optimal number of components.")
         
@@ -776,6 +801,14 @@ class SelectRefinementTargetController:
             else:
                 self.logger.warning(f"Could not find image bytes for plot: {img.get('label')}")
 
+        if state.get("analysis_hints"):
+            prompt_parts.append(
+                f"\n\n--- User Guidance ---\n"
+                f"The user has provided the following guidance for this analysis. "
+                f"Prioritize these suggestions but also report any other significant features you discover.\n"
+                f"{state['analysis_hints']}"
+            )
+
         prompt_parts.append("\n\nBased on these results, decide if a focused refinement is needed.")
 
         param_gen_config = None#GenerationConfig(response_mime_type="application/json")
@@ -978,6 +1011,14 @@ class BuildHolisticSynthesisPromptController:
         if state.get("system_info"):
             sys_info_str = json.dumps(state["system_info"], indent=2)
             prompt_parts.append(f"\n\n--- System Information ---\n{sys_info_str}")
+
+        if state.get("analysis_hints"):
+            prompt_parts.append(
+                f"\n\n--- User Guidance ---\n"
+                f"The user has provided the following guidance for this analysis. "
+                f"Prioritize these suggestions but also report any other significant features you discover.\n"
+                f"{state['analysis_hints']}"
+            )
 
         # 2. Build Context for Each Iteration
         all_images = []
@@ -1401,7 +1442,8 @@ class RunDynamicAnalysisController:
                 axis_units=axis_units,
                 axis_start=state['energy_axis'][0],
                 axis_end=state['energy_axis'][-1],
-                processing_note=processing_note
+                processing_note=processing_note,
+                hints=state.get("analysis_hints")
             )
 
             current_prompt = base_prompt
