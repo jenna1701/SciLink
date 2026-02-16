@@ -55,12 +55,15 @@ Your code will run in a restricted `exec()` sandbox.
 - `np`: The full NumPy library.
 - `scipy`: The top-level SciPy module.
 - `sklearn`: The top-level Scikit-Learn module.
+- `lmfit`: Model-based curve fitting library (Parameters, Model, built-in models like GaussianModel, LorentzianModel, VoigtModel).
 
 **PRE-IMPORTED FUNCTIONS (Direct Shortcuts):**
 - `curve_fit`, `nnls` (from scipy.optimize)
 - `linregress` (from scipy.stats)
 - `find_peaks` (from scipy.signal)
 - `gaussian_filter` (from scipy.ndimage)
+
+**Performance Note:** `lmfit` adds per-fit setup overhead (~0.1-0.5ms) that can accumulate over thousands of pixels. For simple single-peak fits on large datasets, prefer raw `curve_fit` for speed. Use `lmfit` when you need its advantages: multi-peak composite models, parameter constraints/bounds, or built-in line shapes.
 
 ### 3. CODING CONSTRAINTS
 1. **NO External Imports:** Do not import `os`, `sys`, `matplotlib`, or `warnings`. The sandbox does not support them.
@@ -1426,6 +1429,7 @@ class RunDynamicAnalysisController:
                         "np": np,
                         "scipy": __import__("scipy"),
                         "sklearn": __import__("sklearn"),
+                        "lmfit": __import__("lmfit"),
                         "curve_fit": __import__("scipy.optimize", fromlist=["curve_fit"]).curve_fit,
                         "nnls": __import__("scipy.optimize", fromlist=["nnls"]).nnls,
                         "linregress": __import__("scipy.stats", fromlist=["linregress"]).linregress,
@@ -1434,14 +1438,14 @@ class RunDynamicAnalysisController:
                     }
                     
                     # Execute Code
-                    with ExecutionTimeout(seconds=120):
+                    with ExecutionTimeout(seconds=300):
                         exec(code_str, global_scope, local_scope)
                     
                         if "analyze_feature" not in local_scope:
                             raise ValueError("Function 'analyze_feature' was not found in generated code.")
                         
                         # --- D. RUN ON DATA ---
-                        self.logger.info("    Executing generated code...")
+                        self.logger.info("    Executing generated code (timeout: 300s)...")
                         func = local_scope["analyze_feature"]
                         result_dict = func(optimal_data, state["energy_axis"])
                     
