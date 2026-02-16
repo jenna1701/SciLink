@@ -28,14 +28,21 @@ class OpenAIAsGenerativeModel:
     for the multi-provider equivalent.
     """
 
-    def __init__(self, model: str, api_key: str | None = None, base_url: str | None = None):
+    # Default timeout (seconds) sent to the server via extra_body.
+    # LiteLLM proxies respect this to override their own request_timeout.
+    DEFAULT_TIMEOUT = 300
+
+    def __init__(self, model: str, api_key: str | None = None, base_url: str | None = None,
+                 timeout: int | None = None):
         # Store attributes for access by orchestrator
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
-        
-        # Works with OpenAI and any OpenAI-compatible endpoint 
-        self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        self.timeout = timeout or self.DEFAULT_TIMEOUT
+
+        # Works with OpenAI and any OpenAI-compatible endpoint
+        self.client = openai.OpenAI(api_key=api_key, base_url=base_url,
+                                    timeout=self.timeout)
 
     # ---------------------- public API ----------------------
     def generate_content(self, contents, generation_config=None, safety_settings=None):
@@ -62,6 +69,7 @@ class OpenAIAsGenerativeModel:
             model=self.model,
             messages=messages,
             stream=False,
+            extra_body={"timeout": self.timeout},
             **params,
         )
 
