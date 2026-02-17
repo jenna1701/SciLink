@@ -64,6 +64,13 @@ scilink = "scilink.cli.main:main"
 scilink-workflows = "scilink.cli.workflows:main"
 scilink-agent = "scilink.cli.run_agent:main"
 
+# Third-party packages can advertise custom analysis agents here.
+# SciLink discovers these automatically on startup via importlib.metadata.
+# Example entry in a third-party pyproject.toml:
+#   [project.entry-points."scilink.agents"]
+#   my_xrd_agent = "my_package.agents:MyXRDAgent"
+[project.entry-points."scilink.agents"]
+
 [tool.setuptools]
 include-package-data = true
 

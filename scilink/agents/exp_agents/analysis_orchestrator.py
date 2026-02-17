@@ -25,6 +25,35 @@ from .analysis_orchestrator_tools import AnalysisOrchestratorTools
 from ._deprecation import normalize_params
 
 
+# Built-in agent registry seed — classes are lazy-loaded on first use.
+_BUILTIN_AGENTS = {
+    0: {
+        "class_path": "scilink.agents.exp_agents.fft_microscopy_agent.FFTMicroscopyAnalysisAgent",
+        "name": "FFTMicroscopyAnalysisAgent",
+        "description": "Images: microstructure, grains, phases, atomic-resolution. Handles single images or image series.",
+        "short_name": "FFT",
+    },
+    1: {
+        "class_path": "scilink.agents.exp_agents.sam_microscopy_agent.SAMMicroscopyAnalysisAgent",
+        "name": "SAMMicroscopyAnalysisAgent",
+        "description": "Images: particle counting, segmentation. Handles single images or image series.",
+        "short_name": "SAM",
+    },
+    2: {
+        "class_path": "scilink.agents.exp_agents.hyperspectral_analysis_agent.HyperspectralAnalysisAgent",
+        "name": "HyperspectralAnalysisAgent",
+        "description": "3D datacubes: EELS-SI, EDS, Raman imaging.",
+        "short_name": "Hyperspectral",
+    },
+    3: {
+        "class_path": "scilink.agents.exp_agents.curve_fitting_agent.CurveFittingAgent",
+        "name": "CurveFittingAgent",
+        "description": "1D data: DSC, TGA, XRD, UV-Vis, Raman, PL, IV curves, kinetics. Handles single files or series.",
+        "short_name": "CurveFit",
+    },
+}
+
+
 class AnalysisMode(Enum):
     """
     Defines the level of autonomy for the analysis orchestrator.
@@ -98,7 +127,7 @@ _AUTONOMOUS_DIRECTIVE = """
 - Only provide a summary AFTER the entire pipeline is complete.
 """
 
-_SYSTEM_PROMPT_BODY = """
+_SYSTEM_PROMPT_BODY_PRE = """
 You are the **Analysis Agent**. Your goal is to coordinate experimental data analysis.
 
 **RESPONSE GUIDELINES (STRICT):**
@@ -123,11 +152,9 @@ You are the **Analysis Agent**. Your goal is to coordinate experimental data ana
 4. `select_agent`: Set the analysis agent. YOU decide based on data type and metadata.
    - Input: agent_id (integer), reasoning (string)
    - Available agents:
-     * 0: FFTMicroscopyAnalysisAgent - Images: microstructure, grains, phases, atomic-resolution
-     * 1: SAMMicroscopyAnalysisAgent - Images: particle counting, segmentation
-     * 2: HyperspectralAnalysisAgent - 3D datacubes: EELS-SI, EDS, Raman imaging
-     * 3: CurveFittingAgent - 1D data: DSC, TGA, XRD, UV-Vis, Raman, PL, IV curves, kinetics
+"""
 
+_SYSTEM_PROMPT_BODY_POST = """
 5. `preview_image`: Load image for visual inspection (for agent 0 vs 1 decision, or ambiguous 2D data).
 
 **ANALYSIS EXECUTION:**
@@ -190,14 +217,53 @@ examine_data returns data_type:
 """
 
 
-def get_system_prompt(analysis_mode: AnalysisMode) -> str:
-    """Returns the appropriate system prompt for the given analysis mode."""
+def _build_agent_list_section(agent_registry: dict) -> str:
+    """Build the agent list lines for the system prompt from the registry."""
+    lines = []
+    for aid in sorted(agent_registry.keys()):
+        entry = agent_registry[aid]
+        lines.append(f"     * {aid}: {entry['name']} - {entry['description']}")
+    return "\n".join(lines)
+
+
+def get_system_prompt(
+    analysis_mode: AnalysisMode,
+    agent_registry: dict = None,
+    external_tools: list = None,
+) -> str:
+    """Returns the appropriate system prompt for the given analysis mode.
+
+    Args:
+        analysis_mode: The autonomy level directive to prepend.
+        agent_registry: Live registry dict from AnalysisOrchestratorAgent.
+            When provided, the agent list in the prompt is built dynamically
+            so custom agents appear automatically. Falls back to the built-in
+            list if not provided.
+        external_tools: List of ``{"name": str, "description": str}`` dicts
+            for tools registered via register_tools(). When provided, a
+            "Custom tools" section is appended so the LLM knows they exist.
+    """
     directives = {
         AnalysisMode.CO_PILOT: _CO_PILOT_DIRECTIVE,
         AnalysisMode.SUPERVISED: _SUPERVISED_DIRECTIVE,
         AnalysisMode.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
     }
-    return directives[analysis_mode] + _SYSTEM_PROMPT_BODY
+    if agent_registry:
+        agent_list = _build_agent_list_section(agent_registry)
+    else:
+        agent_list = "\n".join([
+            "     * 0: FFTMicroscopyAnalysisAgent - Images: microstructure, grains, phases, atomic-resolution",
+            "     * 1: SAMMicroscopyAnalysisAgent - Images: particle counting, segmentation",
+            "     * 2: HyperspectralAnalysisAgent - 3D datacubes: EELS-SI, EDS, Raman imaging",
+            "     * 3: CurveFittingAgent - 1D data: DSC, TGA, XRD, UV-Vis, Raman, PL, IV curves, kinetics",
+        ])
+    body = _SYSTEM_PROMPT_BODY_PRE + agent_list + _SYSTEM_PROMPT_BODY_POST
+    if external_tools:
+        lines = ["\n**CUSTOM TOOLS (registered externally, call directly by name):**"]
+        for t in external_tools:
+            lines.append(f"  * `{t['name']}` - {t['description']}")
+        body += "\n".join(lines) + "\n"
+    return directives[analysis_mode] + body
 
 
 class AnalysisOrchestratorAgent:
@@ -324,6 +390,14 @@ class AnalysisOrchestratorAgent:
         
         # Analysis run counter for unique IDs within same second
         self._analysis_run_counter = 0
+
+        # Cache for data loaded on behalf of external tools (keyed by data_path)
+        self._tool_data_cache: Dict[tuple, Any] = {}
+
+        # Registry of external tools added via register_tools(), used to keep
+        # the system prompt current so the LLM knows they exist.
+        # Each entry: {"name": str, "description": str}
+        self._external_tools: List[Dict[str, str]] = []
         
         self.message_count = 0
         self.last_checkpoint_message_count = 0
@@ -331,12 +405,16 @@ class AnalysisOrchestratorAgent:
         # Restore from checkpoint if requested
         if restore_checkpoint and self.checkpoint_path.exists():
             self._restore_checkpoint()
-        
-        # Initialize tools registry
+
+        # Build agent registry (built-ins + installed plugins)
+        self._agent_registry = self._build_registry()
+        self._discover_plugin_agents()
+
+        # Initialize tools registry (reads agent registry via _sync_from_registry)
         self.tools = AnalysisOrchestratorTools(self)
-        
-        # Get appropriate system prompt
-        system_prompt = get_system_prompt(self.analysis_mode)
+
+        # Get appropriate system prompt (agent list built from registry)
+        system_prompt = get_system_prompt(self.analysis_mode, self._agent_registry)
         
         # Initialize LLM
         if base_url:
@@ -386,10 +464,12 @@ class AnalysisOrchestratorAgent:
         self.analysis_mode = mode
         self._enable_human_feedback = self._should_enable_human_feedback()
         
-        # Update system prompt
-        new_system_prompt = get_system_prompt(mode)
+        # Update system prompt (preserve external tools if any are registered)
+        new_system_prompt = get_system_prompt(
+            mode, self._agent_registry, self._external_tools or None
+        )
         self._system_prompt = new_system_prompt
-        
+
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = new_system_prompt
         
@@ -399,6 +479,224 @@ class AnalysisOrchestratorAgent:
     def get_human_feedback_setting(self) -> bool:
         """Returns current human feedback setting for sub-agents."""
         return self._enable_human_feedback
+
+    # =========================================================================
+    # Agent registry
+    # =========================================================================
+
+    def _build_registry(self) -> Dict[int, Dict]:
+        """Seed the registry with built-in agents (lazy class loading)."""
+        registry = {}
+        for agent_id, spec in _BUILTIN_AGENTS.items():
+            registry[agent_id] = {
+                "class_path": spec["class_path"],
+                "class": None,  # loaded on first use
+                "name": spec["name"],
+                "description": spec["description"],
+                "short_name": spec["short_name"],
+            }
+        return registry
+
+    def _discover_plugin_agents(self) -> None:
+        """Auto-register agents advertised via the 'scilink.agents' entry point group."""
+        try:
+            from importlib.metadata import entry_points
+            eps = entry_points(group="scilink.agents")
+        except Exception:
+            return
+
+        for ep in eps:
+            try:
+                cls = ep.load()
+                next_id = max(self._agent_registry.keys()) + 1 if self._agent_registry else 4
+                self.register_agent(next_id, cls)
+                logging.info(f"🔌 Plugin agent '{ep.name}' registered as ID {next_id}")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to load plugin agent '{ep.name}': {e}")
+
+    def register_agent(
+        self,
+        agent_id: int,
+        agent_class: type,
+        name: str = None,
+        description: str = None,
+        short_name: str = None,
+    ) -> None:
+        """Register a custom analysis agent with the orchestrator.
+
+        The agent class must inherit from BaseAnalysisAgent and implement
+        analyze(). The other BaseAnalysisAgent methods have sensible defaults
+        and do not need to be overridden.
+
+        Optional class-level attributes are used as fallbacks when name /
+        description / short_name are not passed explicitly:
+            AGENT_NAME        (str) display name
+            AGENT_DESCRIPTION (str) one-line capability description
+            AGENT_SHORT_NAME  (str) abbreviation used in output directory names
+
+        Args:
+            agent_id:    Integer ID used in select_agent / run_analysis calls.
+                         Must not collide with an existing ID you want to keep.
+            agent_class: The agent class (not an instance).
+            name:        Display name. Falls back to AGENT_NAME or class name.
+            description: Capability description. Falls back to AGENT_DESCRIPTION.
+            short_name:  Short label for directory names. Falls back to
+                         AGENT_SHORT_NAME or the first 8 chars of the class name.
+        """
+        resolved_name = name or getattr(agent_class, "AGENT_NAME", agent_class.__name__)
+        resolved_desc = description or getattr(agent_class, "AGENT_DESCRIPTION", "")
+        resolved_short = short_name or getattr(agent_class, "AGENT_SHORT_NAME", agent_class.__name__[:8])
+
+        self._agent_registry[agent_id] = {
+            "class_path": None,
+            "class": agent_class,
+            "name": resolved_name,
+            "description": resolved_desc,
+            "short_name": resolved_short,
+        }
+
+        # Keep the tools dicts and system prompt in sync.
+        if hasattr(self, "tools"):
+            self.tools._sync_from_registry()
+        self._system_prompt = get_system_prompt(self.analysis_mode, self._agent_registry)
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages[0]["content"] = self._system_prompt
+
+        logging.info(f"✅ Registered agent {agent_id}: {resolved_name}")
+
+    def register_tools(self, schemas: list, factory: callable) -> None:
+        """Register external tool functions into the orchestrator's LLM loop.
+
+        The ``factory`` callable is invoked lazily at tool-call time so it can
+        receive the loaded data (e.g. a NumPy image array) rather than a file
+        path.  The orchestrator inspects the *name* of the factory's first
+        positional parameter to decide what to pass:
+
+        * ``data_path`` / ``path`` / ``file`` / ``filepath`` / ``filename``
+          → the current data path is passed as a plain string.
+        * Any other name (e.g. ``image``, ``data``, ``array``)
+          → the file at the current data path is loaded (NumPy array for images
+          and .npy; pandas DataFrame for CSV; raw path string as fallback) and
+          that object is passed to the factory.
+
+        The factory must return a ``dict[str, callable]`` mapping tool names to
+        callables whose keyword arguments match the tool schema parameters.
+        Results are JSON-serialized if not already a string.
+
+        A per-path cache avoids reloading the file on every tool call.  The
+        cache is keyed by ``(data_path, id(factory))`` so it is invalidated
+        automatically when the user switches to a different data file.
+
+        Args:
+            schemas: List of OpenAI-format tool schemas
+                     (``[{"type": "function", "function": {...}}, ...]``).
+            factory: Callable that accepts data and returns bound tool functions.
+        """
+        import inspect
+
+        # Inspect factory signature once to decide calling convention.
+        sig = inspect.signature(factory)
+        params = list(sig.parameters.keys())
+        first_param = params[0] if params else None
+        _path_param_names = {'data_path', 'path', 'file', 'filepath', 'file_path', 'filename'}
+        factory_takes_path = first_param in _path_param_names
+        # If the factory declares an ``output_dir`` parameter, pass the session's
+        # custom-tools output directory so tools can save files and plots.
+        factory_takes_output_dir = 'output_dir' in params
+
+        registered = 0
+        for schema in schemas:
+            if schema.get("type") != "function":
+                continue
+            fn_info = schema["function"]
+            tool_name = fn_info["name"]
+            description = fn_info.get("description", "")
+            params_spec = fn_info.get("parameters", {})
+            properties = params_spec.get("properties", {})
+            required = params_spec.get("required", [])
+
+            def _make_wrapper(name, _factory, _takes_path, _takes_output_dir):
+                def wrapper(**kwargs):
+                    data_path = self.current_data_path
+                    if data_path is None:
+                        return json.dumps({
+                            "status": "error",
+                            "message": "No data loaded. Use examine_data first.",
+                        })
+                    # Resolve output directory for tools that save files / plots.
+                    output_dir = self.results_dir / "custom_tools"
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    cache_key = (data_path, id(_factory), str(output_dir))
+                    if cache_key not in self._tool_data_cache:
+                        if _takes_path:
+                            data = data_path
+                        else:
+                            data = self._load_data_as_array(data_path)
+                        if _takes_output_dir:
+                            self._tool_data_cache[cache_key] = _factory(data, output_dir=str(output_dir))
+                        else:
+                            self._tool_data_cache[cache_key] = _factory(data)
+                    bound_fns = self._tool_data_cache[cache_key]
+                    fn = bound_fns.get(name)
+                    if fn is None:
+                        return json.dumps({
+                            "status": "error",
+                            "message": (
+                                f"Tool '{name}' not found in factory output. "
+                                f"Available: {list(bound_fns.keys())}"
+                            ),
+                        })
+                    print(f"  ⚡ Tool: {name}...")
+                    result = fn(**kwargs)
+                    return result if isinstance(result, str) else json.dumps(result)
+                return wrapper
+
+            self.tools._register_tool(
+                func=_make_wrapper(tool_name, factory, factory_takes_path, factory_takes_output_dir),
+                name=tool_name,
+                description=description,
+                parameters=properties,
+                required=required,
+            )
+            self._external_tools.append({"name": tool_name, "description": description})
+            registered += 1
+
+        logging.info(f"✅ Registered {registered} external tool(s)")
+
+        # Keep the system prompt current so the LLM knows the new tools exist.
+        self._system_prompt = get_system_prompt(
+            self.analysis_mode, self._agent_registry, self._external_tools
+        )
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages[0]["content"] = self._system_prompt
+
+    def _load_data_as_array(self, data_path: str):
+        """Load a data file for use by external tool factories.
+
+        Returns a NumPy array for images and .npy files, a pandas DataFrame for
+        tabular files, or the path string itself as a fallback.
+        """
+        path = Path(data_path)
+        ext = path.suffix.lower()
+        if ext in {'.tif', '.tiff', '.png', '.jpg', '.jpeg', '.bmp'}:
+            from ...tools.image_processor import load_image
+            return load_image(str(path))
+        elif ext == '.npy':
+            import numpy as np
+            return np.load(str(path))
+        elif ext in {'.csv', '.txt', '.tsv'}:
+            try:
+                import pandas as pd
+                return pd.read_csv(str(path))
+            except ImportError:
+                import numpy as np
+                return np.genfromtxt(str(path), delimiter=',')
+        else:
+            self.logger.warning(
+                f"_load_data_as_array: unknown extension '{ext}' — "
+                "passing path string to factory."
+            )
+            return data_path
 
     def create_agent_for_analysis(self, agent_id: int, output_dir: str) -> Any:
         """
@@ -417,6 +715,13 @@ class AnalysisOrchestratorAgent:
         Raises:
             ValueError: If agent_id is invalid
         """
+        entry = self._agent_registry.get(agent_id)
+        if entry is None:
+            raise ValueError(
+                f"Unknown agent ID: {agent_id}. "
+                f"Valid IDs: {sorted(self._agent_registry.keys())}"
+            )
+
         common_kwargs = {
             "api_key": self.api_key,
             "model_name": self.model_name,
@@ -424,25 +729,19 @@ class AnalysisOrchestratorAgent:
             "output_dir": output_dir,
             "enable_human_feedback": self._enable_human_feedback,
         }
-        
-        if agent_id == 0:
-            from .fft_microscopy_agent import FFTMicroscopyAnalysisAgent
-            agent = FFTMicroscopyAnalysisAgent(**common_kwargs)
-        elif agent_id == 1:
-            from .sam_microscopy_agent import SAMMicroscopyAnalysisAgent
-            agent = SAMMicroscopyAnalysisAgent(**common_kwargs)
-        elif agent_id == 2:
-            from .hyperspectral_analysis_agent import HyperspectralAnalysisAgent
-            agent = HyperspectralAnalysisAgent(**common_kwargs)
-        elif agent_id == 3:
-            from .curve_fitting_agent import CurveFittingAgent
-            agent = CurveFittingAgent(**common_kwargs)
-        else:
-            raise ValueError(f"Unknown agent ID: {agent_id}. Valid IDs: 0-3")
-        
+
+        # Lazy-load built-in agents; custom agents already carry their class.
+        cls = entry.get("class")
+        if cls is None:
+            import importlib
+            module_path, class_name = entry["class_path"].rsplit(".", 1)
+            module = importlib.import_module(module_path)
+            cls = getattr(module, class_name)
+            entry["class"] = cls  # cache for subsequent calls
+
+        agent = cls(**common_kwargs)
         logging.info(f"   Created agent {agent_id}: {type(agent).__name__}")
         logging.info(f"   Output directory: {output_dir}")
-        
         return agent
 
     def generate_analysis_id(self, data_path: str, agent_id: int) -> str:
@@ -477,14 +776,8 @@ class AnalysisOrchestratorAgent:
         if len(dataset_name) > 30:
             dataset_name = dataset_name[:30]
         
-        # Get short agent name
-        agent_short_names = {
-            0: "FFT",
-            1: "SAM",
-            2: "Hyperspectral",
-            3: "CurveFit"
-        }
-        agent_short = agent_short_names.get(agent_id, f"agent{agent_id}")
+        # Get short agent name from registry
+        agent_short = self._agent_registry.get(agent_id, {}).get("short_name", f"agent{agent_id}")
         
         # Generate timestamp
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')

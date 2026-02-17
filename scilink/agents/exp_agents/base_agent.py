@@ -693,15 +693,25 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
     # ABSTRACT METHODS
     # =========================================================================
     
-    @abstractmethod
     def _get_claims_instruction_prompt(self) -> str:
-        """Return the instruction prompt for claims generation."""
-        raise NotImplementedError
-    
-    @abstractmethod
+        """Return the instruction prompt for claims generation.
+
+        Override in subclasses to provide domain-specific guidance for the
+        LLM when generating scientific claims and refining analysis with
+        human feedback. Returning "" is valid — the LLM will still produce
+        claims based on the data alone.
+        """
+        return ""
+
     def _get_measurement_recommendations_prompt(self) -> str:
-        """Return the instruction prompt for measurement recommendations."""
-        raise NotImplementedError
+        """Return the instruction prompt for measurement recommendations.
+
+        Override in subclasses to provide domain-specific guidance for the
+        LLM when generating follow-up measurement suggestions. Returning ""
+        is valid — the LLM will generate generic recommendations from the
+        analysis results.
+        """
+        return ""
 
     # =========================================================================
     # INTERNAL RECOMMENDATION GENERATION

@@ -25,22 +25,7 @@ class AnalysisOrchestratorTools:
     """
     Manages tool definitions, schemas, and execution for the AnalysisOrchestratorAgent.
     """
-    
-    # Agent name mapping for display
-    AGENT_NAMES = {
-        0: "FFTMicroscopyAnalysisAgent",
-        1: "SAMMicroscopyAnalysisAgent", 
-        2: "HyperspectralAnalysisAgent",
-        3: "CurveFittingAgent"
-    }
-    
-    AGENT_DESCRIPTIONS = {
-        0: "Microstructure analysis via FFT/NMF - grains, phases, domains, atomic-resolution images. Handles single images or image series.",
-        1: "Particle/object segmentation - counting, size distributions, morphology. Handles single images or image series.",
-        2: "Hyperspectral/spectral imaging data - 3D datacubes (x, y, spectral). EELS-SI, EDS mapping, Raman imaging.",
-        3: "1D data fitting - curves, spectra, time series. DSC, TGA, XRD, UV-Vis, Raman, PL, IV curves, kinetics. Handles single files or series."
-    }
-    
+
     def __init__(self, orchestrator_instance):
         """
         Args:
@@ -48,12 +33,24 @@ class AnalysisOrchestratorTools:
         """
         self.orch = orchestrator_instance
         self.logger = logging.getLogger(self.__class__.__name__)
-        
+
+        # Agent display dicts — populated from the orchestrator's live registry
+        # so that custom agents registered via register_agent() appear here too.
+        self.AGENT_NAMES: Dict[int, str] = {}
+        self.AGENT_DESCRIPTIONS: Dict[int, str] = {}
+        self._sync_from_registry()
+
         # Build function map and schemas
         self.functions_map: Dict[str, Callable] = {}
         self.openai_schemas: list = []
-        
+
         self._register_all_tools()
+
+    def _sync_from_registry(self) -> None:
+        """Rebuild AGENT_NAMES and AGENT_DESCRIPTIONS from the orchestrator's registry."""
+        registry = getattr(self.orch, "_agent_registry", {})
+        self.AGENT_NAMES = {aid: e["name"] for aid, e in registry.items()}
+        self.AGENT_DESCRIPTIONS = {aid: e["description"] for aid, e in registry.items()}
 
     def _get_human_feedback_enabled(self) -> bool:
         """Get current human feedback setting from orchestrator."""
@@ -1149,10 +1146,11 @@ class AnalysisOrchestratorTools:
         # =====================================================================
         def show_available_agents() -> str:
             """
-            Show list of available analysis agents and their capabilities.
+            Show list of available analysis agents and their capabilities,
+            plus any custom tools registered via register_tools().
             """
             print(f"  ⚡ Tool: Showing available agents...")
-            
+
             agents = []
             for agent_id in sorted(self.AGENT_NAMES.keys()):
                 agents.append({
@@ -1160,17 +1158,30 @@ class AnalysisOrchestratorTools:
                     "name": self.AGENT_NAMES[agent_id],
                     "description": self.AGENT_DESCRIPTIONS[agent_id]
                 })
-            
-            return json.dumps({
+
+            result = {
                 "status": "success",
                 "agents": agents,
-                "current_selection": self.orch.selected_agent_id
-            })
-        
+                "current_selection": self.orch.selected_agent_id,
+            }
+
+            external_tools = getattr(self.orch, "_external_tools", [])
+            if external_tools:
+                result["custom_tools"] = external_tools
+                result["custom_tools_note"] = (
+                    "These tools are callable directly by name and operate on "
+                    "the current data file (set via examine_data)."
+                )
+
+            return json.dumps(result)
+
         self._register_tool(
             func=show_available_agents,
             name="show_available_agents",
-            description="Show list of available analysis agents and their capabilities.",
+            description=(
+                "Show list of available analysis agents and their capabilities, "
+                "plus any custom tools registered for the current session."
+            ),
             parameters={},
             required=[]
         )
