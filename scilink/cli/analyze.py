@@ -113,6 +113,39 @@ Metadata Options:
         help='Path to metadata file (.json or .txt)'
     )
     
+    # Custom agent arguments
+    parser.add_argument(
+        '--agents',
+        type=str,
+        nargs='+',
+        dest='agent_files',
+        metavar='AGENT_FILE',
+        help=(
+            'Path(s) to Python files containing custom BaseAnalysisAgent subclasses. '
+            'All subclasses found in each file are registered automatically. '
+            'Example: scilink analyze --agents ./my_xrd_agent.py'
+        )
+    )
+
+    # Custom tool arguments
+    parser.add_argument(
+        '--tools',
+        type=str,
+        nargs='+',
+        dest='tool_files',
+        metavar='TOOL_FILE',
+        help=(
+            'Path(s) to Python files containing domain-specific tool functions to '
+            'expose directly to the orchestrator\'s LLM loop. '
+            'Each file must define: (1) a list of OpenAI-format tool schemas named '
+            '\'tool_schemas\', \'openai_schemas\', or any top-level list of '
+            'OpenAI function dicts; (2) a factory function named '
+            '\'create_tool_functions\' (or any function ending in \'_tool_functions\') '
+            'that accepts data and returns a dict mapping tool names to callables. '
+            'Example: scilink analyze --tools ./image_analysis_tools.py'
+        )
+    )
+
     # Session arguments
     parser.add_argument(
         '--session-dir',
@@ -175,6 +208,22 @@ Metadata Options:
     if args.metadata_path and not Path(args.metadata_path).exists():
         parser.error(f"--metadata path does not exist: {args.metadata_path}")
     
+    # Validate custom agent files if provided
+    if args.agent_files:
+        for af in args.agent_files:
+            if not Path(af).exists():
+                parser.error(f"--agents path does not exist: {af}")
+            if not af.endswith('.py'):
+                parser.error(f"--agents file must be a .py file: {af}")
+
+    # Validate custom tool files if provided
+    if args.tool_files:
+        for tf in args.tool_files:
+            if not Path(tf).exists():
+                parser.error(f"--tools path does not exist: {tf}")
+            if not tf.endswith('.py'):
+                parser.error(f"--tools file must be a .py file: {tf}")
+
     # Build config dict
     config = {
         'model_name': args.model,
@@ -185,6 +234,8 @@ Metadata Options:
         'metadata_path': args.metadata_path,
         'session_dir': args.session_dir,
         'restore': args.restore,
+        'agent_files': args.agent_files or [],
+        'tool_files': args.tool_files or [],
     }
     
     # Run the interactive orchestrator
@@ -266,9 +317,11 @@ class AnalysisPlayground:
         session_dir = self.config.get('session_dir')
         restore = self.config.get('restore', False)
         
-        # Store initial paths for later use in run()
+        # Store initial paths and agent/tool files for later use in run()
         self._initial_data_path = data_path
         self._initial_metadata_path = metadata_path
+        self._agent_files = self.config.get('agent_files', [])
+        self._tool_files = self.config.get('tool_files', [])
         
         # Convert mode string to enum
         mode_map = {
@@ -364,12 +417,20 @@ Supported data types:
                 futurehouse_api_key=futurehouse_key
             )
             print("✅ Agent ready!")
-            
+
         except Exception as e:
             print(f"❌ Failed to initialize agent: {e}")
             import traceback
             traceback.print_exc()
             sys.exit(1)
+
+        # === LOAD CUSTOM AGENT FILES ===
+        if self._agent_files:
+            self._load_custom_agents(self._agent_files)
+
+        # === LOAD CUSTOM TOOL FILES ===
+        if self._tool_files:
+            self._load_custom_tools(self._tool_files)
         
         # === SHOW SESSION INFO ===
         print("\n" + "="*60)
@@ -398,6 +459,119 @@ Supported data types:
         if self._initial_metadata_path:
             print(f"📋 Initial metadata: {self._initial_metadata_path}")
         
+    def _load_custom_agents(self, agent_files: list) -> None:
+        """Load BaseAnalysisAgent subclasses from user-supplied .py files and register them."""
+        import importlib.util
+        import inspect
+        from scilink.agents.exp_agents.base_agent import BaseAnalysisAgent
+
+        for file_path in agent_files:
+            path = Path(file_path).resolve()
+            print(f"\n🔌 Loading custom agents from: {path}")
+            try:
+                spec = importlib.util.spec_from_file_location(path.stem, path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            except Exception as e:
+                print(f"   ❌ Failed to load {path.name}: {e}")
+                continue
+
+            found = 0
+            for _, cls in inspect.getmembers(module, inspect.isclass):
+                if (
+                    issubclass(cls, BaseAnalysisAgent)
+                    and cls is not BaseAnalysisAgent
+                    and cls.__module__ == module.__name__
+                ):
+                    next_id = max(self.agent._agent_registry.keys()) + 1
+                    self.agent.register_agent(next_id, cls)
+                    print(f"   ✅ Registered '{cls.__name__}' as agent ID {next_id}")
+                    found += 1
+
+            if found == 0:
+                print(f"   ⚠️  No BaseAnalysisAgent subclasses found in {path.name}")
+
+    def _load_custom_tools(self, tool_files: list) -> None:
+        """Load external tool functions from user-supplied .py files and register them.
+
+        Each file must expose:
+          1. A list of OpenAI-format tool schemas — discovered by looking for a
+             module-level variable named ``tool_schemas`` or ``openai_schemas``
+             first, then falling back to any top-level list whose first element is
+             a dict with ``type == "function"``.
+          2. A factory function that accepts data and returns a dict mapping tool
+             names to callables.  The factory is discovered by looking for
+             ``create_tool_functions`` first, then any module-level function whose
+             name ends with ``_tool_functions``.
+
+        The orchestrator's ``register_tools()`` method decides at call-time whether
+        to pass the current data path or a loaded NumPy/DataFrame object to the
+        factory, based on the name of the factory's first parameter.
+        """
+        import importlib.util
+        import inspect
+
+        for file_path in tool_files:
+            path = Path(file_path).resolve()
+            print(f"\n🔧 Loading custom tools from: {path}")
+            try:
+                spec = importlib.util.spec_from_file_location(path.stem, path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            except Exception as e:
+                print(f"   ❌ Failed to load {path.name}: {e}")
+                continue
+
+            # ── Discover schemas ──────────────────────────────────────────────
+            schemas = (
+                getattr(module, 'tool_schemas', None)
+                or getattr(module, 'openai_schemas', None)
+            )
+            if schemas is None:
+                # Auto-detect: any top-level list of OpenAI function dicts
+                for attr_name in dir(module):
+                    obj = getattr(module, attr_name, None)
+                    if (
+                        isinstance(obj, list)
+                        and obj
+                        and isinstance(obj[0], dict)
+                        and obj[0].get('type') == 'function'
+                    ):
+                        schemas = obj
+                        print(f"   📋 Auto-detected schemas in '{attr_name}'")
+                        break
+
+            if not schemas:
+                print(
+                    f"   ⚠️  No tool schemas found in {path.name}.\n"
+                    "       Define 'tool_schemas' as a list of OpenAI-format tool dicts."
+                )
+                continue
+
+            # ── Discover factory ──────────────────────────────────────────────
+            factory = getattr(module, 'create_tool_functions', None)
+            if factory is None:
+                for name, fn in inspect.getmembers(module, inspect.isfunction):
+                    if (
+                        name.endswith('_tool_functions')
+                        and fn.__module__ == module.__name__
+                    ):
+                        factory = fn
+                        print(f"   🏭 Auto-detected factory '{name}'")
+                        break
+
+            if factory is None:
+                print(
+                    f"   ⚠️  No factory function found in {path.name}.\n"
+                    "       Define 'create_tool_functions(data)' returning "
+                    "a dict mapping tool names to callables."
+                )
+                continue
+
+            self.agent.register_tools(schemas, factory)
+            count = sum(1 for s in schemas if s.get('type') == 'function')
+            print(f"   ✅ Registered {count} tool(s) from {path.name}")
+
     def print_help(self):
         """Print available commands."""
         print("\n" + "="*60)
