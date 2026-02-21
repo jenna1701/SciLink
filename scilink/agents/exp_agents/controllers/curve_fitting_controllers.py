@@ -2380,7 +2380,7 @@ class ConditionalTrendAnalysisController:
     """Generates and executes custom Python script for trend analysis. Only for n>=2."""
     
     TREND_ANALYSIS_INSTRUCTIONS = '''You are analyzing a series of fitted spectra/curves to identify trends.
-
+{objective}
 **SERIES SUMMARY:**
 {series_summary}
 
@@ -2395,7 +2395,7 @@ class ConditionalTrendAnalysisController:
 2. DO NOT include individual spectrum fit visualizations - only create parameter trend dashboard
 3. Use plt.close('all') after saving each figure to free memory
 
-**VISUALIZATION SCOPE - TRENDS ONLY:**
+**VISUALIZATION SCOPE - TRENDS:**
 Create a SINGLE dashboard figure showing how fitted PARAMETERS evolve across the series.
 DO NOT recreate individual spectrum fits - those already exist separately.
 The dashboard should show:
@@ -2461,7 +2461,7 @@ Return JSON with:
         series_results = state.get("series_results", [])
         series_metadata = state.get("series_metadata", {})
         flagged_spectra = state.get("flagged_spectra", [])
-        
+
         param_summary = []
         for r in series_results:
             if r["success"]:
@@ -2471,13 +2471,22 @@ Return JSON with:
                     summary["flagged"] = True
                     summary["flag_reason"] = r.get("flag_reason")
                 param_summary.append(summary)
-        
+
         flagged_info = json.dumps(flagged_spectra, indent=2) if flagged_spectra else "No spectra were flagged."
-        
+
+        objective = state.get("analysis_objective")
+        objective_block = (
+            f"\n**ANALYSIS OBJECTIVE:**\n{objective}\n"
+            "Frame the trend analysis around answering this objective. "
+            "If the objective involves calibration or quantitative modeling, "
+            "the script must compute and output regression models.\n"
+        ) if objective else ""
+
         prompt = self.TREND_ANALYSIS_INSTRUCTIONS.format(
             series_summary=json.dumps(param_summary, indent=2),
             series_metadata=json.dumps(series_metadata, indent=2),
-            flagged_info=flagged_info
+            flagged_info=flagged_info,
+            objective=objective_block,
         )
         
         try:
