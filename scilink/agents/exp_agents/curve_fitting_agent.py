@@ -751,22 +751,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if series_results and series_results[0].get("quality_warning"):
                 results["quality_warning"] = series_results[0]["quality_warning"]
                 results["attempted_models"] = series_results[0].get("attempted_models", [])
-            
-            # Apply feedback if enabled
-            initial_result = {
-                "detailed_analysis": results["detailed_analysis"],
-                "scientific_claims": results["scientific_claims"],
-                "fitting_parameters": results["fitting_parameters"],
-                "literature_files": results["literature_files"],
-            }
-            final_result = self._apply_feedback_if_enabled(
-                initial_result, 
-                system_info=state.get("system_info")
-            )
-            
-            results["detailed_analysis"] = final_result.get("detailed_analysis")
-            results["scientific_claims"] = final_result.get("scientific_claims", [])
-            
+
+
         else:
             # Series: full structure with trends and flagged spectra
             successful = sum(1 for r in series_results if r.get("success", False))

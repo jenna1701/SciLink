@@ -319,17 +319,10 @@ class AtomisticMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         valid_claims = self._validate_scientific_claims(result_json.get("scientific_claims", []))
 
-        initial_result = {
+        final_result = {
             "detailed_analysis": result_json.get("detailed_analysis", "Analysis not provided."),
             "scientific_claims": valid_claims
         }
-        
-        # 3. Feedback Loop
-        final_result = self._apply_feedback_if_enabled(
-            initial_result,
-            image_path=image_path,
-            system_info=system_info
-        )
 
         # 4. Log Success
         self._log_action(

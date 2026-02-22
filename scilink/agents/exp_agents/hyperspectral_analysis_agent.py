@@ -300,27 +300,11 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             result_json.get("scientific_claims", [])
         )
         
-        initial_result = {
-            "detailed_analysis": result_json.get("detailed_analysis", "Analysis not provided."),
-            "scientific_claims": valid_claims
-        }
-        
-        # Apply feedback if enabled
-        final_result = self._apply_feedback_if_enabled(
-            initial_result,
-            system_info=self._handle_system_info(system_info)
-        )
-        
-        # Regenerate report if feedback changed results
-        if self.enable_human_feedback and final_result != initial_result:
-            self.logger.info("🔄 Feedback applied. Regenerating HTML report...")
-            self._regenerate_report_with_feedback(final_result, system_info, data_path)
-        
         # Build Response
         response = {
             "status": "success",
-            "detailed_analysis": final_result.get("detailed_analysis"),
-            "scientific_claims": final_result.get("scientific_claims", []),
+            "detailed_analysis": result_json.get("detailed_analysis", "Analysis not provided."),
+            "scientific_claims": valid_claims,
             "output_directory": str(self.output_dir)
         }
         
