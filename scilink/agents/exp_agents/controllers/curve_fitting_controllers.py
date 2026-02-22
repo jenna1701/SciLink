@@ -118,6 +118,55 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
             prompt.append(validation)
 
 
+def _append_prior_knowledge_context(prompt: list, state: dict) -> None:
+    """Append prior knowledge from reference analyses to an LLM prompt.
+
+    Args:
+        prompt: Mutable list of prompt parts to extend.
+        state: Pipeline state dict containing ``prior_knowledge`` list.
+    """
+    knowledge = state.get("prior_knowledge", [])
+    if not knowledge:
+        return
+    prompt.append("\n## Prior Knowledge from Reference Analyses")
+    prompt.append(
+        "The following knowledge was derived from prior reference analyses. "
+        "Use it to inform your analysis approach, model selection, and interpretation."
+    )
+    for entry in knowledge:
+        prompt.append(f"\n### {entry.get('focus', 'Reference findings')}")
+        prompt.append(entry.get("summary", ""))
+        findings = entry.get("key_findings", [])
+        if findings:
+            prompt.append("\nKey findings:")
+            for f in findings:
+                prompt.append(f"- {f}")
+
+
+def _append_objective_context(prompt: list, state: dict) -> None:
+    """Append high-level scientific objective to an LLM prompt.
+
+    The objective is injected as a top-level framing directive that tells the
+    LLM *why* the analysis is being performed and *what question* to answer.
+    It is distinct from ``analysis_hints`` which provide tactical guidance on
+    *how* to analyze.
+
+    Args:
+        prompt: Mutable list of prompt parts to extend.
+        state: Pipeline state dict containing ``analysis_objective``.
+    """
+    objective = state.get("analysis_objective")
+    if not objective:
+        return
+    prompt.append(
+        f"\n## Analysis Objective\n"
+        f"The overarching scientific objective of this analysis is: {objective}\n"
+        f"Frame your analysis, model selection, and interpretation around "
+        f"answering this objective. All findings should be evaluated in terms "
+        f"of how they contribute to resolving this question."
+    )
+
+
 class AnalyzeDataController:
     """Compute data statistics and create initial visualization."""
 
@@ -548,11 +597,14 @@ class HumanFeedbackRefinementController:
             "\n## Metadata\n" + json.dumps(state.get("system_info", {}), indent=2),
         ]
 
+        _append_objective_context(prompt, state)
+
         if state.get("analysis_hints"):
             prompt.append(f"\n## User Guidance\n{state['analysis_hints']}")
 
         _append_auxiliary_context(prompt, state)
         _append_skill_context(prompt, state, "planning")
+        _append_prior_knowledge_context(prompt, state)
 
         if not state.get("is_single_spectrum", True):
             prompt.append(f"\n## Series Context\nThis is the first spectrum in a series of {state.get('num_spectra', 1)}. "
@@ -592,11 +644,14 @@ class HumanFeedbackRefinementController:
             f"\n## User Feedback\nAdjust the plan based on this feedback: \"{feedback}\"",
         ]
 
+        _append_objective_context(prompt, state)
+
         if state.get("analysis_hints"):
             prompt.append(f"\n## Original Guidance\n{state['analysis_hints']}")
 
         _append_auxiliary_context(prompt, state)
         _append_skill_context(prompt, state, "planning")
+        _append_prior_knowledge_context(prompt, state)
 
         response = self.model.generate_content(prompt, generation_config=self.generation_config)
         result, error = self._parse(response)
@@ -2178,6 +2233,7 @@ Return JSON with:
                 "successful": successful,
                 "flagged_count": flagged_count,
                 "is_single_spectrum": is_single,
+                "series_metadata": state.get("series_metadata", {}),
                 "quality_settings": {
                     "r2_threshold": self.r2_threshold,
                     "max_model_retries": self.max_model_retries,
@@ -2325,7 +2381,7 @@ class ConditionalTrendAnalysisController:
     """Generates and executes custom Python script for trend analysis. Only for n>=2."""
     
     TREND_ANALYSIS_INSTRUCTIONS = '''You are analyzing a series of fitted spectra/curves to identify trends.
-
+{objective}
 **SERIES SUMMARY:**
 {series_summary}
 
@@ -2340,7 +2396,7 @@ class ConditionalTrendAnalysisController:
 2. DO NOT include individual spectrum fit visualizations - only create parameter trend dashboard
 3. Use plt.close('all') after saving each figure to free memory
 
-**VISUALIZATION SCOPE - TRENDS ONLY:**
+**VISUALIZATION SCOPE - TRENDS:**
 Create a SINGLE dashboard figure showing how fitted PARAMETERS evolve across the series.
 DO NOT recreate individual spectrum fits - those already exist separately.
 The dashboard should show:
@@ -2406,7 +2462,7 @@ Return JSON with:
         series_results = state.get("series_results", [])
         series_metadata = state.get("series_metadata", {})
         flagged_spectra = state.get("flagged_spectra", [])
-        
+
         param_summary = []
         for r in series_results:
             if r["success"]:
@@ -2416,13 +2472,22 @@ Return JSON with:
                     summary["flagged"] = True
                     summary["flag_reason"] = r.get("flag_reason")
                 param_summary.append(summary)
-        
+
         flagged_info = json.dumps(flagged_spectra, indent=2) if flagged_spectra else "No spectra were flagged."
-        
+
+        objective = state.get("analysis_objective")
+        objective_block = (
+            f"\n**ANALYSIS OBJECTIVE:**\n{objective}\n"
+            "Frame the trend analysis around answering this objective. "
+            "If the objective involves calibration or quantitative modeling, "
+            "the script must compute and output regression models.\n"
+        ) if objective else ""
+
         prompt = self.TREND_ANALYSIS_INSTRUCTIONS.format(
             series_summary=json.dumps(param_summary, indent=2),
             series_metadata=json.dumps(series_metadata, indent=2),
-            flagged_info=flagged_info
+            flagged_info=flagged_info,
+            objective=objective_block,
         )
         
         try:
@@ -2664,8 +2729,10 @@ Return JSON with:
         if state.get("literature_context"):
             prompt_parts.extend(["\n## Literature", state["literature_context"]])
 
+        _append_objective_context(prompt_parts, state)
         _append_auxiliary_context(prompt_parts, state)
         _append_skill_context(prompt_parts, state, "interpretation")
+        _append_prior_knowledge_context(prompt_parts, state)
 
         try:
             response = self.model.generate_content(contents=prompt_parts, generation_config=self.generation_config, safety_settings=self.safety_settings)
@@ -2738,8 +2805,10 @@ Return JSON with:
                         prompt_parts.append(f"\n{Path(file_path).name}:")
                         prompt_parts.append({"mime_type": "image/png", "data": f.read()})
 
+        _append_objective_context(prompt_parts, state)
         _append_auxiliary_context(prompt_parts, state)
         _append_skill_context(prompt_parts, state, "interpretation")
+        _append_prior_knowledge_context(prompt_parts, state)
 
         try:
             response = self.model.generate_content(contents=prompt_parts, generation_config=self.generation_config, safety_settings=self.safety_settings)

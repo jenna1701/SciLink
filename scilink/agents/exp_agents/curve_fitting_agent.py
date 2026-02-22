@@ -230,12 +230,15 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         data: AnalysisInput,
         system_info: Dict[str, Any] | str | None = None,
         # Curve fitting specific
+        objective: str | None = None,
         hints: str | None = None,
         series_metadata: Optional[dict] = None,
         auxiliary_data: Optional[str] = None,
         auxiliary_label: Optional[str] = None,
         # Domain skill
         skill: Optional[str] = None,
+        # Prior knowledge from reference analyses
+        prior_knowledge: Optional[List[Dict[str, Any]]] = None,
         # Quality control overrides (optional)
         r2_threshold: Optional[float] = None,
         max_model_retries: Optional[int] = None,
@@ -253,14 +256,26 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 - str: Single spectrum path (.npy, .csv, .txt)
                 - List[str]: Multiple spectrum paths (series)
                 - np.ndarray: 1D/2D (single) or 3D (series stack) array
-            system_info: Sample/experiment metadata
-            hints: Optional guidance for the analysis
-            series_metadata: Optional metadata about the series, e.g.:
-                {
-                    "series_type": "temperature",  # or "time", "concentration", etc.
-                    "values": [300, 350, 400],     # x-axis values
-                    "unit": "K"                     # unit for values
-                }
+            system_info: Sample/experiment metadata. May include a ``"series"``
+                key with series metadata (see below); it will be extracted
+                automatically.
+            objective: Optional high-level scientific objective that frames
+                the entire analysis (e.g., "Determine whether the sample
+                underwent a phase transition", "Quantify the relative
+                concentration of anatase vs rutile"). Unlike hints which
+                guide *how* to analyze, objective specifies *why* you are
+                analyzing and *what question* to answer.
+            hints: Optional tactical guidance for the analysis (e.g.,
+                "Try a Voigt model", "Focus on the band gap region")
+            series_metadata: Optional metadata about the series. Can also
+                be provided inside ``system_info["series"]``. Explicit
+                ``series_metadata`` takes precedence. Expected structure::
+
+                    {
+                        "series_type": "temperature",   # or "time", "concentration", …
+                        "values": [300, 350, 400],      # one value per spectrum
+                        "unit": "K"                      # unit for values
+                    }
             auxiliary_data: Optional path to an auxiliary dataset (1D curve file
                 or 2D image) from the same sample/experiment. Not fitted or
                 analyzed in detail, but provided to the LLM as context for
@@ -288,8 +303,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         Examples:
             # Single spectrum
             result = agent.analyze("spectrum.csv")
-            
-            # Series of spectra
+
+            # Series with series metadata as a separate argument
             result = agent.analyze(
                 ["temp_300K.csv", "temp_350K.csv", "temp_400K.csv"],
                 series_metadata={
@@ -298,10 +313,24 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "unit": "K"
                 }
             )
-            
+
+            # Series with series metadata inside system_info
+            result = agent.analyze(
+                ["conc_01.csv", "conc_02.csv", "conc_03.csv"],
+                system_info={
+                    "sample": "Boron-doped silicon",
+                    "instrument": "Raman spectrometer, 532 nm",
+                    "series": {
+                        "series_type": "concentration",
+                        "values": [0.1, 0.2, 0.3],
+                        "unit": "mol/L"
+                    }
+                }
+            )
+
             # With relaxed quality threshold
             result = agent.analyze("noisy_spectrum.csv", r2_threshold=0.85)
-            
+
             # Numpy stack (3D array: n_spectra x 2 x n_points)
             result = agent.analyze(my_spectra_stack)
 
@@ -433,6 +462,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
             self.logger.info(f"   Skill loaded: {parsed['name']}")
 
+        # Extract series metadata from system_info if not provided explicitly
+        handled_system_info = self._handle_system_info(system_info)
+        handled_system_info, series_metadata = self._extract_series_metadata(
+            handled_system_info, series_metadata
+        )
+
         # Build initial state
         state = {
             # Input data
@@ -443,15 +478,19 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "is_single_spectrum": is_single_spectrum,
 
             # System info
-            "system_info": self._handle_system_info(system_info),
+            "system_info": handled_system_info,
             "series_metadata": series_metadata or {},
             "analysis_hints": hints,
+            "analysis_objective": objective,
 
             # Auxiliary reference data
             **aux_state,
 
             # Domain skill
             **skill_state,
+
+            # Prior knowledge from reference analyses
+            "prior_knowledge": prior_knowledge or [],
 
             # First spectrum (for planning)
             "data_path": spectrum_paths[0] if spectrum_paths else first_spectrum_name,
@@ -712,22 +751,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if series_results and series_results[0].get("quality_warning"):
                 results["quality_warning"] = series_results[0]["quality_warning"]
                 results["attempted_models"] = series_results[0].get("attempted_models", [])
-            
-            # Apply feedback if enabled
-            initial_result = {
-                "detailed_analysis": results["detailed_analysis"],
-                "scientific_claims": results["scientific_claims"],
-                "fitting_parameters": results["fitting_parameters"],
-                "literature_files": results["literature_files"],
-            }
-            final_result = self._apply_feedback_if_enabled(
-                initial_result, 
-                system_info=state.get("system_info")
-            )
-            
-            results["detailed_analysis"] = final_result.get("detailed_analysis")
-            results["scientific_claims"] = final_result.get("scientific_claims", [])
-            
+
+
         else:
             # Series: full structure with trends and flagged spectra
             successful = sum(1 for r in series_results if r.get("success", False))
@@ -801,20 +826,22 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         spectrum_stack: Optional[np.ndarray] = None,
         system_info: Optional[Union[dict, str]] = None,
         series_metadata: Optional[dict] = None,
+        objective: str | None = None,
         hints: str | None = None,
     ) -> Dict[str, Any]:
         """
         Analyze a series of spectra.
-        
+
         BACKWARD COMPATIBLE: Delegates to unified analyze() method.
-        
+
         Args:
             spectrum_paths: List of file paths to spectra
             spectrum_stack: 3D numpy array (n_spectra x 2 x n_points)
             system_info: System/sample metadata
             series_metadata: Metadata about the series
+            objective: High-level scientific objective
             hints: Analysis guidance
-        
+
         Returns:
             Analysis results dictionary
         """
@@ -823,14 +850,16 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 spectrum_paths,
                 system_info=system_info,
                 series_metadata=series_metadata,
-                hints=hints
+                hints=hints,
+                objective=objective,
             )
         elif spectrum_stack is not None:
             return self.analyze(
                 spectrum_stack,
                 system_info=system_info,
                 series_metadata=series_metadata,
-                hints=hints
+                hints=hints,
+                objective=objective,
             )
         else:
             return {

@@ -2146,6 +2146,8 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
 
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
 
+**CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, or the overall analysis approach. The model is locked for series consistency.
+
 **Response:** Return only `{{"diagnosis": "...", "script": "..."}}`
 """
 
@@ -2226,6 +2228,33 @@ You have: fit visualization, extracted parameters, sample metadata.
     ]
 }}
 ```
+"""
+
+KNOWLEDGE_SYNTHESIS_INSTRUCTIONS = """You are an expert scientific data analyst. You have been given the detailed results from multiple analyses of reference datasets. Your task is to synthesize actionable knowledge from these results, focused on a specific topic.
+
+**Focus Area:** {focus}
+
+**Analysis Results:**
+{analysis_texts}
+
+**Instructions:**
+1. Review all provided analysis results carefully.
+2. Extract actionable, specific findings relevant to the focus area.
+3. Quantitative details (peak positions, ratios, thresholds, calibration offsets) are highly valued.
+4. Findings should be phrased so they can directly guide a NEW analysis of similar data.
+
+You MUST output a valid JSON object with exactly two keys:
+
+{{
+    "summary": "A concise paragraph summarizing the key knowledge derived from the reference analyses, focused on {focus}.",
+    "key_findings": [
+        "Finding 1: specific, quantitative if possible",
+        "Finding 2: another actionable insight",
+        "..."
+    ]
+}}
+
+Ensure the final output is ONLY the JSON object and nothing else.
 """
 
 # Backwards compatibility
