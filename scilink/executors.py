@@ -6,6 +6,7 @@ import uuid
 import tempfile
 import logging
 import signal
+import threading
 
 from .auth import get_api_key
 
@@ -302,21 +303,26 @@ class ExecutionTimeout:
             "Consider vectorized operations or reducing iteration count."
         )
 
+    def _can_use_sigalrm(self):
+        return (
+            hasattr(signal, 'SIGALRM')
+            and threading.current_thread() is threading.main_thread()
+        )
+
     def __enter__(self):
-        if hasattr(signal, 'SIGALRM'):
+        if self._can_use_sigalrm():
             self._old_handler = signal.signal(signal.SIGALRM, self._handler)
             signal.alarm(self.seconds)
         else:
-            import logging
             logging.warning(
-                "ExecutionTimeout: SIGALRM not available on this platform. "
-                "No timeout protection for in-process code execution. "
-                "An infinite loop in generated code will hang the process."
+                "ExecutionTimeout: SIGALRM not available (non-main thread or "
+                "unsupported platform). No timeout protection for in-process "
+                "code execution."
             )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if hasattr(signal, 'SIGALRM'):
+        if self._can_use_sigalrm():
             signal.alarm(0)
             if self._old_handler is not None:
                 signal.signal(signal.SIGALRM, self._old_handler)
