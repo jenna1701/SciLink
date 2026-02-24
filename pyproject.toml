@@ -51,8 +51,12 @@ sim = [
     "atomate2>=0.0.21",
     "mdanalysis>=2.9.0",
 ]
+ui = [
+    "streamlit>=1.37.0",
+]
 all = [
     "scilink[sim]",
+    "scilink[ui]",
 ]
 
 [project.urls]
@@ -63,6 +67,7 @@ all = [
 scilink = "scilink.cli.main:main"
 scilink-workflows = "scilink.cli.workflows:main"
 scilink-agent = "scilink.cli.run_agent:main"
+scilink-ui = "scilink.cli.ui:main"
 
 # Third-party packages can advertise custom analysis agents here.
 # SciLink discovers these automatically on startup via importlib.metadata.
@@ -78,4 +83,4 @@ include-package-data = true
 where = ["."]
 
 [tool.setuptools.package-data]
-"scilink" = ["agents/sim_agents/docs/*.txt", "agents/sim_agents/docs/*.md"]
+"scilink" = ["agents/sim_agents/docs/*.txt", "agents/sim_agents/docs/*.md", "ui/.streamlit/*.toml"]

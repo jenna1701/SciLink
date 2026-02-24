@@ -566,7 +566,11 @@ class HumanFeedbackRefinementController:
         print(f"\n📊 Approach:\n   {state.get('analysis_approach', 'N/A')}")
         print(f"\n📐 Physical Model:\n   {state.get('physical_model', 'N/A')}")
         print(f"\n🎯 Parameters to Extract:\n   {', '.join(state.get('parameters_to_extract', [])) or 'N/A'}")
-        print(f"\n⚙️  Fitting Strategy:\n   {state.get('fitting_strategy', 'N/A')}")
+        import re as _re
+        _strategy = state.get("fitting_strategy", "N/A")
+        # Put each numbered step on its own line with consistent indentation
+        _strategy = _re.sub(r"\s*(\d+)\.\s*", r"\n   \1. ", _strategy).strip()
+        print(f"\n⚙️  Fitting Strategy:\n   {_strategy}")
         
         if state.get("literature_query"):
             print(f"\n📚 Literature Query:\n   {state['literature_query']}")

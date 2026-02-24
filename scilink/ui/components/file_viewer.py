@@ -1,0 +1,77 @@
+"""File preview component for the File Explorer page."""
+
+from pathlib import Path
+
+import streamlit as st
+
+
+def render_file_preview(file_path: Path) -> None:
+    """Display an appropriate preview for the given file and a download button."""
+    suffix = file_path.suffix.lower()
+
+    st.subheader(file_path.name)
+
+    # Download button
+    with open(file_path, "rb") as fh:
+        st.download_button(
+            "Download",
+            data=fh.read(),
+            file_name=file_path.name,
+            key=f"dl_{file_path}",
+        )
+
+    # Image
+    if suffix in (".png", ".jpg", ".jpeg"):
+        st.image(str(file_path))
+        return
+
+    if suffix in (".tif", ".tiff"):
+        try:
+            from PIL import Image
+            img = Image.open(file_path)
+            st.image(img)
+        except Exception:
+            st.info("Install Pillow to preview TIFF files.")
+        return
+
+    # JSON
+    if suffix == ".json":
+        import json
+        try:
+            data = json.loads(file_path.read_text())
+            st.json(data)
+        except Exception:
+            st.code(file_path.read_text(), language="json")
+        return
+
+    # Tabular
+    if suffix in (".csv", ".tsv"):
+        try:
+            import pandas as pd
+            sep = "\t" if suffix == ".tsv" else ","
+            df = pd.read_csv(file_path, sep=sep)
+            st.dataframe(df)
+        except Exception:
+            st.code(file_path.read_text()[:5000], language="text")
+        return
+
+    # NumPy
+    if suffix == ".npy":
+        try:
+            import numpy as np
+            arr = np.load(file_path)
+            st.markdown(f"**shape:** `{arr.shape}` &nbsp; **dtype:** `{arr.dtype}`")
+            if arr.ndim <= 2 and max(arr.shape) <= 2048:
+                st.image(arr, clamp=True)
+            else:
+                st.text(f"min={arr.min():.4g}  max={arr.max():.4g}  mean={arr.mean():.4g}")
+        except Exception as exc:
+            st.error(f"Could not load .npy file: {exc}")
+        return
+
+    # Plain text fallback
+    if suffix in (".txt", ".md", ".log"):
+        st.code(file_path.read_text()[:10000], language="text")
+        return
+
+    st.info(f"No preview available for `{suffix}` files.")

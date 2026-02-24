@@ -15,25 +15,20 @@ def load_curve_data(data_path: str) -> np.ndarray:
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"File not found: {data_path}")
 
-    try:
-        # Attempt 1: Auto-detect whitespace (tabs/spaces) skipping potential header
-        # 'comments' handles lines starting with #, skiprows handles explicit headers
-        # If no delimiter is given, numpy matches any whitespace (tabs OR spaces)
-        return np.loadtxt(data_path) 
-    except Exception:
-        pass
+    attempts = [
+        dict(),                                # whitespace-delimited, no header
+        dict(skiprows=1),                      # whitespace-delimited, skip header
+        dict(delimiter=','),                   # CSV, no header
+        dict(delimiter=',', skiprows=1),       # CSV, skip header
+    ]
 
-    try:
-        # Attempt 2: Auto-detect but try skipping the first row (common for headers without #)
-        return np.loadtxt(data_path, skiprows=1)
-    except Exception:
-        pass
-
-    try:
-        # Attempt 3: Explicit Comma (CSV)
-        return np.loadtxt(data_path, delimiter=',', skiprows=1)
-    except Exception:
-        pass
+    for kw in attempts:
+        try:
+            data = np.loadtxt(data_path, **kw)
+            if data.size > 0:
+                return data
+        except Exception:
+            pass
 
     # If all fail, raise descriptive error
     raise ValueError(f"Unsupported file format or invalid data structure in {data_path}.")

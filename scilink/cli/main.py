@@ -138,7 +138,12 @@ def main():
         from scilink.cli.analyze import main as analyze_main
         sys.argv = [sys.argv[0] + ' analyze'] + sys.argv[2:]
         return analyze_main()
-    
+
+    elif command == 'ui':
+        from scilink.cli.ui import main as ui_main
+        sys.argv = [sys.argv[0] + ' ui'] + sys.argv[2:]
+        return ui_main()
+
     elif command in ['-h', '--help', 'help']:
         print()  # Spacing after logo
         print_usage()
@@ -168,9 +173,12 @@ Available Commands:
   simulate      Simulation agents for MD, DFT, LAMMPS, VASP workflows
                 (Coming soon)
                 
-  analyze       Analysis agents for microscopy, spectroscopy, and 
+  analyze       Analysis agents for microscopy, spectroscopy, and
                 experimental data processing
                 (Coming soon)
+
+  ui            Launch the Streamlit web interface for interactive
+                analysis (requires: pip install scilink[ui])
 
 Examples:
   scilink plan                              # Start planning orchestrator
