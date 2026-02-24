@@ -173,7 +173,7 @@ class IterativeFeedbackController:
 
         # Add all analysis images for visual context
         for img in state.get("analysis_images", []):
-            image_bytes = img.get('data') or img.get('bytes') 
+            image_bytes = img.get('data') or img.get('bytes')
             if image_bytes:
                 prompt_parts.append(f"\n{img['label']}:")
                 prompt_parts.append({"mime_type": "image/jpeg", "data": image_bytes})

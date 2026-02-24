@@ -758,6 +758,7 @@ class AnalysisOrchestratorTools:
             agent_id: int = None,
             analysis_goal: str = None,
             objective: str = None,
+            hints: str = None,
             auxiliary_data: str = None,
             auxiliary_label: str = None,
             skill: str = None
@@ -773,9 +774,10 @@ class AnalysisOrchestratorTools:
             a sandbox check is performed. If no sandbox is detected, the user is
             prompted to confirm before proceeding.
 
-            For CurveFitting agent: auxiliary_data and auxiliary_label can provide
-            a complementary dataset (e.g. TGA curve alongside DSC, or a microscopy
-            image) as context for the analysis without fitting it.
+            auxiliary_data and auxiliary_label can provide a complementary dataset
+            (e.g. TGA curve alongside DSC, or a microscopy image) as context for
+            the analysis without fitting/unmixing it. Supported by CurveFitting
+            and Hyperspectral agents.
 
             Output directory format: results/analysis_{dataset_name}_{timestamp}_{counter}/
             """
@@ -917,6 +919,8 @@ class AnalysisOrchestratorTools:
                 }
                 if objective is not None:
                     analyze_kwargs["objective"] = objective
+                if hints is not None:
+                    analyze_kwargs["hints"] = hints
                 if auxiliary_data is not None:
                     analyze_kwargs["auxiliary_data"] = auxiliary_data
                 if auxiliary_label is not None:
@@ -979,8 +983,11 @@ class AnalysisOrchestratorTools:
                 "for traceability. Requires data path and metadata to be set. "
                 "Optional objective provides a high-level scientific question to frame the analysis "
                 "(e.g. 'Determine the oxidation state of Ti'). "
-                "For CurveFitting agent, optional auxiliary_data provides a complementary "
-                "dataset (e.g. TGA alongside DSC, or microscopy image) as context. "
+                "Optional hints provide tactical guidance to steer the analysis "
+                "(e.g. 'focus on the Ti L-edge around 460 eV'). "
+                "Optional auxiliary_data provides a complementary dataset "
+                "(e.g. TGA alongside DSC, or microscopy image) as context. "
+                "Supported by CurveFitting and Hyperspectral agents. "
                 "Optional skill provides domain-specific knowledge "
                 "(e.g. 'xps', 'xrd') for improved fitting and interpretation. "
                 "Returns analysis_id and output_directory for reference."
@@ -1008,9 +1015,18 @@ class AnalysisOrchestratorTools:
                         "performed and *what question* to answer."
                     )
                 },
+                "hints": {
+                    "type": "string",
+                    "description": (
+                        "Tactical guidance to steer the analysis "
+                        "(e.g. 'focus on the Ti L-edge around 460 eV', "
+                        "'pay attention to peaks between 280-300 nm'). "
+                        "Supported by CurveFitting and Hyperspectral agents."
+                    )
+                },
                 "auxiliary_data": {
                     "type": "string",
-                    "description": "Path to auxiliary dataset (1D curve or image) for CurveFitting agent context"
+                    "description": "Path to auxiliary dataset (1D curve or image) as context. Supported by CurveFitting and Hyperspectral agents."
                 },
                 "auxiliary_label": {
                     "type": "string",

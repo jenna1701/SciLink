@@ -82,6 +82,26 @@ def _append_prior_knowledge_context(prompt: list, state: dict) -> None:
                 prompt.append(f"- {f}")
 
 
+def _append_auxiliary_context(prompt: list, state: dict) -> None:
+    """Append auxiliary reference data to an LLM prompt if available."""
+    if not state.get("auxiliary_plot_bytes"):
+        return
+    label = state.get("auxiliary_label", "Auxiliary data")
+    summary = state.get("auxiliary_summary", "")
+    prompt.append(f"\n## Auxiliary Reference Data: {label}")
+    prompt.append(
+        f"The user provided this auxiliary reference data: {label}. "
+        "Take it into account in your analysis and interpretation, but do NOT "
+        "fit or quantitatively analyze this auxiliary data."
+    )
+    if summary:
+        prompt.append(f"\nData summary: {summary}")
+    prompt.append({
+        "mime_type": state.get("auxiliary_mime_type", "image/png"),
+        "data": state["auxiliary_plot_bytes"]
+    })
+
+
 def _append_objective_context(prompt: list, state: dict) -> None:
     """Append high-level scientific objective to an LLM prompt.
 
@@ -306,6 +326,7 @@ class GetInitialComponentParamsController:
 
         _append_skill_context(prompt_parts, state, "planning")
         _append_prior_knowledge_context(prompt_parts, state)
+        _append_auxiliary_context(prompt_parts, state)
 
         prompt_parts.append("\n\nBased on the system description and data characteristics, choose the decomposition method and estimate the optimal number of spectral components.")
 
@@ -515,6 +536,8 @@ class GetFinalComponentSelectionController:
                 f"Prioritize these suggestions but also report any other significant features you discover.\n"
                 f"{state['analysis_hints']}"
             )
+
+        _append_auxiliary_context(prompt_parts, state)
 
         prompt_parts.append(f"\n\nBased on the elbow plot AND the visual examples, decide the optimal number of components.")
 
@@ -845,6 +868,7 @@ Overlays showing where components are concentrated on the structural image.
         # 7. Domain skill context
         _append_skill_context(prompt_parts, state, "interpretation")
         _append_prior_knowledge_context(prompt_parts, state)
+        _append_auxiliary_context(prompt_parts, state)
 
         # 8. Final instructions
         prompt_parts.append("\n\nProvide your analysis in the requested JSON format.")
@@ -885,7 +909,7 @@ class SelectRefinementTargetController:
         if not analysis_images:
             self.logger.warning("No analysis images found for refinement selection.")
             prompt_parts.append("(No visual results available)")
-        
+
         for img in analysis_images:
             image_bytes = img.get('data') or img.get('bytes')
             if image_bytes:
@@ -910,6 +934,7 @@ class SelectRefinementTargetController:
 
         _append_skill_context(prompt_parts, state, "planning")
         _append_prior_knowledge_context(prompt_parts, state)
+        _append_auxiliary_context(prompt_parts, state)
 
         prompt_parts.append("\n\nBased on these results, decide if a focused refinement is needed.")
 
@@ -1178,22 +1203,23 @@ class BuildHolisticSynthesisPromptController:
                 for img in iter_images:
                     image_bytes = img.get('data') or img.get('bytes')
                     raw_label = img.get('label', 'Unknown_Plot')
-                    
+
                     if image_bytes:
                         # Create a unique semantic ID for citation
                         unique_ref = f"[{iter_ref_id}] {raw_label}"
-                        
+
                         prompt_parts.append(f"\n**{unique_ref}**")
                         prompt_parts.append({"mime_type": "image/jpeg", "data": image_bytes})
-                        
+
                         # Update label in the image object itself for the Report Generation step
                         # (This ensures the HTML report filters correctly)
-                        img['label'] = unique_ref 
+                        img['label'] = unique_ref
                         all_images.append(img)
 
         # 3. Domain skill context
         _append_skill_context(prompt_parts, state, "interpretation")
         _append_prior_knowledge_context(prompt_parts, state)
+        _append_auxiliary_context(prompt_parts, state)
 
         # 4. EXPLICIT REPORTING INSTRUCTIONS
         prompt_parts.append("\n\n### 📝 CRITICAL REPORTING INSTRUCTIONS")

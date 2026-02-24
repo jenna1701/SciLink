@@ -6,6 +6,7 @@ Hyperspectral Analysis Agent
 import os
 import numpy as np
 import cv2
+from pathlib import Path
 from typing import Dict, Any
 from collections import deque
 
@@ -21,6 +22,7 @@ from .pipelines.hyperspectral_pipelines import (
     create_hyperspectral_synthesis_pipeline
 )
 from ...tools.image_processor import load_image, convert_numpy_to_jpeg_bytes
+from ...tools.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
 from ...executors import require_sandbox_approval
 from ...skills.loader import load_skill
 
@@ -166,6 +168,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         hints: str | None = None,
         skill: str | None = None,
         prior_knowledge: list | None = None,
+        auxiliary_data: str | None = None,
+        auxiliary_label: str | None = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -195,8 +199,14 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             prior_knowledge: Optional list of knowledge entries synthesized
                 from prior reference analyses. Automatically injected into
                 LLM prompts to guide analysis approach and interpretation.
+            auxiliary_data: Optional path to a complementary dataset (1D
+                curve file or image) provided as context for the analysis.
+                The agent will consider this data in its interpretation but
+                will not attempt to unmix or quantitatively analyze it.
+            auxiliary_label: Optional human-readable label for the auxiliary
+                data (e.g., "TGA curve collected simultaneously").
             **kwargs: Additional options
-        
+
         Returns:
             dict containing:
                 - "status": "success" | "error"
@@ -204,11 +214,11 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 - "scientific_claims": list[dict]
                 - "output_directory": str
                 - "error": dict (when status="error")
-        
+
         Examples:
             # Single file
             result = agent.analyze("spectrum.npy")
-            
+
             # With metadata and structure image
             result = agent.analyze(
                 "spectrum.npy",
@@ -258,11 +268,27 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
             self.logger.info(f"   Skill loaded: {parsed['name']}")
 
+        # Load auxiliary data if provided
+        auxiliary_state = {
+            "auxiliary_plot_bytes": None,
+            "auxiliary_label": None,
+            "auxiliary_summary": None,
+            "auxiliary_mime_type": None,
+        }
+        if auxiliary_data:
+            auxiliary_state = self._load_auxiliary_data(
+                auxiliary_data, auxiliary_label
+            )
+            if auxiliary_state.get("auxiliary_plot_bytes"):
+                self.logger.info(
+                    f"   Auxiliary data loaded: {auxiliary_state['auxiliary_label']}"
+                )
+
         self.logger.info(f"\n{'='*80}")
         self.logger.info(f"🔬 HYPERSPECTRAL ANALYSIS")
         self.logger.info(f"   Data: {data_path}")
         self.logger.info(f"{'='*80}\n")
-        
+
         # Run the analysis pipeline
         result_json, error_dict = self._run_analysis_pipeline(
             data_path=data_path,
@@ -273,7 +299,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             hints=hints,
             objective=objective,
             skill_state=skill_state,
-            prior_knowledge=prior_knowledge or []
+            prior_knowledge=prior_knowledge or [],
+            auxiliary_state=auxiliary_state
         )
         
         # Handle Errors
@@ -334,7 +361,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         structure_system_info: Dict[str, Any] | None = None,
         objective: str | None = None,
         hints: str | None = None,
-        skill: str | None = None
+        skill: str | None = None,
+        auxiliary_data: str | None = None,
+        auxiliary_label: str | None = None
     ) -> Dict[str, Any]:
         """
         Analyze hyperspectral data to generate scientific claims.
@@ -348,7 +377,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             structure_system_info=structure_system_info,
             hints=hints,
             objective=objective,
-            skill=skill
+            skill=skill,
+            auxiliary_data=auxiliary_data,
+            auxiliary_label=auxiliary_label
         )
         
         if result.get("status") == "success":
@@ -367,7 +398,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         structure_system_info: Dict[str, Any] | None = None,
         objective: str | None = None,
         hints: str | None = None,
-        skill: str | None = None
+        skill: str | None = None,
+        auxiliary_data: str | None = None,
+        auxiliary_label: str | None = None
     ) -> Dict[str, Any]:
         """
         Analyze hyperspectral data for materials characterization.
@@ -381,7 +414,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             structure_system_info=structure_system_info,
             hints=hints,
             objective=objective,
-            skill=skill
+            skill=skill,
+            auxiliary_data=auxiliary_data,
+            auxiliary_label=auxiliary_label
         )
 
     # =========================================================================
@@ -441,6 +476,113 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             self.logger.error(f"Failed to load data from {data_path}: {e}")
             raise
 
+    def _load_auxiliary_data(
+        self, auxiliary_data: str, auxiliary_label: str | None
+    ) -> dict:
+        """
+        Load auxiliary data and return state fields for pipeline injection.
+
+        Supports 1D curve files (.csv, .txt, .dat, .tsv) and images
+        (.png, .jpg, .tif, etc.). For .npy files, inspects array shape
+        to distinguish curves from images.
+
+        Returns dict with auxiliary_plot_bytes, auxiliary_label,
+        auxiliary_summary, and auxiliary_mime_type (all None on failure).
+        """
+        result = {
+            "auxiliary_plot_bytes": None,
+            "auxiliary_label": auxiliary_label or Path(auxiliary_data).stem,
+            "auxiliary_summary": None,
+            "auxiliary_mime_type": None,
+        }
+
+        if not os.path.exists(auxiliary_data):
+            self.logger.warning(f"Auxiliary data file not found: {auxiliary_data}")
+            return result
+
+        ext = Path(auxiliary_data).suffix.lower()
+        image_extensions = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
+        curve_extensions = {'.csv', '.txt', '.dat', '.tsv'}
+
+        try:
+            is_curve = False
+            is_image = False
+
+            if ext == '.npy':
+                arr = np.load(auxiliary_data)
+                if arr.ndim == 1:
+                    is_curve = True
+                elif arr.ndim == 2 and min(arr.shape) <= 2:
+                    is_curve = True
+                else:
+                    is_image = True
+            elif ext in curve_extensions:
+                is_curve = True
+            elif ext in image_extensions:
+                is_image = True
+            else:
+                self.logger.warning(
+                    f"Unrecognized auxiliary file extension: {ext}"
+                )
+                return result
+
+            if is_curve:
+                if ext == '.npy':
+                    curve = np.load(auxiliary_data)
+                    if curve.ndim == 1:
+                        curve = np.column_stack(
+                            [np.arange(len(curve)), curve]
+                        )
+                    elif curve.shape[0] == 2:
+                        curve = curve.T
+                else:
+                    curve = load_curve_data(auxiliary_data)
+                    if curve.ndim == 2 and curve.shape[0] == 2:
+                        curve = curve.T
+
+                if curve.ndim == 2 and curve.shape[1] == 2:
+                    x, y = curve[:, 0], curve[:, 1]
+                elif curve.ndim == 2 and curve.shape[0] == 2:
+                    x, y = curve[0], curve[1]
+                else:
+                    x = np.arange(curve.shape[-1])
+                    y = curve.flatten()
+
+                result["auxiliary_summary"] = (
+                    f"1D curve with {len(x)} points. "
+                    f"X range: [{float(np.nanmin(x)):.4g}, {float(np.nanmax(x)):.4g}]. "
+                    f"Y range: [{float(np.nanmin(y)):.4g}, {float(np.nanmax(y)):.4g}]."
+                )
+
+                plot_info = {"title": result["auxiliary_label"]}
+                plot_data = np.column_stack([x, y])
+                result["auxiliary_plot_bytes"] = plot_curve_to_bytes(
+                    plot_data, plot_info
+                )
+                result["auxiliary_mime_type"] = "image/png"
+
+            elif is_image:
+                img = load_image(auxiliary_data)
+                result["auxiliary_summary"] = (
+                    f"Image with shape {img.shape} "
+                    f"(dtype: {img.dtype})."
+                )
+                if img.ndim == 3:
+                    img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                    result["auxiliary_plot_bytes"] = (
+                        convert_numpy_to_jpeg_bytes(img_gray)
+                    )
+                else:
+                    result["auxiliary_plot_bytes"] = (
+                        convert_numpy_to_jpeg_bytes(img)
+                    )
+                result["auxiliary_mime_type"] = "image/jpeg"
+
+        except Exception as e:
+            self.logger.warning(f"Failed to load auxiliary data: {e}")
+
+        return result
+
     def _run_analysis_pipeline(
         self,
         data_path: str,
@@ -451,13 +593,21 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         objective: str | None = None,
         hints: str | None = None,
         skill_state: Dict[str, Any] | None = None,
-        prior_knowledge: list | None = None
+        prior_knowledge: list | None = None,
+        auxiliary_state: Dict[str, Any] | None = None
     ) -> tuple[Dict[str, Any] | None, Dict[str, Any] | None]:
         """
         Main execution engine using Queue-Based Branching architecture.
         """
         if skill_state is None:
             skill_state = {"skill_name": None, "skill_sections": None}
+        if auxiliary_state is None:
+            auxiliary_state = {
+                "auxiliary_plot_bytes": None,
+                "auxiliary_label": None,
+                "auxiliary_summary": None,
+                "auxiliary_mime_type": None,
+            }
 
         try:
             self.logger.info(f"--- Starting analysis pipeline for {data_path} ---")
@@ -523,7 +673,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "prior_knowledge": prior_knowledge or [],
                     "analysis_images": [],
                     "error_dict": None,
-                    **skill_state
+                    **skill_state,
+                    **auxiliary_state
                 }
 
                 if current_task["depth"] > 0:
@@ -572,7 +723,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "prior_knowledge": prior_knowledge or [],
                 "result_json": None,
                 "error_dict": None,
-                **skill_state
+                **skill_state,
+                **auxiliary_state
             }
 
             for controller in self.synthesis_pipeline:

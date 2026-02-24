@@ -952,11 +952,22 @@ class AnalysisOrchestratorAgent:
             message = response.choices[0].message
             
             if not message.tool_calls:
+                text = message.content
+                if not text and iteration > 0:
+                    # LLM returned empty text after tool calls — ask for a summary
+                    self.messages.append({"role": "user", "content": "Please briefly summarize what you just did and suggest next steps."})
+                    followup = self.client.chat.completions.create(
+                        model=self.model.model,
+                        messages=self.messages,
+                        tools=self.tools_for_model,
+                        tool_choice="none"
+                    )
+                    text = followup.choices[0].message.content or ""
                 self.messages.append({
                     "role": "assistant",
-                    "content": message.content
+                    "content": text
                 })
-                return message.content
+                return text
             
             self.messages.append({
                 "role": "assistant",
@@ -1031,6 +1042,16 @@ class AnalysisOrchestratorAgent:
             content = getattr(message, "content", None)
             
             if not tool_calls:
+                if not content and iteration > 0:
+                    # LLM returned empty text after tool calls — ask for a summary
+                    self.messages.append({"role": "user", "content": "Please briefly summarize what you just did and suggest next steps."})
+                    followup = litellm.completion(
+                        model=self.model.model,
+                        messages=self.messages,
+                        tools=self.tools_for_model,
+                        tool_choice="none",
+                    )
+                    content = getattr(followup.choices[0].message, "content", None) or ""
                 self.messages.append({
                     "role": "assistant",
                     "content": content or ""
