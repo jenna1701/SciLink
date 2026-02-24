@@ -200,10 +200,12 @@ if not st.session_state.agent_initialized:
         )
 
         if _pending is not None:
-            # Show loading state while the agent initializes
-            with st.status("Initializing agent...", expanded=True):
-                st.write("Setting up session directory...")
-                start_session(**_pending)
+            st.markdown(
+                '<p style="text-align:center;color:#82B1FF;font-size:1em">'
+                '⏳ Initializing agents...</p>',
+                unsafe_allow_html=True,
+            )
+            start_session(**_pending)
             # start_session calls st.rerun() on success, so we only
             # reach here if initialization failed.
             st.stop()
