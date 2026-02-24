@@ -43,6 +43,8 @@ def init_session_state() -> None:
         "_processed_uploads": set(),
         "pending_auto_examine": None,
         "pending_auto_load_metadata": None,
+        "cfg_consent": False,
+        "selected_preview_file": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:

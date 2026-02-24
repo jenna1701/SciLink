@@ -35,9 +35,9 @@ section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {
     margin: 0.25rem 0 0.15rem 0 !important;
     padding: 0 !important;
 }
-/* Push the first element (logo/title) flush to top */
-section[data-testid="stSidebar"] [data-testid="stImage"] {
-    margin-top: 0 !important;
+/* Pull the logo up toward the top of the sidebar */
+section[data-testid="stSidebar"] [data-testid="stMarkdown"]:has(.logo-glow-sm) {
+    margin-top: -2rem !important;
     padding-top: 0 !important;
 }
 
@@ -80,6 +80,28 @@ button[kind="primary"],
 .stButton > button:hover {
     background-color: #7C4DFF;
     box-shadow: 0 2px 8px rgba(98, 0, 238, 0.35);
+}
+/* File explorer tree buttons — soft gray, blue on selection */
+[data-testid="stExpander"] .stButton > button {
+    background-color: #2A3340;
+    color: #B0BEC5;
+    border: 1px solid #3A4556;
+    text-transform: none;
+    font-weight: 400;
+    letter-spacing: 0;
+    font-size: 0.85em;
+    padding: 0.25rem 0.5rem;
+}
+[data-testid="stExpander"] .stButton > button:hover {
+    background-color: #344155;
+    border-color: #5B8DEF;
+    color: #E0E0E0;
+    box-shadow: none;
+}
+[data-testid="stExpander"] .stButton > button[kind="primary"] {
+    background-color: #1A3A5C;
+    border-color: #5B8DEF;
+    color: #82B1FF;
 }
 
 /* ── Success-style button (used via st.markdown class) ─ */
@@ -202,37 +224,6 @@ h2, h3 {
     font-weight: 500;
 }
 
-/* ── File explorer ──────────────────────────────────── */
-.file-group-header {
-    color: #82B1FF;
-    font-size: 0.8em;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    padding: 8px 0 4px 0;
-    border-bottom: 1px solid #3A4556;
-    margin-bottom: 4px;
-}
-.file-entry {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 2px 0;
-    font-size: 0.85em;
-}
-.file-icon {
-    font-size: 0.9em;
-    width: 20px;
-    text-align: center;
-    flex-shrink: 0;
-}
-.file-meta {
-    color: #6B7A8C;
-    font-size: 0.8em;
-    margin-left: auto;
-    flex-shrink: 0;
-}
-
 /* ── Live log viewer ────────────────────────────────── */
 .live-log-viewer {
     height: 280px;
@@ -248,9 +239,11 @@ h2, h3 {
     color: #e0e0e0;
 }
 
-/* ── Hide the Streamlit "Stop" button ───────────────── */
-button[data-testid="baseButton-header"],
+/* ── Hide Streamlit chrome (deploy, menu, stop) ────── */
 .stDeployButton,
+[data-testid="stAppDeployButton"],
+#MainMenu,
+[data-testid="stMainMenu"],
 header [data-testid="stStatusWidget"] {
     display: none !important;
 }

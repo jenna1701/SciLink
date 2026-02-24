@@ -1,9 +1,9 @@
 """Shared constants and defaults for the SciLink Streamlit UI."""
 
 MODEL_OPTIONS = [
+    "claude-opus-4-6",
     "gemini-3-pro-preview",
-    "claude-opus-4-5-20250514",
-    "gpt-5.3",
+    "gpt-5.2",
 ]
 
 SUPPORTED_DATA_EXTENSIONS = (

@@ -1,5 +1,6 @@
 """Sidebar component: configuration, file upload, agent status."""
 
+import base64
 import os
 from datetime import datetime
 from pathlib import Path
@@ -15,32 +16,52 @@ _LOGO_PATH = Path(__file__).resolve().parent.parent.parent.parent / "misc" / "sc
 def render_sidebar() -> None:
     with st.sidebar:
         if st.session_state.agent_initialized and _LOGO_PATH.exists():
-            col_l, col_c, col_r = st.columns([1, 3, 1])
-            with col_c:
-                st.image(str(_LOGO_PATH), width=140)
+            _b64 = base64.b64encode(_LOGO_PATH.read_bytes()).decode()
+            st.markdown(
+                '<style>'
+                '@keyframes logo-spin{to{transform:rotate(360deg)}}'
+                '.logo-glow-sm{position:relative;padding:2px;border-radius:10px;'
+                'overflow:hidden;width:140px;margin:0 auto}'
+                '.logo-glow-sm::before{content:"";position:absolute;'
+                'top:-40%;left:-40%;width:180%;height:180%;'
+                'background:conic-gradient('
+                'transparent 0deg,transparent 270deg,#3A4556 300deg,'
+                '#82B1FF 330deg,#FFF 345deg,#82B1FF 355deg,transparent 360deg);'
+                'animation:logo-spin 4s linear infinite;z-index:0}'
+                '.logo-glow-sm>img{position:relative;z-index:1;border-radius:8px;'
+                'display:block;width:100%}'
+                '</style>'
+                f'<div class="logo-glow-sm">'
+                f'<img src="data:image/svg+xml;base64,{_b64}"/>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
         else:
             st.title("SciLink")
-            st.markdown("")
+        _locked = st.session_state.agent_initialized
         preset = st.selectbox(
             "Model",
             MODEL_OPTIONS + ["Custom"],
             key="cfg_model_preset",
+            disabled=_locked,
         )
         if preset == "Custom":
-            model = st.text_input("Model name", key="cfg_model_custom")
+            model = st.text_input("Model name", key="cfg_model_custom", disabled=_locked)
         else:
             model = preset
-        api_key = st.text_input("API key", type="password", key="cfg_api_key")
-        base_url = st.text_input("Base URL (optional)", key="cfg_base_url")
-        fh_api_key = st.text_input("FutureHouse API key (optional)", type="password", key="cfg_fh_api_key")
+        api_key = st.text_input("API key", type="password", key="cfg_api_key", disabled=_locked)
+        base_url = st.text_input("Base URL (optional)", key="cfg_base_url", disabled=_locked)
+        fh_api_key = st.text_input("FutureHouse API key (optional)", type="password", key="cfg_fh_api_key", disabled=_locked)
         mode = st.selectbox(
             "Analysis mode",
-            ["co-pilot", "supervised", "autonomous"],
+            ["supervised", "co-pilot", "autonomous"],
             key="cfg_mode",
+            disabled=_locked,
         )
         consent = st.checkbox(
             "I understand that the agent will execute generated Python code on my machine",
             key="cfg_consent",
+            disabled=_locked,
         )
         if not consent:
             with st.expander("What does the agent execute?"):
@@ -56,7 +77,15 @@ def render_sidebar() -> None:
         with col1:
             start_disabled = st.session_state.agent_initialized or not consent
             if st.button("Start Session", disabled=start_disabled, width="stretch"):
-                _start_session(model, api_key, base_url, mode, fh_api_key)
+                # Stash config and let the main app handle the heavy init
+                # outside the sidebar context so the spinner is visible.
+                st.session_state._pending_init = {
+                    "model": model,
+                    "api_key": api_key,
+                    "base_url": base_url,
+                    "mode": mode,
+                    "fh_api_key": fh_api_key,
+                }
 
         with col2:
             if st.button("Reset Session", disabled=not st.session_state.agent_initialized,
@@ -112,7 +141,12 @@ def render_sidebar() -> None:
 
 # ── helpers ──────────────────────────────────────────────────────
 
-def _start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key: str = "") -> None:
+def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key: str = "") -> None:
+    """Initialize the analysis agent and session directory.
+
+    Designed to be called from the **main** content area (not inside
+    ``with st.sidebar``) so that ``st.spinner`` is visible to the user.
+    """
     from scilink.agents.exp_agents.analysis_orchestrator import (
         AnalysisMode,
         AnalysisOrchestratorAgent,
@@ -137,20 +171,19 @@ def _start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_ke
     # Auto-approve sandbox for the Streamlit session (user checked consent box)
     executors._GLOBAL_SANDBOX_APPROVED = True
 
-    with st.sidebar:
-        with st.spinner("Initializing agent..."):
-            try:
-                agent = AnalysisOrchestratorAgent(
-                    base_dir=str(session_dir),
-                    api_key=resolved_key,
-                    model_name=model,
-                    base_url=base_url or None,
-                    analysis_mode=mode_map[mode],
-                    futurehouse_api_key=fh_api_key or None,
-                )
-            except Exception as exc:
-                st.error(f"Failed to initialize agent: {exc}")
-                return
+    with st.spinner("Initializing agent..."):
+        try:
+            agent = AnalysisOrchestratorAgent(
+                base_dir=str(session_dir),
+                api_key=resolved_key,
+                model_name=model,
+                base_url=base_url or None,
+                analysis_mode=mode_map[mode],
+                futurehouse_api_key=fh_api_key or None,
+            )
+        except Exception as exc:
+            st.error(f"Failed to initialize agent: {exc}")
+            return
 
     st.session_state.agent = agent
     st.session_state.agent_initialized = True

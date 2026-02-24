@@ -1,5 +1,6 @@
 """SciLink Streamlit UI — single-page app."""
 
+import base64
 import builtins
 import threading
 from pathlib import Path
@@ -7,7 +8,7 @@ from pathlib import Path
 import streamlit as st
 
 from scilink.ui.state import init_session_state, ChatTask, FeedbackRequest
-from scilink.ui.components.sidebar import render_sidebar, save_upload
+from scilink.ui.components.sidebar import render_sidebar, save_upload, start_session
 from scilink.ui.components.file_viewer import render_file_preview
 from scilink.ui.output_capture import OutputCapture
 from scilink.ui.theme import inject_theme
@@ -30,11 +31,16 @@ render_sidebar()
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 
 
-def _find_new_images() -> list[str]:
+def _find_new_images(summary_only: bool = False) -> list[str]:
     """Return image paths in the session dir not yet shown in chat.
 
     Skips temporary review files (e.g. first_spectrum_fit_review.png)
     to avoid showing the same fit plot twice during the feedback step.
+
+    If *summary_only* is True, only returns summary grid images
+    (files containing ``Summary_Grid`` in their name). This is used
+    during the human-feedback step so the user sees only the final
+    NMF/PCA grid rather than every per-component plot.
     """
     session_dir = st.session_state.session_dir
     if session_dir is None:
@@ -48,7 +54,41 @@ def _find_new_images() -> list[str]:
             if s not in st.session_state.known_images:
                 st.session_state.known_images.add(s)
                 new.append(s)
+    if summary_only:
+        new = [p for p in new if "Summary_Grid" in Path(p).stem]
     return new
+
+
+def _find_feedback_preview_images() -> list[str]:
+    """Return preview images specifically meant for the feedback step.
+
+    Finds curve-fitting review images (``*review*``) and hyperspectral
+    Summary_Grid images (``*Summary_Grid*``).  The search is scoped to
+    the most recently modified ``analysis_*`` directory so that images
+    from earlier analyses in the same session are not shown.
+    """
+    session_dir = st.session_state.session_dir
+    if session_dir is None:
+        return []
+    # Scope to the most recently modified analysis directory so we
+    # don't pick up stale Summary_Grid / review images from previous runs.
+    search_root = Path(session_dir)
+    results_dir = search_root / "results"
+    if results_dir.exists():
+        analysis_dirs = sorted(
+            [d for d in results_dir.iterdir()
+             if d.is_dir() and d.name.startswith("analysis_")],
+            key=lambda d: d.stat().st_mtime,
+            reverse=True,
+        )
+        if analysis_dirs:
+            search_root = analysis_dirs[0]
+    previews = []
+    for ext in IMAGE_EXTENSIONS:
+        for p in search_root.rglob(f"*{ext}"):
+            if "review" in p.stem or "Summary_Grid" in p.stem:
+                previews.append(str(p))
+    return previews
 
 
 def _find_new_html_reports() -> list[str]:
@@ -125,18 +165,49 @@ def _start_task(prompt: str) -> None:
 # Welcome screen (before session is started)
 # ══════════════════════════════════════════════════════════════════
 if not st.session_state.agent_initialized:
+    # Check if session init was requested from the sidebar
+    _pending = st.session_state.pop("_pending_init", None)
+
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
         if _LOGO_PATH.exists():
-            st.image(str(_LOGO_PATH), width="stretch")
+            _b64 = base64.b64encode(_LOGO_PATH.read_bytes()).decode()
+            st.markdown(
+                '<style>'
+                '@keyframes logo-spin{to{transform:rotate(360deg)}}'
+                '.logo-glow{position:relative;padding:2px;border-radius:14px;overflow:hidden}'
+                '.logo-glow::before{content:"";position:absolute;'
+                'top:-40%;left:-40%;width:180%;height:180%;'
+                'background:conic-gradient('
+                'transparent 0deg,transparent 270deg,#3A4556 300deg,'
+                '#82B1FF 330deg,#FFF 345deg,#82B1FF 355deg,transparent 360deg);'
+                'animation:logo-spin 4s linear infinite;z-index:0}'
+                '.logo-glow>img{position:relative;z-index:1;border-radius:12px;'
+                'display:block;width:100%}'
+                '</style>'
+                f'<div class="logo-glow">'
+                f'<img src="data:image/svg+xml;base64,{_b64}"/>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
         else:
             st.title("SciLink")
         st.markdown(
             '<p style="text-align:center;color:#9E9E9E;font-size:1.1em;'
-            'margin-top:-8px;margin-bottom:24px">'
-            "LLM-powered analysis for experimental science</p>",
+            'margin-top:12px;margin-bottom:24px">'
+            "LLM-powered agents for scientific research automation</p>",
             unsafe_allow_html=True,
         )
+
+        if _pending is not None:
+            # Show loading state while the agent initializes
+            with st.status("Initializing agent...", expanded=True):
+                st.write("Setting up session directory...")
+                start_session(**_pending)
+            # start_session calls st.rerun() on success, so we only
+            # reach here if initialization failed.
+            st.stop()
+
         st.markdown(
             '<p style="text-align:center;color:#B0B0B0;font-size:0.95em;'
             'letter-spacing:0.3px">'
@@ -254,10 +325,13 @@ with chat_tab:
             content = task.result if task.result is not None else f"Error: {task.error}"
             new_images = _find_new_images()
             new_reports = _find_new_html_reports()
+            # When an HTML report is present it already embeds the
+            # relevant figures — skip showing raw images separately
+            # to avoid duplicate clutter (matches curve fitting UX).
             st.session_state.chat_messages.append({
                 "role": "assistant",
                 "content": content,
-                "images": new_images,
+                "images": [] if new_reports else new_images,
                 "html_reports": new_reports,
                 "verbose": task.verbose_log or "",
             })
@@ -269,12 +343,16 @@ with chat_tab:
         if task.is_running and task.feedback_request is not None:
             req: FeedbackRequest = task.feedback_request
 
-            # Cache preview images so fragment reruns don't lose them
-            # (_find_new_images marks images as known, returning [] on
-            # subsequent calls — but the fragment clears its output each
-            # rerun, so we need to keep the paths around).
+            # Cache preview images so fragment reruns don't lose them.
+            # First call _find_new_images() to mark all current images
+            # as known (side-effect) so they don't re-appear in the
+            # completion message.  Then use _find_feedback_preview_images
+            # to locate the actual preview images the user should see:
+            #   • curve fitting  → *review*.png  (fit preview)
+            #   • hyperspectral  → *Summary_Grid*.jpeg  (NMF/PCA grid)
             if "_feedback_preview_images" not in st.session_state:
-                st.session_state._feedback_preview_images = _find_new_images()
+                _find_new_images()  # mark intermediate images as known
+                st.session_state._feedback_preview_images = _find_feedback_preview_images()
             for img_path in st.session_state._feedback_preview_images:
                 st.image(img_path)
 
@@ -431,6 +509,31 @@ _FILE_TYPE_ICONS = {
 }
 
 
+def _discover_sessions(current_session_dir: str | None) -> list[tuple[str, Path]]:
+    """Return (display_label, path) for every analysis_session_* directory."""
+    if current_session_dir is None:
+        return []
+    parent = Path(current_session_dir).parent
+    sessions = sorted(
+        parent.glob("analysis_session_*"),
+        key=lambda p: p.name,
+        reverse=True,
+    )
+    current = Path(current_session_dir)
+    result: list[tuple[str, Path]] = []
+    for s in sessions:
+        # Parse timestamp from directory name like analysis_session_20260223_201729
+        parts = s.name.removeprefix("analysis_session_")
+        try:
+            label = f"{parts[:4]}-{parts[4:6]}-{parts[6:8]} {parts[9:11]}:{parts[11:13]}:{parts[13:15]}"
+        except (IndexError, ValueError):
+            label = s.name
+        if s.resolve() == current.resolve():
+            label += " (current)"
+        result.append((label, s))
+    return result
+
+
 def _format_size(size_bytes: int) -> str:
     """Format file size in human-readable form."""
     if size_bytes < 1024:
@@ -442,64 +545,75 @@ def _format_size(size_bytes: int) -> str:
 
 
 with files_tab:
-    if st.session_state.session_dir is None:
+    sessions = _discover_sessions(st.session_state.session_dir)
+    if not sessions:
         st.info("Start a session first to browse output files.")
     else:
-        session_path = Path(st.session_state.session_dir)
+        labels = [s[0] for s in sessions]
+        paths = [s[1] for s in sessions]
+        selected_idx = st.selectbox(
+            "Session",
+            range(len(labels)),
+            format_func=lambda i: labels[i],
+            key="session_selector",
+        )
+        session_path = paths[selected_idx]
         tree_col, preview_col = st.columns([1, 2])
+
+        # Clear selected file when switching sessions
+        sel = st.session_state.get("selected_preview_file")
+        if sel and not str(sel).startswith(str(session_path)):
+            st.session_state.selected_preview_file = None
 
         with tree_col:
             st.subheader("Session Files")
 
-            files = sorted(
-                [p for p in session_path.rglob("*") if p.is_file()],
-                key=lambda p: str(p),
-            )
+            all_files = list(session_path.rglob("*"))
+            has_files = any(f.is_file() for f in all_files)
 
-            if not files:
+            if not has_files:
                 st.caption("No files found yet.")
-                selected_file = None
             else:
-                # Group files by parent directory and build labels
-                from collections import OrderedDict
-                groups: OrderedDict[str, list[Path]] = OrderedDict()
-                for f in files:
-                    rel = f.relative_to(session_path)
-                    group = str(rel.parent) if str(rel.parent) != "." else "root"
-                    groups.setdefault(group, []).append(f)
+                def _render_dir(dir_path: Path, depth: int = 0) -> None:
+                    """Render directory tree using expanders."""
+                    items = sorted(dir_path.iterdir(), key=lambda p: (p.is_file(), p.name))
+                    dirs = [i for i in items if i.is_dir()]
+                    files = [i for i in items if i.is_file()]
 
-                # Build a single flat list with group-prefixed labels
-                all_labels: list[str] = []
-                label_to_path: dict[str, Path] = {}
-                group_boundaries: dict[int, str] = {}  # index → group name
+                    for d in dirs:
+                        child_count = sum(1 for _ in d.rglob("*") if _.is_file())
+                        if child_count == 0:
+                            continue
+                        with st.expander(f"📁 {d.name} ({child_count})", expanded=(depth == 0)):
+                            _render_dir(d, depth + 1)
 
-                for group_name, group_files in groups.items():
-                    group_boundaries[len(all_labels)] = group_name
-                    for f in group_files:
-                        icon = _FILE_TYPE_ICONS.get(f.suffix.lower(), "📁")
-                        size = _format_size(f.stat().st_size)
-                        label = f"{icon}  {f.name}  ({size})"
-                        all_labels.append(label)
-                        label_to_path[label] = f
+                    def _render_files(file_list: list[Path]) -> None:
+                        for f in file_list:
+                            icon = _FILE_TYPE_ICONS.get(f.suffix.lower(), "📄")
+                            size = _format_size(f.stat().st_size)
+                            is_sel = st.session_state.get("selected_preview_file") == str(f)
+                            btn_type = "primary" if is_sel else "secondary"
+                            if st.button(
+                                f"{icon}  {f.name}  ({size})",
+                                key=f"fbtn_{f.relative_to(session_path)}",
+                                use_container_width=True,
+                                type=btn_type,
+                            ):
+                                st.session_state.selected_preview_file = str(f)
+                                st.rerun()
 
-                # Render group headers above the radio
-                for idx, gname in group_boundaries.items():
-                    display_name = gname.replace("/", " / ")
-                    count = len(groups[gname])
-                    st.markdown(
-                        f'<div class="file-group-header">'
-                        f'{display_name} ({count} file{"s" if count != 1 else ""})'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
+                    if files and depth == 0:
+                        with st.expander(f"📄 Session ({len(files)})", expanded=True):
+                            _render_files(files)
+                    else:
+                        _render_files(files)
 
-                selected_label = st.radio(
-                    "Files",
-                    all_labels,
-                    key="file_explorer_selection",
-                    label_visibility="collapsed",
-                )
-                selected_file = label_to_path.get(selected_label)
+                _render_dir(session_path)
+
+        selected_file = None
+        sel_path = st.session_state.get("selected_preview_file")
+        if sel_path:
+            selected_file = Path(sel_path)
 
         with preview_col:
             if selected_file and selected_file.exists():
