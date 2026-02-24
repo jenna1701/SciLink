@@ -97,13 +97,17 @@ def render_sidebar() -> None:
             st.divider()
             st.subheader("Upload Files")
 
-            data_file = st.file_uploader(
-                "Data file",
+            data_files = st.file_uploader(
+                "Data file(s)",
                 type=[e.lstrip(".") for e in SUPPORTED_DATA_EXTENSIONS],
                 key="uploader_data",
+                accept_multiple_files=True,
             )
-            if data_file is not None:
-                save_upload(data_file, "data")
+            if data_files:
+                if len(data_files) == 1:
+                    save_upload(data_files[0], "data")
+                else:
+                    save_upload_batch(data_files, "data")
 
             meta_file = st.file_uploader(
                 "Metadata file",
@@ -240,3 +244,28 @@ def save_upload(uploaded_file, kind: str, auto_dispatch: bool = True) -> None:
             else:
                 st.session_state.pending_auto_load_metadata = dest_str
         st.sidebar.success(f"Uploaded {kind} file: {uploaded_file.name}")
+
+
+def save_upload_batch(uploaded_files: list, kind: str, auto_dispatch: bool = True) -> None:
+    """Save multiple uploaded files into a subdirectory for series/batch analysis."""
+    session_dir = Path(st.session_state.session_dir)
+    upload_dir = session_dir / "uploads"
+    upload_dir.mkdir(exist_ok=True)
+
+    # Create a subdirectory for the series
+    series_dir = upload_dir / "series"
+    series_dir.mkdir(exist_ok=True)
+
+    for f in uploaded_files:
+        dest = series_dir / f.name
+        dest.write_bytes(f.getvalue())
+
+    series_dir_str = str(series_dir)
+    st.session_state.uploaded_data_path = series_dir_str
+
+    upload_key = (kind, series_dir_str)
+    if upload_key not in st.session_state._processed_uploads:
+        st.session_state._processed_uploads.add(upload_key)
+        if auto_dispatch:
+            st.session_state.pending_auto_examine = series_dir_str
+        st.sidebar.success(f"Uploaded {len(uploaded_files)} files to series/")

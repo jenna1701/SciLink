@@ -8,7 +8,7 @@ from pathlib import Path
 import streamlit as st
 
 from scilink.ui.state import init_session_state, ChatTask, FeedbackRequest
-from scilink.ui.components.sidebar import render_sidebar, save_upload, start_session
+from scilink.ui.components.sidebar import render_sidebar, save_upload, save_upload_batch, start_session
 from scilink.ui.components.file_viewer import render_file_preview
 from scilink.ui.output_capture import OutputCapture
 from scilink.ui.theme import inject_theme
@@ -247,12 +247,16 @@ with chat_tab:
         up_data, up_meta = st.columns(2)
         with up_data:
             main_data = st.file_uploader(
-                "Data file",
+                "Data file(s)",
                 type=[e.lstrip(".") for e in SUPPORTED_DATA_EXTENSIONS],
                 key="main_uploader_data",
+                accept_multiple_files=True,
             )
-            if main_data is not None:
-                save_upload(main_data, "data", auto_dispatch=False)
+            if main_data:
+                if len(main_data) == 1:
+                    save_upload(main_data[0], "data", auto_dispatch=False)
+                else:
+                    save_upload_batch(main_data, "data", auto_dispatch=False)
         with up_meta:
             main_meta = st.file_uploader(
                 "Metadata (optional)",
