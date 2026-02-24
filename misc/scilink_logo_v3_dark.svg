@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 850" width="800" height="850">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="70 65 660 660" width="660" height="660">
   <defs>
     <!-- Gradients for 3D effect on circles -->
     <radialGradient id="blueGrad" cx="35%" cy="30%" r="65%">
@@ -58,6 +58,7 @@
       <stop offset="0%" stop-color="#3A4556"/>
       <stop offset="100%" stop-color="#252D38"/>
     </radialGradient>
+
   </defs>
   
   <!-- Background with subtle gradient -->
@@ -65,14 +66,14 @@
   <rect width="800" height="850" fill="url(#bgGrad)" opacity="0.5"/>
   
   <!-- Dashed triangular connector path (all coords +100) -->
-  <path d="M 400 180 
+  <path d="M 400 180
            C 550 180, 680 400, 616.5 555
            C 580 640, 500 690, 400 690
            C 300 690, 220 640, 183.5 555
            C 120 400, 250 180, 400 180"
-        fill="none" 
-        stroke="#4A5568" 
-        stroke-width="2" 
+        fill="none"
+        stroke="#4A5568"
+        stroke-width="2"
         stroke-dasharray="12,10"
         opacity="0.7"/>
   
