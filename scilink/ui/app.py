@@ -14,7 +14,7 @@ from scilink.ui.output_capture import OutputCapture
 from scilink.ui.theme import inject_theme
 from scilink.ui.config import AVATAR_USER, AVATAR_AGENT, SUPPORTED_DATA_EXTENSIONS, SUPPORTED_METADATA_EXTENSIONS
 
-_LOGO_PATH = Path(__file__).resolve().parent.parent.parent / "misc" / "scilink_logo_v3_dark.svg"
+_LOGO_PATH = Path(__file__).resolve().parent / "assets" / "scilink_logo_v3_dark.svg"
 
 st.set_page_config(page_title="SciLink", layout="wide")
 

@@ -83,4 +83,4 @@ include-package-data = true
 where = ["."]
 
 [tool.setuptools.package-data]
-"scilink" = ["agents/sim_agents/docs/*.txt", "agents/sim_agents/docs/*.md", "ui/.streamlit/*.toml"]
+"scilink" = ["agents/sim_agents/docs/*.txt", "agents/sim_agents/docs/*.md", "ui/.streamlit/*.toml", "ui/assets/*.svg"]

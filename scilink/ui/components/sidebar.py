@@ -10,7 +10,7 @@ import streamlit as st
 from ..config import MODEL_OPTIONS, SUPPORTED_DATA_EXTENSIONS, SUPPORTED_METADATA_EXTENSIONS
 
 
-_LOGO_PATH = Path(__file__).resolve().parent.parent.parent.parent / "misc" / "scilink_logo_v3_dark.svg"
+_LOGO_PATH = Path(__file__).resolve().parent.parent / "assets" / "scilink_logo_v3_dark.svg"
 
 
 def render_sidebar() -> None:
