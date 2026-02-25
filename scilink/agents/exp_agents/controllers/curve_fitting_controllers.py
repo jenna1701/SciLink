@@ -568,8 +568,10 @@ class HumanFeedbackRefinementController:
         print(f"\n🎯 Parameters to Extract:\n   {', '.join(state.get('parameters_to_extract', [])) or 'N/A'}")
         import re as _re
         _strategy = state.get("fitting_strategy", "N/A")
-        # Put each numbered step on its own line with consistent indentation
-        _strategy = _re.sub(r"\s*(\d+)\.\s*", r"\n   \1. ", _strategy).strip()
+        # Put each numbered step on its own line with consistent indentation.
+        # Only split on step numbers that follow a sentence-ending ". " to
+        # avoid mangling numbers in text (e.g. "cm-1.", "8.7").
+        _strategy = _re.sub(r"\. (\d+)\. ", r".\n   \1. ", _strategy)
         print(f"\n⚙️  Fitting Strategy:\n   {_strategy}")
         
         if state.get("literature_query"):
@@ -1958,6 +1960,11 @@ Return JSON with:
             if user_r2 > best_r2:
                 return user_guided_result, user_r2
             else:
+                # Save the new fit as a review image so the UI can display it
+                if user_guided_result.get("visualization_bytes"):
+                    review_viz_path = self.output_dir / "first_spectrum_fit_review.png"
+                    with open(review_viz_path, 'wb') as f:
+                        f.write(user_guided_result["visualization_bytes"])
                 # User-guided was worse - ask what to do
                 keep_user = self._ask_keep_user_guided_fit(user_r2, best_r2)
                 if keep_user:

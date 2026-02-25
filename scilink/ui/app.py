@@ -478,6 +478,7 @@ with chat_tab:
             # the buffer accumulates all stdout from the session.
             _ctx_tail = (req.context or "")[-1500:]
             _prompt = req.prompt or ""
+            _is_keep_revert = "revert to original" in _ctx_tail.lower()
             if "Context" in _prompt or "MISSING METADATA" in _ctx_tail:
                 _input_label = "Describe your data (optional):"
                 _submit_label = "Submit description"
@@ -495,26 +496,44 @@ with chat_tab:
                 _submit_label = "Submit feedback"
                 _accept_label = "Accept as-is"
 
-            feedback = st.text_area(
-                _input_label,
-                key="feedback_input",
-            )
-            col_submit, col_accept = st.columns(2)
-            with col_submit:
-                if st.button(_submit_label, type="primary", disabled=not feedback.strip(),
-                             width="stretch"):
-                    req.response = feedback.strip()
-                    req.event.set()
-                    st.session_state.pop("_feedback_preview_images", None)
-                    st.session_state.pop("_code_review_files", None)
-                    st.rerun(scope="app")
-            with col_accept:
-                if st.button(_accept_label, type="primary", width="stretch"):
-                    req.response = ""
-                    req.event.set()
-                    st.session_state.pop("_feedback_preview_images", None)
-                    st.session_state.pop("_code_review_files", None)
-                    st.rerun(scope="app")
+            # Keep/revert prompt: show two simple buttons, no text area
+            if _is_keep_revert:
+                col_keep, col_revert = st.columns(2)
+                with col_keep:
+                    if st.button("Keep user-guided fit", type="primary", width="stretch"):
+                        req.response = "keep"
+                        req.event.set()
+                        st.session_state.pop("_feedback_preview_images", None)
+                        st.session_state.pop("_code_review_files", None)
+                        st.rerun(scope="app")
+                with col_revert:
+                    if st.button("Revert to original fit", type="primary", width="stretch"):
+                        req.response = ""
+                        req.event.set()
+                        st.session_state.pop("_feedback_preview_images", None)
+                        st.session_state.pop("_code_review_files", None)
+                        st.rerun(scope="app")
+            else:
+                feedback = st.text_area(
+                    _input_label,
+                    key="feedback_input",
+                )
+                col_submit, col_accept = st.columns(2)
+                with col_submit:
+                    if st.button(_submit_label, type="primary", disabled=not feedback.strip(),
+                                 width="stretch"):
+                        req.response = feedback.strip()
+                        req.event.set()
+                        st.session_state.pop("_feedback_preview_images", None)
+                        st.session_state.pop("_code_review_files", None)
+                        st.rerun(scope="app")
+                with col_accept:
+                    if st.button(_accept_label, type="primary", width="stretch"):
+                        req.response = ""
+                        req.event.set()
+                        st.session_state.pop("_feedback_preview_images", None)
+                        st.session_state.pop("_code_review_files", None)
+                        st.rerun(scope="app")
             return
 
         # ── 3. Live monitoring — fragment auto-reruns, no blocking ──
