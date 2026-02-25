@@ -1078,11 +1078,11 @@ Select the most appropriate strategy:
             if files:
                 while True:
                     print("\n" + "="*60)
-                    print(f"👀 ACTION REQUIRED: Code Review")
+                    print(f"👀 CODE REVIEW REQUIRED")
                     print("="*60)
-                    print(f"1. Open folder: {temp_dir.resolve()}")
+                    print(f"1. Review files in: {temp_dir.resolve()}")
                     print(f"2. Inspect the {len(files)} new Python file(s).")
-                    print("3. Return here to Approve or Request Changes.")
+                    print("3. Press ENTER to approve, or type feedback to refine")
                     
                     code_feedback = get_user_feedback()
                     

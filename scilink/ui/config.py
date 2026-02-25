@@ -6,6 +6,12 @@ MODEL_OPTIONS = [
     "gpt-5.2",
 ]
 
+EMBEDDING_MODEL_OPTIONS = [
+    "gemini-embedding-001",
+    "text-embedding-3-small",
+    "text-embedding-3-large",
+]
+
 # ── Mode registry ────────────────────────────────────────────────
 APP_MODES = [
     {"key": "analyze", "label": "Analyze", "description": "Multi-modal data analysis"},

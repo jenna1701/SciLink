@@ -231,7 +231,6 @@ h2, h3 {
     border: 1px solid #3A4556;
     border-left: 3px solid #4FC3F7;
     border-radius: 6px;
-    margin-bottom: 8px;
 }
 .agent-spinner-dot {
     width: 8px;
@@ -248,13 +247,16 @@ h2, h3 {
     font-weight: 500;
 }
 
-/* ── Stop button (square, inside chat tabs) ────────── */
+/* ── Stop button (square icon beside spinner) ──────── */
+/* Push the button wrapper down to align with the spinner bar */
+[data-testid="stHorizontalBlock"]:has(.agent-spinner-container)
+    > [data-testid="stColumn"]:last-child .stButton {
+    padding-top: 10px;
+}
 .stTabs .stButton > button[kind="secondary"] {
-    width: 42px !important;
-    height: 42px !important;
-    min-width: 42px !important;
-    min-height: 42px !important;
-    max-width: 42px !important;
+    width: 100% !important;
+    height: 58px !important;
+    min-height: 58px !important;
     padding: 0 !important;
     display: flex;
     align-items: center;

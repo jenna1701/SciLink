@@ -86,6 +86,13 @@ def _render_analyze_uploads(start_task_fn) -> None:
 # ── Plan mode uploads ────────────────────────────────────────────
 
 def _render_planning_uploads(start_task_fn) -> None:
+    st.text_area(
+        "Research objective",
+        key="planning_objective",
+        placeholder="e.g., Optimize reaction yield for polymer synthesis",
+        height=80,
+    )
+
     st.markdown(
         '<div style="border:2px dashed #4A5568;border-radius:10px;'
         "padding:32px 16px;text-align:center;margin-bottom:16px;"
@@ -205,7 +212,7 @@ def _render_planning_uploads(start_task_fn) -> None:
         start_task_fn(prompt)
 
     if not can_start:
-        st.caption("Enter a research objective in the sidebar or upload files to begin.")
+        st.caption("Enter a research objective or upload files to begin.")
 
 
 def save_planning_uploads(files, category: str) -> None:

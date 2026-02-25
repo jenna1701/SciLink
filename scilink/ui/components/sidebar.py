@@ -8,6 +8,7 @@ from pathlib import Path
 import streamlit as st
 
 from ..config import (
+    EMBEDDING_MODEL_OPTIONS,
     MODEL_OPTIONS,
     SESSION_DIR_PREFIXES,
     SUPPORTED_CODE_EXTENSIONS,
@@ -61,14 +62,16 @@ def render_sidebar() -> None:
         base_url = st.text_input("Base URL (optional)", key="cfg_base_url", disabled=_locked)
         fh_api_key = st.text_input("FutureHouse API key (optional)", type="password", key="cfg_fh_api_key", disabled=_locked)
 
-        # Planning mode: research objective
+        # Planning mode: embedding model
         if st.session_state.app_mode == "plan":
-            st.text_input(
-                "Research objective",
-                key="planning_objective",
+            st.selectbox(
+                "Embedding model",
+                EMBEDDING_MODEL_OPTIONS + ["Custom"],
+                key="cfg_embedding_preset",
                 disabled=_locked,
-                placeholder="e.g., Optimize reaction yield",
             )
+            if st.session_state.get("cfg_embedding_preset") == "Custom":
+                st.text_input("Embedding model name", key="cfg_embedding_custom", disabled=_locked)
 
         mode = st.selectbox(
             "Autonomy mode",
@@ -97,12 +100,18 @@ def render_sidebar() -> None:
             if st.button("Start Session", disabled=start_disabled, width="stretch"):
                 # Stash config and let the main app handle the heavy init
                 # outside the sidebar context so the spinner is visible.
+                _embed_preset = st.session_state.get("cfg_embedding_preset", "")
+                _embed_model = (
+                    st.session_state.get("cfg_embedding_custom", "")
+                    if _embed_preset == "Custom" else _embed_preset
+                ) or None
                 st.session_state._pending_init = {
                     "model": model,
                     "api_key": api_key,
                     "base_url": base_url,
                     "mode": mode,
                     "fh_api_key": fh_api_key,
+                    "embedding_model": _embed_model,
                 }
 
         with col2:
@@ -256,7 +265,7 @@ def _render_planning_status() -> None:
 
 # ── helpers ──────────────────────────────────────────────────────
 
-def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key: str = "") -> None:
+def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key: str = "", embedding_model: str = None) -> None:
     """Initialize the agent and session directory.
 
     Dispatches to the appropriate agent based on ``st.session_state.app_mode``.
@@ -283,6 +292,7 @@ def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key
         if app_mode == "plan":
             agent = _init_planning_agent(
                 session_dir, resolved_key, model, base_url, mode, fh_api_key,
+                embedding_model=embedding_model,
             )
         else:
             agent = _init_analysis_agent(
@@ -326,7 +336,8 @@ def _init_analysis_agent(session_dir, api_key, model, base_url, mode, fh_api_key
     )
 
 
-def _init_planning_agent(session_dir, api_key, model, base_url, mode, fh_api_key):
+def _init_planning_agent(session_dir, api_key, model, base_url, mode, fh_api_key,
+                         embedding_model=None):
     """Create a PlanningOrchestratorAgent."""
     from scilink.agents.planning_agents.planning_orchestrator import (
         AutonomyLevel,
@@ -348,6 +359,10 @@ def _init_planning_agent(session_dir, api_key, model, base_url, mode, fh_api_key
     code_dir.mkdir(exist_ok=True)
     data_dir.mkdir(exist_ok=True)
 
+    kwargs = {}
+    if embedding_model:
+        kwargs["embedding_model"] = embedding_model
+
     return PlanningOrchestratorAgent(
         objective=objective,
         base_dir=str(session_dir),
@@ -359,6 +374,7 @@ def _init_planning_agent(session_dir, api_key, model, base_url, mode, fh_api_key
         knowledge_dir=str(knowledge_dir),
         code_dir=str(code_dir),
         data_dir=str(data_dir),
+        **kwargs,
     )
 
 

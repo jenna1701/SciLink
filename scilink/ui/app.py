@@ -98,17 +98,24 @@ def _find_feedback_preview_images() -> list[str]:
 
 
 def _find_code_review_files() -> list[tuple[str, str]]:
-    """Return (filename, content) pairs for Python files in temp_code_review/.
+    """Return (filename, content) pairs for Python files awaiting review.
 
-    Used during the code-review feedback step so the user can inspect
-    generated scripts directly in the UI instead of opening the folder.
+    Checks both ``temp_code_review/`` (initial generation) and
+    ``temp_code_review_iter/`` (refinement iterations), returning
+    files from whichever directory was modified most recently.
     """
     session_dir = st.session_state.session_dir
     if session_dir is None:
         return []
-    review_dir = Path(session_dir) / "temp_code_review"
-    if not review_dir.is_dir():
+    candidates = [
+        Path(session_dir) / "temp_code_review",
+        Path(session_dir) / "temp_code_review_iter",
+    ]
+    # Pick the most recently modified directory that exists
+    existing = [d for d in candidates if d.is_dir()]
+    if not existing:
         return []
+    review_dir = max(existing, key=lambda d: d.stat().st_mtime)
     files = []
     for p in sorted(review_dir.glob("*.py")):
         try:
@@ -180,6 +187,15 @@ def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
     _this_thread = threading.get_ident()
     log_handler.addFilter(lambda record: record.thread == _this_thread)
     root_logger = logging.getLogger()
+    # Lower root to INFO so agent logger.info() messages (execution
+    # details, verification steps, R² values) reach the handler.
+    # Mute noisy third-party libraries to prevent flooding.
+    if root_logger.level > logging.INFO:
+        root_logger.setLevel(logging.INFO)
+    for _lib in ("urllib3", "httpx", "httpcore", "google", "openai",
+                 "anthropic", "matplotlib", "PIL", "fsspec", "asyncio",
+                 "grpc", "absl"):
+        logging.getLogger(_lib).setLevel(logging.WARNING)
     root_logger.addHandler(log_handler)
 
     try:
