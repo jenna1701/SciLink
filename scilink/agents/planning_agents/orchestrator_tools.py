@@ -104,6 +104,22 @@ class OrchestratorTools:
             print(f"    (Processing text input: '{text_preview}')")
             return result_data
         
+    def _resolve_knowledge_paths(self, knowledge_paths: str | None) -> list[str] | None:
+        """Resolve knowledge paths with fallback to orchestrator's knowledge_dir.
+
+        If the LLM provides explicit paths, use those.  Otherwise fall back to
+        ``self.orch.knowledge_dir`` so the KB can match sources from previous
+        sessions (stable path) instead of rebuilding from a session-specific dir.
+        """
+        if knowledge_paths:
+            paths = [p.strip() for p in knowledge_paths.split(",") if p.strip()]
+            if paths:
+                return paths
+        # Fallback: use orchestrator's configured knowledge directory
+        if self.orch.knowledge_dir and self.orch.knowledge_dir.exists():
+            return [str(self.orch.knowledge_dir)]
+        return None
+
     def _resolve_data_path(self, path_input: str) -> tuple[str, str]:
         """
         Resolves user input to actual file path with fuzzy matching for typos.
@@ -246,27 +262,20 @@ class OrchestratorTools:
             """
             obj = specific_objective if specific_objective else self.orch.objective
             print(f"  ⚡ Tool: Generating Initial Plan for '{obj}'...")
-            
-            # Parse knowledge paths
-            knowledge_list = None
-            if knowledge_paths:
-                knowledge_list = [p.strip() for p in knowledge_paths.split(',') if p.strip()]
-                
+
+            # Resolve knowledge paths (with fallback to orchestrator dir)
+            knowledge_list = self._resolve_knowledge_paths(knowledge_paths)
+            if knowledge_list:
                 # Validate paths
-                invalid_paths = []
-                for path in knowledge_list:
-                    if not Path(path).exists():
-                        invalid_paths.append(path)
-                
+                invalid_paths = [p for p in knowledge_list if not Path(p).exists()]
                 if invalid_paths:
                     return json.dumps({
                         "status": "error",
                         "message": f"Knowledge paths not found: {', '.join(invalid_paths)}",
                         "hint": "Check folder names and spelling"
                     })
-                
                 print(f"    📚 Knowledge sources: {knowledge_list}")
-            
+
             # Parse primary dataset - UPDATED LOGIC
             primary_dataset = None
             if primary_data_set:
@@ -555,13 +564,12 @@ class OrchestratorTools:
             """Performs Technoeconomic Analysis (TEA)."""
             obj = focus_topic if focus_topic else self.orch.objective
             print(f"  ⚡ Tool: Running TEA for '{obj}'...")
-            
-            # Parse knowledge paths
-            knowledge_list = None
-            if knowledge_paths:
-                knowledge_list = [p.strip() for p in knowledge_paths.split(',') if p.strip()]
+
+            # Resolve knowledge paths (with fallback to orchestrator dir)
+            knowledge_list = self._resolve_knowledge_paths(knowledge_paths)
+            if knowledge_list:
                 print(f"    📚 Knowledge sources: {knowledge_list}")
-            
+
             # Parse primary dataset
             primary_dataset = None
             if primary_data_set:

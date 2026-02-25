@@ -8,11 +8,12 @@ from pathlib import Path
 import streamlit as st
 
 from scilink.ui.state import init_session_state, ChatTask, FeedbackRequest
-from scilink.ui.components.sidebar import render_sidebar, save_upload, save_upload_batch, start_session
+from scilink.ui.components.sidebar import render_sidebar, start_session
+from scilink.ui.components.chat_uploads import render_pre_chat_uploads
 from scilink.ui.components.file_viewer import render_file_preview
-from scilink.ui.output_capture import OutputCapture
+from scilink.ui.output_capture import AgentStoppedError, OutputCapture
 from scilink.ui.theme import inject_theme
-from scilink.ui.config import AVATAR_USER, AVATAR_AGENT, SUPPORTED_DATA_EXTENSIONS, SUPPORTED_METADATA_EXTENSIONS
+from scilink.ui.config import AVATAR_USER, AVATAR_AGENT, APP_MODES, SESSION_DIR_PREFIXES
 
 _LOGO_PATH = Path(__file__).resolve().parent / "assets" / "scilink_logo_v3_dark.svg"
 
@@ -45,10 +46,15 @@ def _find_new_images(summary_only: bool = False) -> list[str]:
     session_dir = st.session_state.session_dir
     if session_dir is None:
         return []
+    # Directories that contain user uploads, not agent output
+    _upload_dirs = {"uploads", "knowledge", "code", "data"}
     new = []
     for ext in IMAGE_EXTENSIONS:
         for p in Path(session_dir).rglob(f"*{ext}"):
             if "review" in p.stem:
+                continue
+            # Skip user-uploaded files
+            if _upload_dirs & {part for part in p.relative_to(session_dir).parts[:-1]}:
                 continue
             s = str(p)
             if s not in st.session_state.known_images:
@@ -91,6 +97,34 @@ def _find_feedback_preview_images() -> list[str]:
     return previews
 
 
+def _find_code_review_files() -> list[tuple[str, str]]:
+    """Return (filename, content) pairs for Python files awaiting review.
+
+    Checks both ``temp_code_review/`` (initial generation) and
+    ``temp_code_review_iter/`` (refinement iterations), returning
+    files from whichever directory was modified most recently.
+    """
+    session_dir = st.session_state.session_dir
+    if session_dir is None:
+        return []
+    candidates = [
+        Path(session_dir) / "temp_code_review",
+        Path(session_dir) / "temp_code_review_iter",
+    ]
+    # Pick the most recently modified directory that exists
+    existing = [d for d in candidates if d.is_dir()]
+    if not existing:
+        return []
+    review_dir = max(existing, key=lambda d: d.stat().st_mtime)
+    files = []
+    for p in sorted(review_dir.glob("*.py")):
+        try:
+            files.append((p.name, p.read_text(encoding="utf-8")))
+        except Exception:
+            files.append((p.name, "(could not read file)"))
+    return files
+
+
 def _find_new_html_reports() -> list[str]:
     """Return HTML report paths in the session dir not yet shown."""
     session_dir = st.session_state.session_dir
@@ -110,14 +144,34 @@ def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
     import logging
 
     original_input = builtins.input
+    _metadata_cache: dict[str, str] = {}
 
     def _streamlit_input(prompt: str = "") -> str:
+        if task.stopped:
+            raise AgentStoppedError("Agent stopped by user")
         context = cap.getvalue()
+        # Auto-reply for repeated metadata prompts (same file asked twice)
+        if "Context" in prompt and "MISSING METADATA" in context:
+            import re
+            m = re.search(r"MISSING METADATA FOR:\s*(.+)", context)
+            if m:
+                fname = m.group(1).strip()
+                if fname in _metadata_cache:
+                    return _metadata_cache[fname]
         req = FeedbackRequest(prompt=prompt, context=context)
         task.feedback_request = req
         req.event.wait()
         task.feedback_request = None
-        return req.response or ""
+        if task.stopped:
+            raise AgentStoppedError("Agent stopped by user")
+        response = req.response or ""
+        # Cache metadata descriptions so repeated prompts auto-reply
+        if "Context" in prompt and "MISSING METADATA" in context:
+            import re
+            m = re.search(r"MISSING METADATA FOR:\s*(.+)", context)
+            if m:
+                _metadata_cache[m.group(1).strip()] = response
+        return response
 
     cap = OutputCapture()
     task.live_capture = cap
@@ -133,6 +187,15 @@ def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
     _this_thread = threading.get_ident()
     log_handler.addFilter(lambda record: record.thread == _this_thread)
     root_logger = logging.getLogger()
+    # Lower root to INFO so agent logger.info() messages (execution
+    # details, verification steps, R² values) reach the handler.
+    # Mute noisy third-party libraries to prevent flooding.
+    if root_logger.level > logging.INFO:
+        root_logger.setLevel(logging.INFO)
+    for _lib in ("urllib3", "httpx", "httpcore", "google", "openai",
+                 "anthropic", "matplotlib", "PIL", "fsspec", "asyncio",
+                 "grpc", "absl"):
+        logging.getLogger(_lib).setLevel(logging.WARNING)
     root_logger.addHandler(log_handler)
 
     try:
@@ -142,6 +205,9 @@ def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
         if not task.stopped:
             task.result = result
             task.verbose_log = cap.getvalue()
+    except AgentStoppedError:
+        # Expected — user clicked Stop. Thread exits cleanly.
+        pass
     except Exception as exc:
         if not task.stopped:
             task.error = str(exc)
@@ -175,8 +241,70 @@ if not st.session_state.agent_initialized:
     # Check if session init was requested from the sidebar
     _pending = st.session_state.pop("_pending_init", None)
 
+    # ── Initializing: dim everything, show centered spinner ──
+    if _pending is not None:
+        st.markdown(
+            """<style>
+            section[data-testid="stSidebar"] { opacity: 0.3; pointer-events: none; }
+            </style>""",
+            unsafe_allow_html=True,
+        )
+        col_l, col_c, col_r = st.columns([1, 2, 1])
+        with col_c:
+            st.markdown(
+                '<div style="display:flex;flex-direction:column;align-items:center;'
+                'justify-content:center;min-height:60vh">'
+                '<style>'
+                '@keyframes init-pulse{'
+                '0%,100%{opacity:0.4}50%{opacity:1}'
+                '}'
+                '</style>'
+                '<div style="display:flex;gap:8px;margin-bottom:20px">'
+                '<div style="width:10px;height:10px;border-radius:50%;'
+                'background:#82B1FF;animation:init-pulse 1.4s ease-in-out infinite"></div>'
+                '<div style="width:10px;height:10px;border-radius:50%;'
+                'background:#82B1FF;animation:init-pulse 1.4s ease-in-out infinite 0.2s"></div>'
+                '<div style="width:10px;height:10px;border-radius:50%;'
+                'background:#82B1FF;animation:init-pulse 1.4s ease-in-out infinite 0.4s"></div>'
+                '</div>'
+                '<p style="color:#82B1FF;font-size:1.2em;font-weight:500;margin:0">'
+                'Initializing agent...</p>'
+                '<p style="color:#6B7A8C;font-size:0.9em;margin-top:8px">'
+                'Setting up models and tools</p>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+        start_session(**_pending)
+        # start_session calls st.rerun() on success, so we only
+        # reach here if initialization failed.
+        st.stop()
+
+    # ── Normal welcome screen ────────────────────────────────
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
+        # Mode selector — centered above the logo
+        if st.session_state.app_mode is None:
+            st.session_state.app_mode = "analyze"
+        _mode_map = {m["key"]: m for m in APP_MODES}
+        _, _mc1, _mc2, _ = st.columns([2, 1, 1, 2])
+        with _mc1:
+            _atype = "primary" if st.session_state.app_mode == "analyze" else "secondary"
+            if st.button("Analyze", type=_atype, use_container_width=True, key="mode_analyze"):
+                st.session_state.app_mode = "analyze"
+                st.rerun()
+        with _mc2:
+            _ptype = "primary" if st.session_state.app_mode == "plan" else "secondary"
+            if st.button("Plan", type=_ptype, use_container_width=True, key="mode_plan"):
+                st.session_state.app_mode = "plan"
+                st.rerun()
+        _cur_desc = _mode_map[st.session_state.app_mode]["description"]
+        st.markdown(
+            f'<p style="text-align:center;color:#6B7A8C;font-size:0.85em;'
+            f'margin-top:-4px;margin-bottom:12px">'
+            f'{_cur_desc}</p>',
+            unsafe_allow_html=True,
+        )
+
         if _LOGO_PATH.exists():
             _b64 = base64.b64encode(_LOGO_PATH.read_bytes()).decode()
             st.markdown(
@@ -205,29 +333,6 @@ if not st.session_state.agent_initialized:
             "LLM-powered agents for scientific research automation</p>",
             unsafe_allow_html=True,
         )
-
-        if _pending is not None:
-            st.markdown(
-                '<p style="text-align:center;color:#82B1FF;font-size:1em">'
-                '⏳ Initializing agents...</p>',
-                unsafe_allow_html=True,
-            )
-            start_session(**_pending)
-            # start_session calls st.rerun() on success, so we only
-            # reach here if initialization failed.
-            st.stop()
-
-        st.markdown(
-            '<p style="text-align:center;color:#B0B0B0;font-size:0.95em;'
-            'letter-spacing:0.3px">'
-            '<span style="color:#E0E0E0">Configure model & API key</span>'
-            '&ensp;<span style="color:#82B1FF">&rarr;</span>&ensp;'
-            '<span style="color:#E0E0E0">Upload data</span>'
-            '&ensp;<span style="color:#82B1FF">&rarr;</span>&ensp;'
-            '<span style="color:#E0E0E0">Chat with the agent</span>'
-            "</p>",
-            unsafe_allow_html=True,
-        )
     st.stop()
 
 
@@ -240,57 +345,7 @@ chat_tab, files_tab = st.tabs(["Chat", "File Explorer"])
 with chat_tab:
     # Show a prominent upload zone until the chat conversation starts
     if not st.session_state.chat_messages:
-        st.markdown(
-            '<div style="border:2px dashed #4A5568;border-radius:10px;'
-            "padding:32px 16px;text-align:center;margin-bottom:16px;"
-            'background:#1E2530">'
-            '<p style="color:#82B1FF;font-size:1.1em;margin:0 0 4px 0">'
-            "Upload your data to get started</p>"
-            '<p style="color:#6B7A8C;font-size:0.85em;margin:0">'
-            "Images, CSV, NumPy arrays, and more</p>"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-        up_data, up_meta = st.columns(2)
-        with up_data:
-            main_data = st.file_uploader(
-                "Data file(s)",
-                type=[e.lstrip(".") for e in SUPPORTED_DATA_EXTENSIONS],
-                key="main_uploader_data",
-                accept_multiple_files=True,
-            )
-            if main_data:
-                if len(main_data) == 1:
-                    save_upload(main_data[0], "data", auto_dispatch=False)
-                else:
-                    save_upload_batch(main_data, "data", auto_dispatch=False)
-        with up_meta:
-            main_meta = st.file_uploader(
-                "Metadata (optional)",
-                type=[e.lstrip(".") for e in SUPPORTED_METADATA_EXTENSIONS],
-                key="main_uploader_meta",
-            )
-            if main_meta is not None:
-                save_upload(main_meta, "metadata", auto_dispatch=False)
-
-        # Show "Analyze" button once data is uploaded
-        if st.session_state.uploaded_data_path:
-            if st.button("Analyze", type="primary", width="stretch"):
-                data_path = st.session_state.uploaded_data_path
-                meta_path = st.session_state.uploaded_metadata_path
-                if data_path and meta_path:
-                    prompt = (
-                        f"I uploaded a data file at `{data_path}` "
-                        f"and a metadata file at `{meta_path}`. "
-                        f"Please examine the data and load the metadata."
-                    )
-                else:
-                    prompt = (
-                        f"I uploaded a data file at `{data_path}`. "
-                        f"Please examine it."
-                    )
-                st.session_state.chat_messages.append({"role": "user", "content": prompt})
-                _start_task(prompt)
+        render_pre_chat_uploads(_start_task)
 
     _avatars = {"user": AVATAR_USER, "assistant": AVATAR_AGENT}
     for msg in st.session_state.chat_messages:
@@ -369,6 +424,17 @@ with chat_tab:
             for img_path in st.session_state._feedback_preview_images:
                 st.image(img_path)
 
+            # Show generated code files during code review
+            _ctx_tail_early = (req.context or "")[-1500:]
+            if "CODE REVIEW" in _ctx_tail_early or "Review files in" in _ctx_tail_early:
+                if "_code_review_files" not in st.session_state:
+                    st.session_state._code_review_files = _find_code_review_files()
+                code_files = st.session_state._code_review_files
+                if code_files:
+                    for fname, content in code_files:
+                        with st.expander(f"📄 {fname}", expanded=len(code_files) == 1):
+                            st.code(content, language="python")
+
             if req.context:
                 import html as _html
                 import re
@@ -423,29 +489,72 @@ with chat_tab:
                     scrolling=True,
                 )
 
-            feedback = st.text_area(
-                "Your feedback (optional):",
-                key="feedback_input",
-            )
-            col_submit, col_accept = st.columns(2)
-            with col_submit:
-                if st.button("Submit feedback", disabled=not feedback.strip(),
-                             width="stretch"):
-                    req.response = feedback.strip()
-                    req.event.set()
-                    st.session_state.pop("_feedback_preview_images", None)
-                    st.rerun(scope="app")
-            with col_accept:
-                if st.button("Accept as-is", width="stretch"):
-                    req.response = ""
-                    req.event.set()
-                    st.session_state.pop("_feedback_preview_images", None)
-                    st.rerun(scope="app")
+            # Adapt labels based on the type of input prompt.
+            # Only check the tail of the context (last ~1500 chars) since
+            # the buffer accumulates all stdout from the session.
+            _ctx_tail = (req.context or "")[-1500:]
+            _prompt = req.prompt or ""
+            _is_keep_revert = "revert to original" in _ctx_tail.lower()
+            if "Context" in _prompt or "MISSING METADATA" in _ctx_tail:
+                _input_label = "Describe your data (optional):"
+                _submit_label = "Submit description"
+                _accept_label = "Skip (let agent guess)"
+            elif "CODE REVIEW" in _ctx_tail or "Review files in" in _ctx_tail:
+                _input_label = "Your code feedback (optional):"
+                _submit_label = "Request changes"
+                _accept_label = "Approve code"
+            elif "REQUESTING FEEDBACK" in _ctx_tail or "Review the plan" in _ctx_tail:
+                _input_label = "Your plan feedback (optional):"
+                _submit_label = "Request changes"
+                _accept_label = "Approve plan"
+            else:
+                _input_label = "Your feedback (optional):"
+                _submit_label = "Submit feedback"
+                _accept_label = "Accept as-is"
+
+            # Keep/revert prompt: show two simple buttons, no text area
+            if _is_keep_revert:
+                col_keep, col_revert = st.columns(2)
+                with col_keep:
+                    if st.button("Keep user-guided fit", type="primary", width="stretch"):
+                        req.response = "keep"
+                        req.event.set()
+                        st.session_state.pop("_feedback_preview_images", None)
+                        st.session_state.pop("_code_review_files", None)
+                        st.rerun(scope="app")
+                with col_revert:
+                    if st.button("Revert to original fit", type="primary", width="stretch"):
+                        req.response = ""
+                        req.event.set()
+                        st.session_state.pop("_feedback_preview_images", None)
+                        st.session_state.pop("_code_review_files", None)
+                        st.rerun(scope="app")
+            else:
+                feedback = st.text_area(
+                    _input_label,
+                    key="feedback_input",
+                )
+                col_submit, col_accept = st.columns(2)
+                with col_submit:
+                    if st.button(_submit_label, type="primary", disabled=not feedback.strip(),
+                                 width="stretch"):
+                        req.response = feedback.strip()
+                        req.event.set()
+                        st.session_state.pop("_feedback_preview_images", None)
+                        st.session_state.pop("_code_review_files", None)
+                        st.rerun(scope="app")
+                with col_accept:
+                    if st.button(_accept_label, type="primary", width="stretch"):
+                        req.response = ""
+                        req.event.set()
+                        st.session_state.pop("_feedback_preview_images", None)
+                        st.session_state.pop("_code_review_files", None)
+                        st.rerun(scope="app")
             return
 
         # ── 3. Live monitoring — fragment auto-reruns, no blocking ──
         if task.is_running:
-            _spin_col, _stop_col = st.columns([4, 1])
+            _spin_col, _stop_col = st.columns([1, 0.07], vertical_alignment="center")
             with _spin_col:
                 st.markdown(
                     '<div class="agent-spinner-container">'
@@ -457,22 +566,31 @@ with chat_tab:
                     unsafe_allow_html=True,
                 )
             with _stop_col:
-                if st.button("Stop", type="secondary", key="stop_agent_btn",
-                             use_container_width=True):
+                if st.button("■", type="secondary", key="stop_agent_btn",
+                             help="Stop agent"):
                     task.stopped = True
                     task.is_running = False
-                    task.verbose_log = (
-                        task.live_capture.getvalue() if task.live_capture else ""
-                    )
+                    # Signal the agent thread to raise AgentStoppedError
+                    # on its next print() call, then capture the log.
+                    if task.live_capture:
+                        task.live_capture.request_stop()
+                        task.verbose_log = task.live_capture.getvalue()
+                    else:
+                        task.verbose_log = ""
                     task.live_capture = None
                     # Unblock any pending feedback wait
                     if task.feedback_request is not None:
                         task.feedback_request.response = ""
                         task.feedback_request.event.set()
                         task.feedback_request = None
+                    _stop_label = (
+                        "Planning stopped by user."
+                        if st.session_state.app_mode == "plan"
+                        else "Analysis stopped by user."
+                    )
                     st.session_state.chat_messages.append({
                         "role": "assistant",
-                        "content": "Analysis stopped by user.",
+                        "content": _stop_label,
                         "verbose": task.verbose_log,
                     })
                     st.session_state.chat_task = ChatTask()
@@ -530,7 +648,12 @@ with chat_tab:
         st.session_state.chat_messages.append({"role": "user", "content": auto_prompt})
         _start_task(auto_prompt)
 
-    if prompt := st.chat_input("Message the analysis agent...", disabled=task.is_running):
+    _chat_placeholder = (
+        "Message the planning agent..."
+        if st.session_state.app_mode == "plan"
+        else "Message the analysis agent..."
+    )
+    if prompt := st.chat_input(_chat_placeholder, disabled=task.is_running):
         st.session_state.chat_messages.append({"role": "user", "content": prompt})
         _start_task(prompt)
 
@@ -546,20 +669,22 @@ _FILE_TYPE_ICONS = {
 
 
 def _discover_sessions(current_session_dir: str | None) -> list[tuple[str, Path]]:
-    """Return (display_label, path) for every analysis_session_* directory."""
+    """Return (display_label, path) for session directories matching the current mode."""
     if current_session_dir is None:
         return []
     parent = Path(current_session_dir).parent
+    app_mode = st.session_state.app_mode or "analyze"
+    prefix = SESSION_DIR_PREFIXES.get(app_mode, "analysis_session")
     sessions = sorted(
-        parent.glob("analysis_session_*"),
+        parent.glob(f"{prefix}_*"),
         key=lambda p: p.name,
         reverse=True,
     )
     current = Path(current_session_dir)
     result: list[tuple[str, Path]] = []
     for s in sessions:
-        # Parse timestamp from directory name like analysis_session_20260223_201729
-        parts = s.name.removeprefix("analysis_session_")
+        # Parse timestamp from directory name like <prefix>_20260223_201729
+        parts = s.name.removeprefix(f"{prefix}_")
         try:
             label = f"{parts[:4]}-{parts[4:6]}-{parts[6:8]} {parts[9:11]}:{parts[11:13]}:{parts[13:15]}"
         except (IndexError, ValueError):

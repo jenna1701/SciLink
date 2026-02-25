@@ -66,18 +66,42 @@ section[data-testid="stSidebar"] [data-testid="stMetricValue"] {
 }
 
 /* ── Buttons ────────────────────────────────────────── */
-button[kind="primary"],
 .stButton > button {
-    background-color: #6200EE;
-    color: #FFFFFF;
     border: none;
     border-radius: 4px;
-    text-transform: uppercase;
     font-weight: 500;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.3px;
     transition: background-color 0.2s, box-shadow 0.2s;
+    white-space: nowrap;
 }
-.stButton > button:hover {
+/* Primary buttons — purple (default for all) */
+button[kind="primary"],
+.stButton > button[kind="primary"] {
+    background-color: #6200EE !important;
+    color: #FFFFFF !important;
+    font-weight: 600;
+}
+/* Uppercase only for action buttons inside the chat tabs */
+.stTabs .stButton > button[kind="primary"] {
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+button[kind="primary"]:hover,
+.stButton > button[kind="primary"]:hover {
+    background-color: #7C4DFF !important;
+    box-shadow: 0 2px 8px rgba(98, 0, 238, 0.35);
+}
+/* Sidebar buttons — original purple */
+section[data-testid="stSidebar"] .stButton > button {
+    background-color: #6200EE;
+    color: #FFFFFF;
+    font-size: 0.85em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding: 0.4rem 0.6rem;
+}
+section[data-testid="stSidebar"] .stButton > button:hover {
     background-color: #7C4DFF;
     box-shadow: 0 2px 8px rgba(98, 0, 238, 0.35);
 }
@@ -207,7 +231,6 @@ h2, h3 {
     border: 1px solid #3A4556;
     border-left: 3px solid #4FC3F7;
     border-radius: 6px;
-    margin-bottom: 8px;
 }
 .agent-spinner-dot {
     width: 8px;
@@ -222,6 +245,34 @@ h2, h3 {
     color: #E0E0E0;
     font-size: 0.9em;
     font-weight: 500;
+}
+
+/* ── Stop button (square icon beside spinner) ──────── */
+/* Push the button wrapper down to align with the spinner bar */
+[data-testid="stHorizontalBlock"]:has(.agent-spinner-container)
+    > [data-testid="stColumn"]:last-child .stButton {
+    padding-top: 10px;
+}
+.stTabs .stButton > button[kind="secondary"] {
+    width: 100% !important;
+    height: 58px !important;
+    min-height: 58px !important;
+    padding: 0 !important;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1em;
+    border-radius: 6px;
+    background-color: #3A4556 !important;
+    color: #E0E0E0 !important;
+    border: 1px solid #4A5568 !important;
+    line-height: 1;
+    text-transform: none;
+}
+.stTabs .stButton > button[kind="secondary"]:hover {
+    background-color: #D32F2F !important;
+    border-color: #D32F2F !important;
+    color: #FFFFFF !important;
 }
 
 /* ── Live log viewer ────────────────────────────────── */

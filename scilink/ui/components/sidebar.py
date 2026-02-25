@@ -7,7 +7,16 @@ from pathlib import Path
 
 import streamlit as st
 
-from ..config import MODEL_OPTIONS, SUPPORTED_DATA_EXTENSIONS, SUPPORTED_METADATA_EXTENSIONS
+from ..config import (
+    EMBEDDING_MODEL_OPTIONS,
+    MODEL_OPTIONS,
+    SESSION_DIR_PREFIXES,
+    SUPPORTED_CODE_EXTENSIONS,
+    SUPPORTED_DATA_EXTENSIONS,
+    SUPPORTED_KNOWLEDGE_EXTENSIONS,
+    SUPPORTED_METADATA_EXTENSIONS,
+    SUPPORTED_PLANNING_DATA_EXTENSIONS,
+)
 
 
 _LOGO_PATH = Path(__file__).resolve().parent.parent / "assets" / "scilink_logo_v3_dark.svg"
@@ -52,8 +61,20 @@ def render_sidebar() -> None:
         api_key = st.text_input("API key", type="password", key="cfg_api_key", disabled=_locked)
         base_url = st.text_input("Base URL (optional)", key="cfg_base_url", disabled=_locked)
         fh_api_key = st.text_input("FutureHouse API key (optional)", type="password", key="cfg_fh_api_key", disabled=_locked)
+
+        # Planning mode: embedding model
+        if st.session_state.app_mode == "plan":
+            st.selectbox(
+                "Embedding model",
+                EMBEDDING_MODEL_OPTIONS + ["Custom"],
+                key="cfg_embedding_preset",
+                disabled=_locked,
+            )
+            if st.session_state.get("cfg_embedding_preset") == "Custom":
+                st.text_input("Embedding model name", key="cfg_embedding_custom", disabled=_locked)
+
         mode = st.selectbox(
-            "Analysis mode",
+            "Autonomy mode",
             ["supervised", "co-pilot", "autonomous"],
             key="cfg_mode",
             disabled=_locked,
@@ -79,12 +100,18 @@ def render_sidebar() -> None:
             if st.button("Start Session", disabled=start_disabled, width="stretch"):
                 # Stash config and let the main app handle the heavy init
                 # outside the sidebar context so the spinner is visible.
+                _embed_preset = st.session_state.get("cfg_embedding_preset", "")
+                _embed_model = (
+                    st.session_state.get("cfg_embedding_custom", "")
+                    if _embed_preset == "Custom" else _embed_preset
+                ) or None
                 st.session_state._pending_init = {
                     "model": model,
                     "api_key": api_key,
                     "base_url": base_url,
                     "mode": mode,
                     "fh_api_key": fh_api_key,
+                    "embedding_model": _embed_model,
                 }
 
         with col2:
@@ -92,69 +119,159 @@ def render_sidebar() -> None:
                          width="stretch"):
                 _reset_session()
 
-        # ── File upload ──────────────────────────────────────────
+        # ── File upload (mode-specific) ──────────────────────────
         if st.session_state.agent_initialized:
             st.divider()
-            st.subheader("Upload Files")
+            app_mode = st.session_state.app_mode
 
-            data_files = st.file_uploader(
-                "Data file(s)",
-                type=[e.lstrip(".") for e in SUPPORTED_DATA_EXTENSIONS],
-                key="uploader_data",
-                accept_multiple_files=True,
-            )
-            if data_files:
-                if len(data_files) == 1:
-                    save_upload(data_files[0], "data")
-                else:
-                    save_upload_batch(data_files, "data")
+            if app_mode == "analyze":
+                _render_analyze_sidebar_uploads()
+            elif app_mode == "plan":
+                _render_planning_sidebar_uploads()
 
-            meta_file = st.file_uploader(
-                "Metadata file",
-                type=[e.lstrip(".") for e in SUPPORTED_METADATA_EXTENSIONS],
-                key="uploader_meta",
-            )
-            if meta_file is not None:
-                save_upload(meta_file, "metadata")
-
-            # ── Agent status ─────────────────────────────────────
+            # ── Agent status (mode-specific) ─────────────────────
             st.divider()
             st.subheader("Agent Status")
-            agent = st.session_state.agent
-            if agent.selected_agent_id is not None:
-                entry = agent._agent_registry.get(agent.selected_agent_id, {})
-                agent_label = entry.get("name", f"Agent {agent.selected_agent_id}")
-            else:
-                agent_label = "None"
+            if app_mode == "analyze":
+                _render_analyze_status()
+            elif app_mode == "plan":
+                _render_planning_status()
 
-            row1_c1, row1_c2 = st.columns(2)
-            with row1_c1:
-                st.metric("Selected Agent", agent_label)
-            with row1_c2:
-                st.metric("Analyses", len(agent.analysis_results))
+        # ── Quit button (always visible at bottom) ────────────
+        st.divider()
+        if st.button("Quit App", use_container_width=True):
+            # Stop any running agent thread
+            task = st.session_state.get("chat_task")
+            if task and task.is_running:
+                task.stopped = True
+                if task.live_capture:
+                    task.live_capture.request_stop()
+                if task.feedback_request is not None:
+                    task.feedback_request.response = ""
+                    task.feedback_request.event.set()
+            # Inject JS to replace the page with a goodbye message,
+            # then kill the server after a short delay.
+            import streamlit.components.v1 as components
+            components.html(
+                '<script>'
+                'window.parent.document.body.innerHTML = '
+                '\'<div style="display:flex;align-items:center;justify-content:center;'
+                'height:100vh;font-family:sans-serif;color:#888;background:#0e1117;">'
+                '<h2>Server stopped. You can close this window.</h2></div>\';'
+                '</script>',
+                height=0,
+            )
+            import time, signal
+            time.sleep(1)
+            os.kill(os.getpid(), signal.SIGTERM)
 
-            data_path = agent.current_data_path
-            if data_path:
-                st.metric("Data File", Path(data_path).name)
-            else:
-                st.metric("Data File", "None")
 
-            if agent.current_data_type:
-                st.metric("Data Type", agent.current_data_type)
+def _render_analyze_sidebar_uploads() -> None:
+    """Sidebar upload widgets for analyze mode."""
+    st.subheader("Upload Files")
+
+    data_files = st.file_uploader(
+        "Data file(s)",
+        type=[e.lstrip(".") for e in SUPPORTED_DATA_EXTENSIONS],
+        key="uploader_data",
+        accept_multiple_files=True,
+    )
+    if data_files:
+        if len(data_files) == 1:
+            save_upload(data_files[0], "data")
+        else:
+            save_upload_batch(data_files, "data")
+
+    meta_file = st.file_uploader(
+        "Metadata file",
+        type=[e.lstrip(".") for e in SUPPORTED_METADATA_EXTENSIONS],
+        key="uploader_meta",
+    )
+    if meta_file is not None:
+        save_upload(meta_file, "metadata")
+
+
+def _render_planning_sidebar_uploads() -> None:
+    """Compact sidebar upload widgets for plan mode."""
+    st.subheader("Upload Files")
+
+    knowledge_files = st.file_uploader(
+        "Knowledge",
+        type=[e.lstrip(".") for e in SUPPORTED_KNOWLEDGE_EXTENSIONS],
+        key="sidebar_uploader_knowledge",
+        accept_multiple_files=True,
+    )
+    if knowledge_files:
+        from .chat_uploads import save_planning_uploads
+        save_planning_uploads(knowledge_files, "knowledge")
+
+    code_files = st.file_uploader(
+        "Code",
+        type=[e.lstrip(".") for e in SUPPORTED_CODE_EXTENSIONS],
+        key="sidebar_uploader_code",
+        accept_multiple_files=True,
+    )
+    if code_files:
+        from .chat_uploads import save_planning_uploads
+        save_planning_uploads(code_files, "code")
+
+    data_files = st.file_uploader(
+        "Data",
+        type=[e.lstrip(".") for e in SUPPORTED_PLANNING_DATA_EXTENSIONS],
+        key="sidebar_uploader_planning_data",
+        accept_multiple_files=True,
+    )
+    if data_files:
+        from .chat_uploads import save_planning_uploads
+        save_planning_uploads(data_files, "data")
+
+
+def _render_analyze_status() -> None:
+    """Show analysis-specific agent status metrics."""
+    agent = st.session_state.agent
+    if agent.selected_agent_id is not None:
+        entry = agent._agent_registry.get(agent.selected_agent_id, {})
+        agent_label = entry.get("name", f"Agent {agent.selected_agent_id}")
+    else:
+        agent_label = "None"
+
+    row1_c1, row1_c2 = st.columns(2)
+    with row1_c1:
+        st.metric("Selected Agent", agent_label)
+    with row1_c2:
+        st.metric("Analyses", len(agent.analysis_results))
+
+    data_path = agent.current_data_path
+    if data_path:
+        st.metric("Data File", Path(data_path).name)
+    else:
+        st.metric("Data File", "None")
+
+    if agent.current_data_type:
+        st.metric("Data Type", agent.current_data_type)
+
+
+def _render_planning_status() -> None:
+    """Show planning-specific agent status metrics."""
+    objective = st.session_state.get("planning_objective", "")
+    n_messages = len(st.session_state.chat_messages)
+    mode = st.session_state.agent_config.get("mode", "supervised")
+
+    if objective:
+        st.metric("Objective", objective[:40] + ("..." if len(objective) > 40 else ""))
+    st.metric("Messages", n_messages)
+    st.metric("Autonomy", mode.replace("-", " ").title())
 
 
 # ── helpers ──────────────────────────────────────────────────────
 
-def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key: str = "") -> None:
-    """Initialize the analysis agent and session directory.
+def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key: str = "", embedding_model: str = None) -> None:
+    """Initialize the agent and session directory.
 
+    Dispatches to the appropriate agent based on ``st.session_state.app_mode``.
     Designed to be called from the **main** content area (not inside
     ``with st.sidebar``) so that ``st.spinner`` is visible to the user.
     """
-    from scilink.agents.exp_agents.analysis_orchestrator import (
-        AnalysisMode,
-        AnalysisOrchestratorAgent,
-    )
     import scilink.executors as executors
 
     resolved_key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
@@ -162,32 +279,28 @@ def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key
         st.sidebar.error("Provide an API key or set an environment variable (GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY).")
         return
 
-    mode_map = {
-        "co-pilot": AnalysisMode.CO_PILOT,
-        "supervised": AnalysisMode.SUPERVISED,
-        "autonomous": AnalysisMode.AUTONOMOUS,
-    }
-
+    app_mode = st.session_state.app_mode or "analyze"
+    prefix = SESSION_DIR_PREFIXES.get(app_mode, "session")
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    session_dir = Path(f"analysis_session_{ts}").resolve()
+    session_dir = Path(f"{prefix}_{ts}").resolve()
     session_dir.mkdir(parents=True, exist_ok=True)
 
     # Auto-approve sandbox for the Streamlit session (user checked consent box)
     executors._GLOBAL_SANDBOX_APPROVED = True
 
-    with st.spinner("Initializing agent..."):
-        try:
-            agent = AnalysisOrchestratorAgent(
-                base_dir=str(session_dir),
-                api_key=resolved_key,
-                model_name=model,
-                base_url=base_url or None,
-                analysis_mode=mode_map[mode],
-                futurehouse_api_key=fh_api_key or None,
+    try:
+        if app_mode == "plan":
+            agent = _init_planning_agent(
+                session_dir, resolved_key, model, base_url, mode, fh_api_key,
+                embedding_model=embedding_model,
             )
-        except Exception as exc:
-            st.error(f"Failed to initialize agent: {exc}")
-            return
+        else:
+            agent = _init_analysis_agent(
+                session_dir, resolved_key, model, base_url, mode, fh_api_key,
+            )
+    except Exception as exc:
+        st.error(f"Failed to initialize agent: {exc}")
+        return
 
     st.session_state.agent = agent
     st.session_state.agent_initialized = True
@@ -199,6 +312,70 @@ def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key
     st.session_state.chat_messages = []
     st.session_state.known_images = set()
     st.rerun()
+
+
+def _init_analysis_agent(session_dir, api_key, model, base_url, mode, fh_api_key):
+    """Create an AnalysisOrchestratorAgent."""
+    from scilink.agents.exp_agents.analysis_orchestrator import (
+        AnalysisMode,
+        AnalysisOrchestratorAgent,
+    )
+
+    mode_map = {
+        "co-pilot": AnalysisMode.CO_PILOT,
+        "supervised": AnalysisMode.SUPERVISED,
+        "autonomous": AnalysisMode.AUTONOMOUS,
+    }
+    return AnalysisOrchestratorAgent(
+        base_dir=str(session_dir),
+        api_key=api_key,
+        model_name=model,
+        base_url=base_url or None,
+        analysis_mode=mode_map[mode],
+        futurehouse_api_key=fh_api_key or None,
+    )
+
+
+def _init_planning_agent(session_dir, api_key, model, base_url, mode, fh_api_key,
+                         embedding_model=None):
+    """Create a PlanningOrchestratorAgent."""
+    from scilink.agents.planning_agents.planning_orchestrator import (
+        AutonomyLevel,
+        PlanningOrchestratorAgent,
+    )
+
+    mode_map = {
+        "co-pilot": AutonomyLevel.CO_PILOT,
+        "supervised": AutonomyLevel.SUPERVISED,
+        "autonomous": AutonomyLevel.AUTONOMOUS,
+    }
+    objective = st.session_state.get("planning_objective", "").strip() or "Undefined Research Goal"
+
+    # Create subdirectories for planning uploads
+    knowledge_dir = session_dir / "knowledge"
+    code_dir = session_dir / "code"
+    data_dir = session_dir / "data"
+    knowledge_dir.mkdir(exist_ok=True)
+    code_dir.mkdir(exist_ok=True)
+    data_dir.mkdir(exist_ok=True)
+
+    kwargs = {}
+    if embedding_model:
+        kwargs["embedding_model"] = embedding_model
+
+    return PlanningOrchestratorAgent(
+        objective=objective,
+        base_dir=str(session_dir),
+        api_key=api_key,
+        model_name=model,
+        base_url=base_url or None,
+        autonomy_level=mode_map[mode],
+        futurehouse_api_key=fh_api_key or None,
+        knowledge_dir=str(knowledge_dir),
+        code_dir=str(code_dir),
+        data_dir=str(data_dir),
+        **kwargs,
+    )
 
 
 def _reset_session() -> None:
