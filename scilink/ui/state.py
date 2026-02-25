@@ -46,6 +46,13 @@ def init_session_state() -> None:
         "pending_auto_load_metadata": None,
         "cfg_consent": False,
         "selected_preview_file": None,
+        # Mode selection (None until chosen on welcome screen)
+        "app_mode": None,
+        # Planning mode state
+        "planning_objective": "",
+        "uploaded_knowledge_paths": [],
+        "uploaded_code_paths": [],
+        "uploaded_planning_data_paths": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:

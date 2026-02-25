@@ -501,21 +501,25 @@ class PlanningAgent(BaseAgent):
             if human_feedback:
                 print(f"\n📝 Refining plan...")
                 self.state["human_feedback_history"].append({"phase": "science", "feedback": human_feedback})
-                res = refine_plan_with_feedback(
+                refined = refine_plan_with_feedback(
                     original_result=res,
                     feedback=human_feedback,
                     objective=objective,
                     model=self.model,
                     generation_config=self.generation_config
                 )
-                
-                res["iteration"] = current_iter
-                res["stage"] = "Human Refined (Science)"
-                self.state["plan_history"].append(res.copy())
-                self.state["current_plan"] = res
-                
-                display_plan_summary(res)
-                print("✅ Plan updated.")
+
+                if refined.get("error"):
+                    print(f"⚠️  Refinement failed: {refined.get('message', 'unknown error')}")
+                    print("    Keeping original plan.")
+                else:
+                    res = refined
+                    res["iteration"] = current_iter
+                    res["stage"] = "Human Refined (Science)"
+                    self.state["plan_history"].append(res.copy())
+                    self.state["current_plan"] = res
+                    display_plan_summary(res)
+                    print("✅ Plan updated.")
             else:
                 print("✅ Plan accepted.")
         

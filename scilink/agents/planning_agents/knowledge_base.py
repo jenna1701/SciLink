@@ -293,14 +293,61 @@ class KnowledgeBase:
             source_difference = [dict(t) for t in difference_tuples]
             
         else:
-            # Helper to normalize paths: "./foo" and "foo" become the same
             normalize = lambda p: os.path.normpath(p)
-            
-            # 1. Filter existing sources to only check strings (normalized)
-            existing_strings = {normalize(s) for s in self.sources if isinstance(s, str)}
-            
-            # 2. Calculate difference (comparing normalized paths)
-            source_difference = [s for s in new_sources if normalize(s) not in existing_strings]
+
+            # Collect existing source info for comparison.
+            existing_paths = {normalize(s) for s in self.sources if isinstance(s, str)}
+
+            # Build a set of filenames that were previously ingested.
+            # We extract basenames from:
+            #   1. Source paths that look like files (have a known extension)
+            #   2. Chunk metadata (each chunk stores its source file path)
+            #   3. Directory sources that still exist on disk
+            # This lets us recognise the same file even when it's uploaded
+            # to a different session directory whose old path no longer exists.
+            _FILE_EXTENSIONS = {
+                '.pdf', '.txt', '.md', '.docx', '.csv', '.xlsx', '.tsv',
+                '.py', '.json', '.yaml', '.yml', '.npy',
+                '.png', '.jpg', '.jpeg', '.tif', '.tiff',
+            }
+            existing_basenames: set[str] = set()
+            for s in self.sources:
+                if not isinstance(s, str):
+                    continue
+                p = Path(normalize(s))
+                if p.suffix.lower() in _FILE_EXTENSIONS:
+                    # Path string looks like a file — extract basename
+                    existing_basenames.add(p.name)
+                elif p.is_dir():
+                    # Directory still exists on disk — scan it
+                    for f in p.rglob("*"):
+                        if f.is_file():
+                            existing_basenames.add(f.name)
+            # Also mine basenames from chunk metadata (most reliable —
+            # these are the actual files that were parsed and embedded).
+            for chunk in self.chunks:
+                meta = chunk.get("metadata", {})
+                src = meta.get("source", "")
+                if src:
+                    existing_basenames.add(Path(src).name)
+
+            source_difference = []
+            for s in new_sources:
+                ns = normalize(s)
+                # 1. Exact path match (fast path)
+                if ns in existing_paths:
+                    continue
+                p = Path(ns)
+                # 2. File: check if a file with the same name was already ingested
+                if p.is_file():
+                    if p.name in existing_basenames:
+                        continue
+                # 3. Directory: check if ALL files inside were already ingested
+                elif p.is_dir():
+                    dir_files = {f.name for f in p.rglob("*") if f.is_file()}
+                    if dir_files and dir_files.issubset(existing_basenames):
+                        continue
+                source_difference.append(s)
         
         # Update history
         self.sources.extend(source_difference)

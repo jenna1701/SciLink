@@ -63,10 +63,15 @@ _SUPERVISED_DIRECTIVE = """
 - Periodically summarize progress (every 3-5 steps) but don't wait for response.
 - Use your judgment but remain open to human corrections.
 
+**FIRST MESSAGE ONLY:**
+- If the user did not provide a clear research objective, ask them to clarify before proceeding.
+- Otherwise, start working immediately.
+
 **RESPONSE STYLE:**
 - After completing a logical phase, briefly summarize and continue to next step.
 - Do NOT ask permission between steps - just proceed.
-- Only pause to report errors or request human input on ambiguous decisions.
+- NEVER ask "Would you like me to...", "Shall I...", or "Should I proceed with...". Just do it.
+- Only pause to report errors or truly unrecoverable ambiguity.
 """
 
 _AUTONOMOUS_DIRECTIVE = """
@@ -461,14 +466,15 @@ class PlanningOrchestratorAgent:
             return ""  # Not needed, human will guide
         
         context_parts = ["\n\n**WORKSPACE CONFIGURATION:**"]
-        
+        context_parts.append(f"- Research objective: {self.objective}")
+
         if self.data_dir:
             context_parts.append(f"- Data directory: {self.data_dir}")
         if self.knowledge_dir:
             context_parts.append(f"- Knowledge directory: {self.knowledge_dir}")
         if self.code_dir:
             context_parts.append(f"- Code directory: {self.code_dir}")
-        
+
         context_parts.append("\nUse these paths directly without asking for confirmation.")
         
         return "\n".join(context_parts)

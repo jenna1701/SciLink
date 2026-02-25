@@ -179,9 +179,22 @@ def parse_json_from_response(resp) -> "Tuple[Optional[Dict[str, Any]], Optional[
         )
     
     extracted = json_text[first_brace:last_brace + 1]
-    
+
     try:
         return json.loads(extracted), None
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt to fix broken Unicode escapes (e.g. \u00B instead of \u00B5)
+    # by replacing malformed \uXXX sequences with the Unicode replacement char.
+    import re
+    sanitized = re.sub(
+        r'\\u([0-9a-fA-F]{1,3})(?![0-9a-fA-F])',
+        lambda m: chr(int(m.group(1), 16)) if len(m.group(1)) >= 2 else '\ufffd',
+        extracted,
+    )
+    try:
+        return json.loads(sanitized), None
     except json.JSONDecodeError as e:
         return None, (
             f"Failed to decode JSON: {e}. "
