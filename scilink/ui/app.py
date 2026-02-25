@@ -412,15 +412,16 @@ with chat_tab:
             req: FeedbackRequest = task.feedback_request
 
             # Cache preview images so fragment reruns don't lose them.
-            # First call _find_new_images() to mark all current images
-            # as known (side-effect) so they don't re-appear in the
-            # completion message.  Then use _find_feedback_preview_images
-            # to locate the actual preview images the user should see:
+            # Only mark the preview images themselves as known (not ALL
+            # images on disk) so that per-component plots generated
+            # before this feedback step still appear on completion.
             #   • curve fitting  → *review*.png  (fit preview)
             #   • hyperspectral  → *Summary_Grid*.jpeg  (NMF/PCA grid)
             if "_feedback_preview_images" not in st.session_state:
-                _find_new_images()  # mark intermediate images as known
-                st.session_state._feedback_preview_images = _find_feedback_preview_images()
+                previews = _find_feedback_preview_images()
+                st.session_state._feedback_preview_images = previews
+                for img in previews:
+                    st.session_state.known_images.add(img)
             for img_path in st.session_state._feedback_preview_images:
                 st.image(img_path)
 

@@ -287,15 +287,20 @@ class ScriptExecutor:
 
 
 class ExecutionTimeout:
-    """
-    Context manager that raises TimeoutError if exec() exceeds a time limit.
+    """Context manager that raises TimeoutError if exec() exceeds a time limit.
 
-    Uses SIGALRM (Unix only). On Windows this is a no-op.
+    Strategy:
+    1. SIGALRM — used when running in the main thread on Unix (fast, reliable).
+    2. ``ctypes.pythonapi.PyThreadState_SetAsyncExc`` — fallback for background
+       threads (e.g., Streamlit UI).  A watchdog timer thread injects a
+       ``TimeoutError`` into the target thread after *seconds* elapse.
     """
 
     def __init__(self, seconds: int = 120):
         self.seconds = seconds
         self._old_handler = None
+        self._watchdog: threading.Timer | None = None
+        self._target_tid: int | None = None
 
     def _handler(self, signum, frame):
         raise TimeoutError(
@@ -309,16 +314,32 @@ class ExecutionTimeout:
             and threading.current_thread() is threading.main_thread()
         )
 
+    def _inject_timeout(self):
+        """Raise TimeoutError asynchronously in the target thread."""
+        import ctypes
+        tid = self._target_tid
+        if tid is None:
+            return
+        ret = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_ulong(tid), ctypes.py_object(TimeoutError)
+        )
+        if ret == 0:
+            logging.warning("ExecutionTimeout: target thread no longer exists")
+        elif ret > 1:
+            # Undo — more than one thread affected (should not happen)
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_ulong(tid), None
+            )
+
     def __enter__(self):
         if self._can_use_sigalrm():
             self._old_handler = signal.signal(signal.SIGALRM, self._handler)
             signal.alarm(self.seconds)
         else:
-            logging.warning(
-                "ExecutionTimeout: SIGALRM not available (non-main thread or "
-                "unsupported platform). No timeout protection for in-process "
-                "code execution."
-            )
+            self._target_tid = threading.get_ident()
+            self._watchdog = threading.Timer(self.seconds, self._inject_timeout)
+            self._watchdog.daemon = True
+            self._watchdog.start()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -326,4 +347,8 @@ class ExecutionTimeout:
             signal.alarm(0)
             if self._old_handler is not None:
                 signal.signal(signal.SIGALRM, self._old_handler)
+        elif self._watchdog is not None:
+            self._watchdog.cancel()
+            self._watchdog = None
+            self._target_tid = None
         return False
