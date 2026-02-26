@@ -21,7 +21,6 @@ from ..config import (
 
 _LOGO_PATH = Path(__file__).resolve().parent.parent / "assets" / "scilink_logo_v3_dark.svg"
 
-
 def render_sidebar() -> None:
     with st.sidebar:
         if st.session_state.agent_initialized and _LOGO_PATH.exists():
@@ -137,18 +136,21 @@ def render_sidebar() -> None:
             elif app_mode == "plan":
                 _render_planning_status()
 
-        # ── Vibes sliders ───────────────────────────────────
+        # ── Vibes ──────────────────────────────────────────
         st.divider()
-        st.slider(
-            "\U0001f49c Hearts",
-            min_value=0, max_value=50, value=7,
-            key="vibe_hearts",
+        st.radio(
+            "Vibe",
+            ["Professional", "Positivity boost", "Space nerd"],
+            key="vibe_theme",
+            horizontal=True,
         )
-        st.slider(
-            "\u2795 Pluses",
-            min_value=0, max_value=50, value=7,
-            key="vibe_pluses",
-        )
+        vibe = st.session_state.get("vibe_theme", "Professional")
+        if vibe == "Positivity boost":
+            st.slider("\U0001f49c Hearts", min_value=0, max_value=50, value=7, key="vibe_hearts")
+            st.slider("\u2795 Pluses", min_value=0, max_value=50, value=7, key="vibe_pluses")
+        elif vibe == "Space nerd":
+            st.slider("\U0001f680 Rockets", min_value=0, max_value=50, value=7, key="vibe_rockets")
+            st.slider("\U0001f6f8 UFOs", min_value=0, max_value=10, value=1, key="vibe_ufos")
 
         # ── Quit button (always visible at bottom) ────────────
         st.divider()

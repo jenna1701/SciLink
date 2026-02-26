@@ -232,6 +232,15 @@ h2, h3 {
     border-left: 3px solid #4FC3F7;
     border-radius: 6px;
 }
+.agent-spinner-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: #4FC3F7;
+    animation: scilink-pulse 1.4s ease-in-out infinite;
+}
+.agent-spinner-dot:nth-child(2) { animation-delay: 0.2s; }
+.agent-spinner-dot:nth-child(3) { animation-delay: 0.4s; }
 .agent-spinner-heart {
     font-size: 1.1em;
     animation: scilink-pulse 1.4s ease-in-out infinite;
@@ -319,6 +328,9 @@ header [data-testid="stStatusWidget"] {
     opacity: 0;
     animation: emoji-float var(--duration, 18s) var(--delay, 0s) ease-in-out infinite;
 }
+.floating-emojis span.rocket {
+    animation: rocket-float var(--duration, 18s) var(--delay, 0s) linear infinite;
+}
 @keyframes emoji-float {
     0% {
         opacity: 0;
@@ -335,6 +347,45 @@ header [data-testid="stStatusWidget"] {
         transform: translateY(-10vh) rotate(var(--rotation, 360deg));
     }
 }
+@keyframes ufo-zip {
+    0% {
+        opacity: 0;
+        transform: translateX(-10vw) translateY(0);
+    }
+    2% {
+        opacity: var(--peak-opacity, 0.18);
+    }
+    50% {
+        transform: translateX(50vw) translateY(-30px);
+    }
+    98% {
+        opacity: var(--peak-opacity, 0.18);
+    }
+    100% {
+        opacity: 0;
+        transform: translateX(110vw) translateY(0);
+    }
+}
+.floating-emojis span.ufo {
+    bottom: auto;
+    animation: ufo-zip var(--duration, 40s) var(--delay, 20s) linear infinite;
+}
+@keyframes rocket-float {
+    0% {
+        opacity: 0;
+        transform: translateY(100vh) rotate(-45deg);
+    }
+    3% {
+        opacity: var(--peak-opacity, 0.12);
+    }
+    93% {
+        opacity: var(--peak-opacity, 0.12);
+    }
+    100% {
+        opacity: 0;
+        transform: translateY(-10vh) rotate(-45deg);
+    }
+}
 </style>
 """
 
@@ -345,14 +396,11 @@ _FLOATING_HTML = """
 """
 
 
-def _build_emoji_spans(n_hearts: int = 7, n_pluses: int = 7) -> str:
-    """Generate absolutely-positioned emoji spans with randomised CSS vars."""
+def _build_positivity_spans(n_hearts: int = 7, n_pluses: int = 7) -> str:
+    """Generate hearts and pluses spans."""
     import random
 
-    emojis: list[str] = (
-        ["\U0001f49c"] * n_hearts  # purple hearts
-        + ["\u2795"] * n_pluses     # plus signs
-    )
+    emojis = ["\U0001f49c"] * n_hearts + ["\u2795"] * n_pluses
     random.shuffle(emojis)
 
     spans: list[str] = []
@@ -375,14 +423,117 @@ def _build_emoji_spans(n_hearts: int = 7, n_pluses: int = 7) -> str:
     return "\n".join(spans)
 
 
+def _build_space_spans(n_rockets: int = 7, n_ufos: int = 1) -> str:
+    """Generate rocket and UFO spans."""
+    import random
+
+    spans: list[str] = []
+    for _ in range(n_rockets):
+        left = random.randint(2, 96)
+        size = random.randint(20, 40)
+        duration = round(random.uniform(16, 30), 1)
+        delay = round(random.uniform(0, 3), 1)
+        opacity = round(random.uniform(0.10, 0.20), 2)
+        spans.append(
+            f'<span class="rocket" style="left:{left}%;'
+            f"--emoji-size:{size}px;"
+            f"--duration:{duration}s;"
+            f"--delay:{delay}s;"
+            f"--rotation:0deg;"
+            f'--peak-opacity:{opacity}">\U0001f680</span>'
+        )
+    for i in range(n_ufos):
+        top = random.randint(10, 80)
+        size = random.randint(24, 36)
+        duration = round(random.uniform(35, 55), 1)
+        delay = round(random.uniform(0, 5) if i == 0 else random.uniform(15, 45), 1)
+        opacity = round(random.uniform(0.15, 0.25), 2)
+        spans.append(
+            f'<span class="ufo" style="top:{top}%;left:0;'
+            f"--emoji-size:{size}px;"
+            f"--duration:{duration}s;"
+            f"--delay:{delay}s;"
+            f'--peak-opacity:{opacity}">\U0001f6f8</span>'
+        )
+    return "\n".join(spans)
+
+
+_COLLISION_JS = """
+<script>
+(function() {
+    const doc = window.parent.document;
+    function rectsOverlap(a, b) {
+        return !(a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom);
+    }
+    function boom(x, y) {
+        const el = doc.createElement('div');
+        el.textContent = '\U0001f4a5';
+        el.style.cssText =
+            'position:fixed;z-index:10000;pointer-events:none;font-size:48px;' +
+            'left:' + x + 'px;top:' + y + 'px;transform:translate(-50%,-50%);' +
+            'animation:boom-fade 0.8s ease-out forwards;';
+        doc.body.appendChild(el);
+        setTimeout(function() { el.remove(); }, 900);
+    }
+    // Inject boom keyframes once
+    if (!doc.getElementById('boom-style')) {
+        const s = doc.createElement('style');
+        s.id = 'boom-style';
+        s.textContent = '@keyframes boom-fade{0%{opacity:1;transform:translate(-50%,-50%) scale(1)}100%{opacity:0;transform:translate(-50%,-50%) scale(2.5)}}';
+        doc.head.appendChild(s);
+    }
+    const cooldowns = new WeakMap();
+    setInterval(function() {
+        const rockets = doc.querySelectorAll('.floating-emojis .rocket');
+        const ufos = doc.querySelectorAll('.floating-emojis .ufo');
+        rockets.forEach(function(r) {
+            if (cooldowns.get(r) > Date.now()) return;
+            const rr = r.getBoundingClientRect();
+            if (rr.width === 0) return;
+            ufos.forEach(function(u) {
+                if (cooldowns.get(u) > Date.now()) return;
+                const ur = u.getBoundingClientRect();
+                if (ur.width === 0) return;
+                if (rectsOverlap(rr, ur)) {
+                    const cx = (rr.left + rr.right + ur.left + ur.right) / 4;
+                    const cy = (rr.top + rr.bottom + ur.top + ur.bottom) / 4;
+                    boom(cx, cy);
+                    var fate = Math.floor(Math.random() * 3);
+                    if (fate === 0 || fate === 2) { u.remove(); }
+                    if (fate === 1 || fate === 2) { r.remove(); }
+                    return;
+                }
+            });
+        });
+    }, 150);
+})();
+</script>
+"""
+
+
 def inject_theme() -> None:
     """Inject the Material Design CSS into the current page."""
+    import streamlit.components.v1 as components
+
     st.markdown(_MATERIAL_CSS, unsafe_allow_html=True)
 
-    n_hearts = st.session_state.get("vibe_hearts", 7)
-    n_pluses = st.session_state.get("vibe_pluses", 7)
-    if n_hearts or n_pluses:
-        st.markdown(
-            _FLOATING_HTML.format(spans=_build_emoji_spans(n_hearts, n_pluses)),
-            unsafe_allow_html=True,
-        )
+    vibe = st.session_state.get("vibe_theme", "Professional")
+
+    if vibe == "Positivity boost":
+        n_hearts = st.session_state.get("vibe_hearts", 7)
+        n_pluses = st.session_state.get("vibe_pluses", 7)
+        if n_hearts or n_pluses:
+            st.markdown(
+                _FLOATING_HTML.format(spans=_build_positivity_spans(n_hearts, n_pluses)),
+                unsafe_allow_html=True,
+            )
+    elif vibe == "Space nerd":
+        n_rockets = st.session_state.get("vibe_rockets", 7)
+        n_ufos = st.session_state.get("vibe_ufos", 1)
+        if n_rockets or n_ufos:
+            st.markdown(
+                _FLOATING_HTML.format(spans=_build_space_spans(n_rockets, n_ufos)),
+                unsafe_allow_html=True,
+            )
+        if n_rockets and n_ufos:
+            components.html(_COLLISION_JS, height=0)

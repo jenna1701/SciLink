@@ -557,11 +557,19 @@ with chat_tab:
         if task.is_running:
             _spin_col, _stop_col = st.columns([1, 0.07], vertical_alignment="center")
             with _spin_col:
+                _vibe = st.session_state.get("vibe_theme", "Professional")
+                _spinner_icons = {
+                    "Professional": "\u2022",
+                    "Positivity boost": "\U0001f43e",
+                    "Space nerd": "\U0001f4e1",
+                }
+                _icon = _spinner_icons.get(_vibe, "\u2022")
+                _cls = "agent-spinner-heart" if _vibe != "Professional" else "agent-spinner-dot"
                 st.markdown(
                     '<div class="agent-spinner-container">'
-                    '  <span class="agent-spinner-heart">🐾</span>'
-                    '  <span class="agent-spinner-heart">🐾</span>'
-                    '  <span class="agent-spinner-heart">🐾</span>'
+                    f'  <span class="{_cls}">{_icon}</span>'
+                    f'  <span class="{_cls}">{_icon}</span>'
+                    f'  <span class="{_cls}">{_icon}</span>'
                     '  <span class="agent-spinner-label">Agent is working...</span>'
                     '</div>',
                     unsafe_allow_html=True,
