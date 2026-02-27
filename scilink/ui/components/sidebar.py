@@ -121,7 +121,7 @@ def render_sidebar() -> None:
                     "Example: `docker run -p 8501:8501 scilink-ui`"
                 )
         # ── Resume past session (analyze mode only) ────────
-        if not _locked and st.session_state.app_mode == "analyze":
+        if not _locked and st.session_state.app_mode in ("analyze", None):
             past = _discover_resumable_sessions("analyze")
             if past:
                 with st.expander("Resume past session", expanded=False):
