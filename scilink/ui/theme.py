@@ -711,6 +711,24 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
     border: 1px solid #E0E0E0;
     background-color: #F5F5F5 !important;
 }
+.stChatMessage:hover {
+    background-color: #F5F5F5 !important;
+    border-color: #E0E0E0 !important;
+}
+.stChatMessage:hover [data-testid="stExpander"],
+.stChatMessage:hover [data-testid="stExpander"] details,
+.stChatMessage:hover [data-testid="stExpander"] summary,
+.stChatMessage:hover [data-testid="stExpanderDetails"] {
+    background-color: #FAFAFA !important;
+    color: #212121 !important;
+}
+.stChatMessage:hover .stCodeBlock,
+.stChatMessage:hover .stCodeBlock *,
+.stChatMessage:hover [data-testid="stCode"],
+.stChatMessage:hover [data-testid="stCode"] * {
+    background-color: #1E1E1E !important;
+    color: #E0E0E0 !important;
+}
 /* Chat avatars — keep default styling in light mode */
 /* Download buttons */
 .stDownloadButton > button {
@@ -1105,26 +1123,49 @@ def _build_positivity_spans(n_hearts: int = 7, n_pluses: int = 7) -> str:
     """Generate hearts and pluses spans."""
     import random
 
-    emojis = ["\U0001f49c"] * n_hearts + ["\u2795"] * n_pluses
-    random.shuffle(emojis)
+    heart_emojis = [
+        "\U0001f49c",   # 💜 purple
+        "\u2764\ufe0f", # ❤️ red
+        "\U0001f499",   # 💙 blue
+    ]
+    plus_colors = ["#00BCD4", "#FFD600", "#E040FB"]  # teal, yellow, magenta
+
+    items: list[tuple[str, object]] = []
+    for _ in range(n_hearts):
+        items.append(("heart", random.choice(heart_emojis)))
+    for _ in range(n_pluses):
+        items.append(("plus", random.choice(plus_colors)))
+    random.shuffle(items)
 
     spans: list[str] = []
-    for emoji in emojis:
+    for kind, value in items:
         left = random.randint(2, 96)
         size = random.randint(20, 40)
         duration = round(random.uniform(16, 30), 1)
         delay = round(random.uniform(0, 3), 1)
-        rotation = random.choice([-360, -180, 180, 360])
-        is_plus = emoji == "\u2795"
-        opacity = round(random.uniform(0.12, 0.22) if is_plus else random.uniform(0.10, 0.20), 2)
-        spans.append(
-            f'<span style="left:{left}%;'
-            f"--emoji-size:{size}px;"
-            f"--duration:{duration}s;"
-            f"--delay:{delay}s;"
-            f"--rotation:{rotation}deg;"
-            f'--peak-opacity:{opacity}">{emoji}</span>'
-        )
+        if kind == "heart":
+            rotation = random.choice([-360, -180, 180, 360])
+            opacity = round(random.uniform(0.10, 0.20), 2)
+            spans.append(
+                f'<span style="left:{left}%;'
+                f"--emoji-size:{size}px;"
+                f"--duration:{duration}s;"
+                f"--delay:{delay}s;"
+                f"--rotation:{rotation}deg;"
+                f'--peak-opacity:{opacity}">{value}</span>'
+            )
+        else:
+            opacity = round(random.uniform(0.12, 0.22), 2)
+            spans.append(
+                f'<span style="left:{left}%;'
+                f"--emoji-size:{size}px;"
+                f"--duration:{duration}s;"
+                f"--delay:{delay}s;"
+                f"--rotation:0deg;"
+                f"--peak-opacity:{opacity};"
+                f"color:{value};"
+                f'font-weight:900">\u271A</span>'
+            )
     return "\n".join(spans)
 
 
