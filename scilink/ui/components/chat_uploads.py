@@ -31,12 +31,10 @@ def render_pre_chat_uploads(start_task_fn) -> None:
 
 def _render_analyze_uploads(start_task_fn) -> None:
     st.markdown(
-        '<div style="border:2px dashed #4A5568;border-radius:10px;'
-        "padding:32px 16px;text-align:center;margin-bottom:16px;"
-        'background:#1E2530">'
-        '<p style="color:#82B1FF;font-size:1.1em;margin:0 0 4px 0">'
+        '<div class="upload-hero-box">'
+        '<p class="upload-hero-title">'
         "Upload your data to get started</p>"
-        '<p style="color:#6B7A8C;font-size:0.85em;margin:0">'
+        '<p class="upload-hero-subtitle">'
         "Images, CSV, NumPy arrays, and more</p>"
         "</div>",
         unsafe_allow_html=True,
@@ -94,12 +92,10 @@ def _render_planning_uploads(start_task_fn) -> None:
     )
 
     st.markdown(
-        '<div style="border:2px dashed #4A5568;border-radius:10px;'
-        "padding:32px 16px;text-align:center;margin-bottom:16px;"
-        'background:#1E2530">'
-        '<p style="color:#82B1FF;font-size:1.1em;margin:0 0 4px 0">'
+        '<div class="upload-hero-box">'
+        '<p class="upload-hero-title">'
         "Upload resources for the planning agent</p>"
-        '<p style="color:#6B7A8C;font-size:0.85em;margin:0">'
+        '<p class="upload-hero-subtitle">'
         "Papers, images, code, and experimental data</p>"
         "</div>",
         unsafe_allow_html=True,

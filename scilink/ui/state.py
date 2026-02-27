@@ -53,6 +53,8 @@ def init_session_state() -> None:
         "uploaded_knowledge_paths": [],
         "uploaded_code_paths": [],
         "uploaded_planning_data_paths": [],
+        # Theme
+        "theme_mode": "dark",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
