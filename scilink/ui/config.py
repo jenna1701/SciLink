@@ -1,5 +1,7 @@
 """Shared constants and defaults for the SciLink Streamlit UI."""
 
+from pathlib import Path
+
 MODEL_OPTIONS = [
     "claude-opus-4-6",
     "gemini-3-pro-preview",
@@ -35,5 +37,5 @@ SUPPORTED_KNOWLEDGE_EXTENSIONS = (".pdf", ".txt", ".md", ".docx", ".png", ".jpg"
 SUPPORTED_CODE_EXTENSIONS = (".py", ".txt", ".md", ".json", ".yaml", ".yml")
 SUPPORTED_PLANNING_DATA_EXTENSIONS = (".csv", ".xlsx", ".tsv", ".txt", ".npy")
 
-AVATAR_USER = "\U0001f9d1\u200d\U0001f52c"    # scientist
-AVATAR_AGENT = "\U0001f916"                    # robot
+AVATAR_USER = str(Path(__file__).resolve().parent / "assets" / "avatar_user.svg")
+AVATAR_AGENT = str(Path(__file__).resolve().parent / "assets" / "avatar_agent.svg")

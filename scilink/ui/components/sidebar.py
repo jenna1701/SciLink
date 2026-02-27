@@ -19,32 +19,59 @@ from ..config import (
 )
 
 
-_LOGO_PATH = Path(__file__).resolve().parent.parent / "assets" / "scilink_logo_v3_dark.svg"
-
+_LOGO_DIR = Path(__file__).resolve().parent.parent / "assets"
+_LOGO_DARK = _LOGO_DIR / "scilink_logo_v3_dark.svg"
+_LOGO_LIGHT = _LOGO_DIR / "scilink_logo_v3_light.svg"
 
 def render_sidebar() -> None:
     with st.sidebar:
-        if st.session_state.agent_initialized and _LOGO_PATH.exists():
-            _b64 = base64.b64encode(_LOGO_PATH.read_bytes()).decode()
-            st.markdown(
-                '<style>'
-                '@keyframes logo-spin{to{transform:rotate(360deg)}}'
-                '.logo-glow-sm{position:relative;padding:2px;border-radius:10px;'
-                'overflow:hidden;width:140px;margin:0 auto}'
-                '.logo-glow-sm::before{content:"";position:absolute;'
-                'top:-40%;left:-40%;width:180%;height:180%;'
-                'background:conic-gradient('
-                'transparent 0deg,transparent 270deg,#3A4556 300deg,'
-                '#82B1FF 330deg,#FFF 345deg,#82B1FF 355deg,transparent 360deg);'
-                'animation:logo-spin 4s linear infinite;z-index:0}'
-                '.logo-glow-sm>img{position:relative;z-index:1;border-radius:8px;'
-                'display:block;width:100%}'
-                '</style>'
-                f'<div class="logo-glow-sm">'
-                f'<img src="data:image/svg+xml;base64,{_b64}"/>'
-                f'</div>',
-                unsafe_allow_html=True,
+        # ── Theme toggle ──────────────────────────────────
+        _is_dark = st.session_state.get("theme_mode", "dark") == "dark"
+        st.markdown('<span class="theme-toggle-anchor"></span>', unsafe_allow_html=True)
+
+        def _toggle_theme():
+            cur = st.session_state.get("theme_mode", "dark")
+            st.session_state.theme_mode = "light" if cur == "dark" else "dark"
+
+        _tcol, _ = st.columns([0.2, 0.8])
+        with _tcol:
+            st.button(
+                "\u2600\ufe0f" if _is_dark else "\U0001f319",
+                key="theme_toggle",
+                on_click=_toggle_theme,
             )
+
+        _logo = _LOGO_DARK if _is_dark else _LOGO_LIGHT
+        if st.session_state.agent_initialized and _logo.exists():
+            _b64 = base64.b64encode(_logo.read_bytes()).decode()
+            if _is_dark:
+                st.markdown(
+                    '<style>'
+                    '@keyframes logo-spin{to{transform:rotate(360deg)}}'
+                    '.logo-glow-sm{position:relative;padding:2px;border-radius:10px;'
+                    'overflow:hidden;width:140px;margin:0 auto}'
+                    '.logo-glow-sm::before{content:"";position:absolute;'
+                    'top:-40%;left:-40%;width:180%;height:180%;'
+                    'background:conic-gradient('
+                    'transparent 0deg,transparent 270deg,#3A4556 300deg,'
+                    '#82B1FF 330deg,#FFF 345deg,#82B1FF 355deg,transparent 360deg);'
+                    'animation:logo-spin 4s linear infinite;z-index:0}'
+                    '.logo-glow-sm>img{position:relative;z-index:1;border-radius:8px;'
+                    'display:block;width:100%}'
+                    '</style>'
+                    f'<div class="logo-glow-sm">'
+                    f'<img src="data:image/svg+xml;base64,{_b64}"/>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<div style="width:140px;margin:0 auto">'
+                    f'<img src="data:image/svg+xml;base64,{_b64}" '
+                    f'style="border-radius:8px;display:block;width:100%"/>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
         else:
             st.title("SciLink")
         _locked = st.session_state.agent_initialized
@@ -136,6 +163,22 @@ def render_sidebar() -> None:
                 _render_analyze_status()
             elif app_mode == "plan":
                 _render_planning_status()
+
+        # ── Vibes ──────────────────────────────────────────
+        st.divider()
+        st.radio(
+            "Vibe",
+            ["Professional", "Positivity boost", "Space nerd"],
+            key="vibe_theme",
+            horizontal=True,
+        )
+        vibe = st.session_state.get("vibe_theme", "Professional")
+        if vibe == "Positivity boost":
+            st.slider("\U0001f49c Hearts", min_value=0, max_value=50, value=7, key="vibe_hearts")
+            st.slider("\u2795 Pluses", min_value=0, max_value=50, value=7, key="vibe_pluses")
+        elif vibe == "Space nerd":
+            st.slider("\U0001f680 Rockets", min_value=0, max_value=50, value=7, key="vibe_rockets")
+            st.slider("\U0001f6f8 UFOs", min_value=0, max_value=10, value=1, key="vibe_ufos")
 
         # ── Quit button (always visible at bottom) ────────────
         st.divider()

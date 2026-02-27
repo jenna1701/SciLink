@@ -45,7 +45,8 @@ class OutputCapture:
         print(cap.getvalue())
 
     Call ``cap.request_stop()`` from another thread to abort the agent
-    on its next ``print()`` call.
+    on its next ``print()`` call.  This also terminates any Python
+    subprocesses spawned by ``ScriptExecutor`` in the agent thread.
     """
 
     def __init__(self) -> None:
@@ -53,12 +54,26 @@ class OutputCapture:
         self._old_stdout = None
         self._old_stderr = None
         self._stop_event = threading.Event()
+        self._agent_thread_id: int | None = None
 
     def request_stop(self) -> None:
-        """Signal the agent thread to abort on the next print() call."""
+        """Signal the agent thread to abort on the next print() call.
+
+        Also kills any active subprocesses spawned by ScriptExecutor
+        in the agent thread so that long-running scripts are terminated
+        immediately.
+        """
         self._stop_event.set()
+        # Kill any subprocess the agent thread is waiting on.
+        if self._agent_thread_id is not None:
+            try:
+                from scilink.executors import kill_subprocesses_for_thread
+                kill_subprocesses_for_thread(self._agent_thread_id)
+            except Exception:
+                pass  # Best-effort; stop event will still propagate via print()
 
     def __enter__(self) -> "OutputCapture":
+        self._agent_thread_id = threading.get_ident()
         self._old_stdout = sys.stdout
         self._old_stderr = sys.stderr
         sys.stdout = TeeStream(self._old_stdout, self._buffer, self._stop_event)

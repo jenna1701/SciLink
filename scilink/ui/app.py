@@ -15,7 +15,9 @@ from scilink.ui.output_capture import AgentStoppedError, OutputCapture
 from scilink.ui.theme import inject_theme
 from scilink.ui.config import AVATAR_USER, AVATAR_AGENT, APP_MODES, SESSION_DIR_PREFIXES
 
-_LOGO_PATH = Path(__file__).resolve().parent / "assets" / "scilink_logo_v3_dark.svg"
+_LOGO_DIR = Path(__file__).resolve().parent / "assets"
+_LOGO_DARK = _LOGO_DIR / "scilink_logo_v3_dark.svg"
+_LOGO_LIGHT = _LOGO_DIR / "scilink_logo_v3_light.svg"
 
 st.set_page_config(page_title="SciLink", layout="wide")
 
@@ -26,6 +28,7 @@ if st.query_params.get("reset"):
 inject_theme()
 init_session_state()
 render_sidebar()
+
 
 # ── helpers ──────────────────────────────────────────────────────
 
@@ -286,6 +289,7 @@ if not st.session_state.agent_initialized:
         if st.session_state.app_mode is None:
             st.session_state.app_mode = "analyze"
         _mode_map = {m["key"]: m for m in APP_MODES}
+        st.markdown('<div class="mode-selector-anchor"></div>', unsafe_allow_html=True)
         _, _mc1, _mc2, _ = st.columns([2, 1, 1, 2])
         with _mc1:
             _atype = "primary" if st.session_state.app_mode == "analyze" else "secondary"
@@ -305,26 +309,35 @@ if not st.session_state.agent_initialized:
             unsafe_allow_html=True,
         )
 
-        if _LOGO_PATH.exists():
-            _b64 = base64.b64encode(_LOGO_PATH.read_bytes()).decode()
-            st.markdown(
-                '<style>'
-                '@keyframes logo-spin{to{transform:rotate(360deg)}}'
-                '.logo-glow{position:relative;padding:2px;border-radius:14px;overflow:hidden}'
-                '.logo-glow::before{content:"";position:absolute;'
-                'top:-40%;left:-40%;width:180%;height:180%;'
-                'background:conic-gradient('
-                'transparent 0deg,transparent 270deg,#3A4556 300deg,'
-                '#82B1FF 330deg,#FFF 345deg,#82B1FF 355deg,transparent 360deg);'
-                'animation:logo-spin 4s linear infinite;z-index:0}'
-                '.logo-glow>img{position:relative;z-index:1;border-radius:12px;'
-                'display:block;width:100%}'
-                '</style>'
-                f'<div class="logo-glow">'
-                f'<img src="data:image/svg+xml;base64,{_b64}"/>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+        _is_dark = st.session_state.get("theme_mode", "dark") == "dark"
+        _logo = _LOGO_DARK if _is_dark else _LOGO_LIGHT
+        if _logo.exists():
+            _b64 = base64.b64encode(_logo.read_bytes()).decode()
+            if _is_dark:
+                st.markdown(
+                    '<style>'
+                    '@keyframes logo-spin{to{transform:rotate(360deg)}}'
+                    '.logo-glow{position:relative;padding:2px;border-radius:14px;overflow:hidden}'
+                    '.logo-glow::before{content:"";position:absolute;'
+                    'top:-40%;left:-40%;width:180%;height:180%;'
+                    'background:conic-gradient('
+                    'transparent 0deg,transparent 270deg,#3A4556 300deg,'
+                    '#82B1FF 330deg,#FFF 345deg,#82B1FF 355deg,transparent 360deg);'
+                    'animation:logo-spin 4s linear infinite;z-index:0}'
+                    '.logo-glow>img{position:relative;z-index:1;border-radius:12px;'
+                    'display:block;width:100%}'
+                    '</style>'
+                    f'<div class="logo-glow">'
+                    f'<img src="data:image/svg+xml;base64,{_b64}"/>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<img src="data:image/svg+xml;base64,{_b64}" '
+                    f'style="border-radius:12px;display:block;width:100%"/>',
+                    unsafe_allow_html=True,
+                )
         else:
             st.title("SciLink")
         st.markdown(
@@ -557,11 +570,19 @@ with chat_tab:
         if task.is_running:
             _spin_col, _stop_col = st.columns([1, 0.07], vertical_alignment="center")
             with _spin_col:
+                _vibe = st.session_state.get("vibe_theme", "Professional")
+                _spinner_icons = {
+                    "Professional": "\u2022",
+                    "Positivity boost": "\U0001f43e",
+                    "Space nerd": "\U0001f4e1",
+                }
+                _icon = _spinner_icons.get(_vibe, "\u2022")
+                _cls = "agent-spinner-heart" if _vibe != "Professional" else "agent-spinner-dot"
                 st.markdown(
                     '<div class="agent-spinner-container">'
-                    '  <div class="agent-spinner-dot"></div>'
-                    '  <div class="agent-spinner-dot"></div>'
-                    '  <div class="agent-spinner-dot"></div>'
+                    f'  <span class="{_cls}">{_icon}</span>'
+                    f'  <span class="{_cls}">{_icon}</span>'
+                    f'  <span class="{_cls}">{_icon}</span>'
                     '  <span class="agent-spinner-label">Agent is working...</span>'
                     '</div>',
                     unsafe_allow_html=True,
@@ -604,6 +625,32 @@ with chat_tab:
                     pass
             if live:
                 show = st.toggle("Show verbose output", key="live_verbose_toggle")
+                # Force-restyle the toggle track in light mode (BaseWeb
+                # uses inline styles that CSS cannot override).
+                if st.session_state.get("theme_mode", "dark") == "light":
+                    st.components.v1.html("""<script>
+(function(){
+    var doc = window.parent.document;
+    var OFF = '#90A4AE', ON = '#6200EE';
+    function fix(){
+        doc.querySelectorAll('label').forEach(function(lbl){
+            var txt = lbl.textContent || '';
+            if (txt.indexOf('verbose') < 0 && txt.indexOf('Verbose') < 0) return;
+            lbl.querySelectorAll('div').forEach(function(d){
+                var w = d.getBoundingClientRect().width;
+                if (w > 28 && w < 80) {
+                    var inp = lbl.querySelector('input');
+                    var on = inp && inp.checked;
+                    d.style.setProperty('background-color', on ? ON : OFF, 'important');
+                }
+            });
+        });
+    }
+    fix();
+    new MutationObserver(fix).observe(doc.body,
+        {childList:true, subtree:true, attributes:true, attributeFilter:['aria-checked','checked']});
+})();
+</script>""", height=0)
                 if show:
                     import html as _html
 
