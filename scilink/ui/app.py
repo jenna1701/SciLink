@@ -241,11 +241,12 @@ def _start_task(prompt: str) -> None:
 # Welcome screen (before session is started)
 # ══════════════════════════════════════════════════════════════════
 if not st.session_state.agent_initialized:
-    # Check if session init was requested from the sidebar
+    # Check if session init or resume was requested from the sidebar
     _pending = st.session_state.pop("_pending_init", None)
+    _pending_resume = st.session_state.pop("_pending_resume", None)
 
     # ── Initializing: dim everything, show centered spinner ──
-    if _pending is not None:
+    if _pending is not None or _pending_resume is not None:
         st.markdown(
             """<style>
             section[data-testid="stSidebar"] { opacity: 0.3; pointer-events: none; }
@@ -271,15 +272,19 @@ if not st.session_state.agent_initialized:
                 'background:#82B1FF;animation:init-pulse 1.4s ease-in-out infinite 0.4s"></div>'
                 '</div>'
                 '<p style="color:#82B1FF;font-size:1.2em;font-weight:500;margin:0">'
-                'Initializing agent...</p>'
+                f'{"Restoring session..." if _pending_resume else "Initializing agent..."}</p>'
                 '<p style="color:#6B7A8C;font-size:0.9em;margin-top:8px">'
-                'Setting up models and tools</p>'
+                f'{"Loading checkpoint and chat history" if _pending_resume else "Setting up models and tools"}</p>'
                 '</div>',
                 unsafe_allow_html=True,
             )
-        start_session(**_pending)
-        # start_session calls st.rerun() on success, so we only
-        # reach here if initialization failed.
+        if _pending_resume is not None:
+            from scilink.ui.components.sidebar import resume_session
+            resume_session(**_pending_resume)
+        else:
+            start_session(**_pending)
+        # start_session / resume_session call st.rerun() on success,
+        # so we only reach here if initialization failed.
         st.stop()
 
     # ── Normal welcome screen ────────────────────────────────

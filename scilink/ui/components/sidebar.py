@@ -120,6 +120,57 @@ def render_sidebar() -> None:
                     "or a VM to sandbox generated code execution. "
                     "Example: `docker run -p 8501:8501 scilink-ui`"
                 )
+        # ── Resume past session (analyze mode only) ────────
+        if not _locked and st.session_state.app_mode == "analyze":
+            past = _discover_resumable_sessions("analyze")
+            if past:
+                with st.expander("Resume past session", expanded=False):
+                    labels = []
+                    for sess in past:
+                        lbl = sess["label"]
+                        details = []
+                        s = sess["summary"]
+                        if "analysis_count" in s:
+                            details.append(f"{s['analysis_count']} analyses")
+                        if s.get("data_file"):
+                            details.append(s["data_file"])
+                        if s.get("message_count"):
+                            details.append(f"{s['message_count']} messages")
+                        if not sess["has_checkpoint"]:
+                            details.append("no checkpoint")
+                        if details:
+                            lbl += f"  ({', '.join(details)})"
+                        labels.append(lbl)
+
+                    selected_idx = st.selectbox(
+                        "Select session",
+                        range(len(labels)),
+                        format_func=lambda i: labels[i],
+                        key="resume_session_selector",
+                    )
+                    selected = past[selected_idx]
+
+                    if not selected["has_checkpoint"]:
+                        st.warning(
+                            "No checkpoint found. Agent state will not be "
+                            "restored, but chat history will be loaded."
+                        )
+
+                    if st.button(
+                        "Resume Session",
+                        disabled=not consent,
+                        use_container_width=True,
+                        key="resume_session_btn",
+                    ):
+                        st.session_state._pending_resume = {
+                            "session_dir": str(selected["path"]),
+                            "model": model,
+                            "api_key": api_key,
+                            "base_url": base_url,
+                            "mode": mode,
+                            "fh_api_key": fh_api_key,
+                        }
+
         col1, col2 = st.columns(2)
 
         with col1:
@@ -419,6 +470,147 @@ def _init_planning_agent(session_dir, api_key, model, base_url, mode, fh_api_key
         data_dir=str(data_dir),
         **kwargs,
     )
+
+
+def _discover_resumable_sessions(app_mode: str) -> list:
+    """Find past session directories that can be resumed."""
+    import json as _json
+
+    parent = Path.cwd()
+    prefix = SESSION_DIR_PREFIXES.get(app_mode, "analysis_session")
+    sessions = sorted(parent.glob(f"{prefix}_*"), key=lambda p: p.name, reverse=True)
+
+    result = []
+    for s in sessions:
+        if not s.is_dir():
+            continue
+        has_checkpoint = (s / "checkpoint.json").exists()
+        has_chat = (s / "chat_history.json").exists()
+        if not has_checkpoint and not has_chat:
+            continue
+
+        # Build human-readable label from timestamp in dir name
+        parts = s.name.removeprefix(f"{prefix}_")
+        try:
+            label = f"{parts[:4]}-{parts[4:6]}-{parts[6:8]} {parts[9:11]}:{parts[11:13]}:{parts[13:15]}"
+        except (IndexError, ValueError):
+            label = s.name
+
+        summary: dict = {}
+        if has_checkpoint:
+            try:
+                ckpt = _json.loads((s / "checkpoint.json").read_text())
+                summary["analysis_count"] = len(ckpt.get("analysis_results", []))
+                dp = ckpt.get("current_data_path")
+                if dp:
+                    summary["data_file"] = Path(dp).name
+            except Exception:
+                pass
+        if has_chat and "analysis_count" not in summary:
+            try:
+                hist = _json.loads((s / "chat_history.json").read_text())
+                summary["message_count"] = sum(1 for m in hist if m.get("role") == "user")
+            except Exception:
+                pass
+
+        result.append({
+            "path": s,
+            "label": label,
+            "has_checkpoint": has_checkpoint,
+            "has_chat_history": has_chat,
+            "summary": summary,
+        })
+    return result
+
+
+def _convert_chat_history_for_display(history: list) -> list:
+    """Convert orchestrator chat_history.json to Streamlit chat_messages format.
+
+    Keeps only user/assistant messages with text content; drops tool calls,
+    tool results, and system messages.
+    """
+    messages = []
+    for msg in history:
+        role = msg.get("role")
+        content = msg.get("content")
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content})
+    return messages
+
+
+def resume_session(
+    session_dir: str,
+    model: str,
+    api_key: str,
+    base_url: str,
+    mode: str,
+    fh_api_key: str = "",
+) -> None:
+    """Restore an agent from a past session directory and re-populate the UI."""
+    import json as _json
+    import scilink.executors as executors
+    from scilink.agents.exp_agents.analysis_orchestrator import (
+        AnalysisMode,
+        AnalysisOrchestratorAgent,
+    )
+
+    resolved_key = (
+        api_key
+        or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
+    )
+    if not resolved_key and not base_url:
+        st.sidebar.error(
+            "Provide an API key or set an environment variable "
+            "(GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY)."
+        )
+        return
+
+    session_path = Path(session_dir)
+    executors._GLOBAL_SANDBOX_APPROVED = True
+
+    mode_map = {
+        "co-pilot": AnalysisMode.CO_PILOT,
+        "supervised": AnalysisMode.SUPERVISED,
+        "autonomous": AnalysisMode.AUTONOMOUS,
+    }
+    try:
+        agent = AnalysisOrchestratorAgent.restore_from_checkpoint(
+            base_dir=str(session_path),
+            api_key=resolved_key,
+            model_name=model,
+            base_url=base_url or None,
+            analysis_mode=mode_map[mode],
+            futurehouse_api_key=fh_api_key or None,
+        )
+    except Exception as exc:
+        st.error(f"Failed to restore session: {exc}")
+        return
+
+    # Load chat history for Streamlit display
+    display_messages: list = []
+    chat_path = session_path / "chat_history.json"
+    if chat_path.exists():
+        try:
+            raw = _json.loads(chat_path.read_text())
+            display_messages = _convert_chat_history_for_display(raw)
+        except Exception:
+            pass
+
+    # Pre-populate known images so they don't re-appear as "new"
+    known: set = set()
+    for ext in (".png", ".jpg", ".jpeg"):
+        for p in session_path.rglob(f"*{ext}"):
+            known.add(str(p))
+
+    st.session_state.agent = agent
+    st.session_state.agent_initialized = True
+    st.session_state.session_dir = str(session_path)
+    st.session_state.agent_config = {"model": model, "mode": mode}
+    st.session_state.chat_messages = display_messages
+    st.session_state.known_images = known
+    st.rerun()
 
 
 def _reset_session() -> None:
