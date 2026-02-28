@@ -208,7 +208,7 @@ def create_unified_curve_fitting_pipeline(
 
     # Step 8a: Single spectrum report
     pipeline.append(
-        GenerateCurveFittingReportController(logger, output_dir)
+        GenerateCurveFittingReportController(logger, output_dir, r2_threshold=r2_threshold)
     )
 
     # Step 8b: Series report (only generates for n>=2)

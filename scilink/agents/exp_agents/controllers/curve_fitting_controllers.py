@@ -292,9 +292,12 @@ class LiteratureSearchController:
 class GenerateCurveFittingReportController:
     """Generates a human-readable HTML report for curve fitting analysis."""
     
-    def __init__(self, logger: logging.Logger, output_dir: str):
+    DEFAULT_R2_THRESHOLD = 0.95
+
+    def __init__(self, logger: logging.Logger, output_dir: str, r2_threshold: float = None):
         self.logger = logger
         self.output_dir = output_dir
+        self.r2_threshold = r2_threshold if r2_threshold is not None else self.DEFAULT_R2_THRESHOLD
 
     def _image_to_base64(self, image_bytes: bytes) -> str:
         return base64.b64encode(image_bytes).decode('utf-8')
