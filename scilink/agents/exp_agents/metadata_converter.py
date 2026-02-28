@@ -164,6 +164,257 @@ Ensure the output JSON accurately reflects the information present in the text d
 """
 
 
+# =====================================================================
+# Alias mappings for deterministic normalization (Tier 1)
+# =====================================================================
+# Each canonical field maps to a list of common aliases (case-insensitive)
+_TECHNIQUE_ALIASES = [
+    "technique", "method", "experimental technique", "measurement_type",
+    "experimental_technique", "measurement_method",
+]
+_MATERIAL_ALIASES = [
+    "material", "sample_material", "composition", "formula",
+    "sample_name", "compound",
+]
+_EXPERIMENT_TYPE_ALIASES = [
+    "type", "data_type", "exp_type", "experiment_type",
+]
+_ENERGY_START_ALIASES = [
+    "energy_start", "spectral_start", "range_start", "start_wavelength",
+    "start_energy", "x_start",
+]
+_ENERGY_END_ALIASES = [
+    "energy_end", "spectral_end", "range_end", "end_wavelength",
+    "end_energy", "x_end",
+]
+_ENERGY_UNITS_ALIASES = [
+    "energy_units", "spectral_units", "x_units", "wavelength_units",
+]
+_SPATIAL_FOV_ALIASES = ["field_of_view", "fov"]
+_PIXEL_SIZE_ALIASES = [
+    "pixel_size", "pixel_size_nm", "nm_per_pixel",
+    "scale_nm_per_pixel", "pixelSize", "pixel_scale", "resolution_nm",
+]
+_PIXEL_SIZE_UNIT_ALIASES = [
+    "pixel_size_unit", "pixel_size_units", "spatial_units",
+]
+
+
+def _ci_pop(d: dict, aliases: list[str]):
+    """Case-insensitive pop: find the first matching alias in *d* and remove it."""
+    lower_map = {k.lower(): k for k in d}
+    for alias in aliases:
+        real_key = lower_map.get(alias.lower())
+        if real_key is not None and d[real_key] is not None:
+            return d.pop(real_key)
+    return None
+
+
+def check_schema_conformance(metadata: dict) -> tuple[bool, list[str]]:
+    """Check whether *metadata* conforms to the canonical schema.
+
+    Returns ``(is_conformant, issues)`` where *issues* is a list of
+    human-readable strings describing what is missing or wrong.
+    Fast-path: returns ``(True, [])`` for already-conformant dicts.
+    """
+    issues: list[str] = []
+
+    # Required top-level keys
+    for key in ("experiment_type", "experiment", "sample"):
+        if key not in metadata:
+            issues.append(f"Missing required top-level key: '{key}'")
+
+    # Nested required keys
+    exp = metadata.get("experiment")
+    if isinstance(exp, dict):
+        if "technique" not in exp:
+            issues.append("Missing 'experiment.technique'")
+    elif exp is not None:
+        issues.append("'experiment' should be a dict")
+
+    sample = metadata.get("sample")
+    if isinstance(sample, dict):
+        if "material" not in sample:
+            issues.append("Missing 'sample.material'")
+    elif sample is not None:
+        issues.append("'sample' should be a dict")
+
+    # Type checks for optional nested objects
+    for key in ("energy_range", "spatial_info"):
+        val = metadata.get(key)
+        if val is not None and not isinstance(val, dict):
+            issues.append(f"'{key}' should be a dict or null")
+
+    return (len(issues) == 0, issues)
+
+
+def normalize_metadata_dict(metadata: dict) -> tuple[dict, bool]:
+    """Tier 1 deterministic normalizer — map common aliases to canonical form.
+
+    Returns ``(normalized_dict, was_modified)``.  If no changes were needed
+    the *same* dict object is returned with ``was_modified=False``.
+    All unrecognized keys are preserved at the top level.
+    """
+    # Fast-path: already conformant → no-op
+    is_ok, _ = check_schema_conformance(metadata)
+    if is_ok:
+        return metadata, False
+
+    # Work on a shallow copy so the original is not mutated
+    d = dict(metadata)
+    modified = False
+
+    # --- experiment_type ---
+    if "experiment_type" not in d:
+        val = _ci_pop(d, _EXPERIMENT_TYPE_ALIASES)
+        if val is not None:
+            d["experiment_type"] = val
+            modified = True
+
+    # --- experiment.technique ---
+    exp = d.get("experiment")
+    if not isinstance(exp, dict):
+        exp = {}
+    if "technique" not in exp:
+        val = _ci_pop(d, _TECHNIQUE_ALIASES)
+        if val is not None:
+            exp = dict(exp)  # copy if we're modifying
+            exp["technique"] = val
+            d["experiment"] = exp
+            modified = True
+    if exp and "experiment" not in d:
+        d["experiment"] = exp
+        modified = True
+
+    # --- sample.material ---
+    sample = d.get("sample")
+    if not isinstance(sample, dict):
+        sample = {}
+    if "material" not in sample:
+        val = _ci_pop(d, _MATERIAL_ALIASES)
+        if val is not None:
+            sample = dict(sample)
+            sample["material"] = val
+            d["sample"] = sample
+            modified = True
+    if sample and "sample" not in d:
+        d["sample"] = sample
+        modified = True
+
+    # --- energy_range ---
+    er = d.get("energy_range")
+    if not isinstance(er, dict):
+        er = {}
+    er_modified = False
+    if "start" not in er:
+        val = _ci_pop(d, _ENERGY_START_ALIASES)
+        if val is not None:
+            er["start"] = val
+            er_modified = True
+    if "end" not in er:
+        val = _ci_pop(d, _ENERGY_END_ALIASES)
+        if val is not None:
+            er["end"] = val
+            er_modified = True
+    if "units" not in er:
+        val = _ci_pop(d, _ENERGY_UNITS_ALIASES)
+        if val is not None:
+            er["units"] = val
+            er_modified = True
+    if er_modified:
+        d["energy_range"] = er
+        modified = True
+
+    # --- spatial_info ---
+    si = d.get("spatial_info")
+    if not isinstance(si, dict):
+        si = {}
+    si_modified = False
+
+    # field_of_view → field_of_view_x (scalar fov treated as x)
+    if "field_of_view_x" not in si:
+        val = _ci_pop(d, _SPATIAL_FOV_ALIASES)
+        if val is not None:
+            if isinstance(val, dict):
+                # e.g. {"x": 100, "y": 100, "units": "nm"}
+                si.update({
+                    "field_of_view_x": val.get("x"),
+                    "field_of_view_y": val.get("y"),
+                    "field_of_view_units": val.get("units"),
+                })
+            else:
+                si["field_of_view_x"] = val
+            si_modified = True
+
+    # pixel_size → nm_per_pixel at top level (kept for spatial_info enrichment)
+    ps_val = _ci_pop(d, _PIXEL_SIZE_ALIASES)
+    if ps_val is not None:
+        si["nm_per_pixel"] = ps_val
+        ps_unit = _ci_pop(d, _PIXEL_SIZE_UNIT_ALIASES)
+        if ps_unit is not None:
+            si["pixel_size_unit"] = ps_unit
+        si_modified = True
+
+    if si_modified:
+        d["spatial_info"] = si
+        modified = True
+
+    return (d, True) if modified else (metadata, False)
+
+
+def _run_metadata_llm(text: str, model) -> dict | None:
+    """Shared LLM call + JSON parsing for metadata generation.
+
+    Sends *text* through the ``METADATA_GENERATION_PROMPT`` using *model*
+    and returns the parsed dict, or ``None`` on failure.
+    """
+    prompt_parts = [
+        METADATA_GENERATION_PROMPT,
+        "\n--- Plain Text Description ---",
+        text,
+        "\n--- Extracted JSON Metadata ---",
+    ]
+
+    try:
+        response = model.generate_content(contents=prompt_parts)
+
+        if not hasattr(response, "text"):
+            if hasattr(response, "candidates"):
+                raw_text = response.candidates[0].content.parts[0].text
+            else:
+                raw_text = str(response)
+        else:
+            raw_text = response.text
+
+        # Clean markdown fences
+        if "```json" in raw_text:
+            raw_text = raw_text.split("```json")[1].split("```")[0]
+        elif "```" in raw_text:
+            raw_text = raw_text.split("```")[1].split("```")[0]
+
+        return json.loads(raw_text.strip())
+
+    except Exception as e:
+        logger.error(f"Error in LLM metadata generation: {e}", exc_info=True)
+        return None
+
+
+def normalize_metadata_dict_with_llm(
+    metadata: dict,
+    model,
+    ext_logger=None,
+) -> dict | None:
+    """Tier 2 LLM normalizer — serialize dict as JSON text and run through LLM.
+
+    Reuses the existing ``METADATA_GENERATION_PROMPT``.  Returns the
+    normalized dict or ``None`` on failure.
+    """
+    log = ext_logger or logger
+    text = json.dumps(metadata, indent=2, default=str)
+    log.info("Running LLM-based metadata normalization")
+    return _run_metadata_llm(text, model)
+
+
 def generate_metadata_json_from_text(
     input_text_filepath: str,           
     api_key: str | None = None,
@@ -222,40 +473,18 @@ def generate_metadata_json_from_text(
         logger.info(f"☁️ Using LiteLLM agent: {model_name}")
         model = LiteLLMGenerativeModel(model=model_name, api_key=api_key)
 
-    # 4. Prepare Prompt
-    prompt_parts = [
-        METADATA_GENERATION_PROMPT,
-        "\n--- Plain Text Description ---",
-        text_description, 
-        "\n--- Extracted JSON Metadata ---"
-    ]
+    # 4. Generate via shared helper
+    metadata_dict = _run_metadata_llm(text_description, model)
 
-    # 5. Generate
+    if metadata_dict is None:
+        return None
+
+    # 5. Save
     try:
-        response = model.generate_content(contents=prompt_parts)
-        
-        # 6. Parse
-        if not hasattr(response, 'text'):
-            if hasattr(response, 'candidates'): raw_text = response.candidates[0].content.parts[0].text
-            else: raw_text = str(response)
-        else:
-             raw_text = response.text
-
-        # Clean markdown
-        if "```json" in raw_text:
-            raw_text = raw_text.split("```json")[1].split("```")[0]
-        elif "```" in raw_text:
-            raw_text = raw_text.split("```")[1].split("```")[0]
-            
-        metadata_dict = json.loads(raw_text.strip())
-        
-        # Save
         with open(output_json_filepath, 'w', encoding='utf-8') as f:
             json.dump(metadata_dict, f, indent=4)
         logger.info(f"Saved metadata to: {output_json_filepath}")
-        
-        return metadata_dict
-
     except Exception as e:
-        logger.error(f"Error generating metadata: {e}", exc_info=True)
-        return None
+        logger.error(f"Error saving metadata file: {e}", exc_info=True)
+
+    return metadata_dict

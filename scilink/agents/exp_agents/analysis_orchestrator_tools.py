@@ -17,7 +17,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Callable
 
-from .metadata_converter import generate_metadata_json_from_text, METADATA_SCHEMA_DICT
+from .metadata_converter import (
+    generate_metadata_json_from_text,
+    METADATA_SCHEMA_DICT,
+    check_schema_conformance,
+    normalize_metadata_dict,
+    normalize_metadata_dict_with_llm,
+)
 from ..lit_agents import OwlLiteratureAgent, NoveltyScorer
 from ...skills.loader import list_skills
 
@@ -530,13 +536,37 @@ class AnalysisOrchestratorTools:
                 with open(path, 'r') as f:
                     metadata = json.load(f)
                 
-                # Always store metadata first
+                # Normalize metadata to canonical schema if needed
+                is_conformant, issues = check_schema_conformance(metadata)
+                if not is_conformant:
+                    normalized, was_modified = normalize_metadata_dict(metadata)  # Tier 1
+                    re_ok, _ = check_schema_conformance(normalized)
+                    if not re_ok:
+                        # Tier 2: LLM normalization for remaining gaps
+                        try:
+                            llm_result = normalize_metadata_dict_with_llm(
+                                metadata, self.orch.model, self.logger
+                            )
+                            if llm_result:
+                                # Preserve non-schema keys from the original
+                                for k, v in metadata.items():
+                                    if k not in llm_result:
+                                        llm_result[k] = v
+                                metadata = llm_result
+                        except Exception as e:
+                            self.logger.warning(f"LLM metadata normalization failed: {e}")
+                            if was_modified:
+                                metadata = normalized
+                    else:
+                        metadata = normalized
+
+                # Always store metadata (possibly normalized)
                 self.orch.current_metadata = metadata
-                
+
                 # Validate basic structure
                 required_fields = ["experiment_type", "experiment", "sample"]
                 missing = [f for f in required_fields if f not in metadata]
-                
+
                 if missing:
                     return json.dumps({
                         "status": "warning",
