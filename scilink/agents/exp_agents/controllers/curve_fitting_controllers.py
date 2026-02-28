@@ -2493,11 +2493,11 @@ class AdaptiveRefitController:
         series_metadata = state.get("series_metadata", {})
         num_spectra = state.get("num_spectra", 0)
 
+        # Serialize full system_info so the LLM gets all metadata
+        # regardless of key structure (flat or nested)
         exp_context_parts = []
-        if system_info.get("experiment", {}).get("technique"):
-            exp_context_parts.append(f"Technique: {system_info['experiment']['technique']}")
-        if system_info.get("sample", {}).get("material"):
-            exp_context_parts.append(f"Sample: {system_info['sample']['material']}")
+        if system_info:
+            exp_context_parts.append(json.dumps(system_info, indent=2, default=str))
         if series_metadata.get("variable") and series_metadata.get("values"):
             values = series_metadata["values"]
             units = series_metadata.get("units", "")
