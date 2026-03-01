@@ -315,6 +315,14 @@ class LLMAgentMixin:
         Returns the (possibly modified) *system_info* and the resolved
         *series_metadata*.  If *series_metadata* was already provided it
         takes precedence and *system_info* is returned unchanged.
+
+        The expected series_metadata structure is::
+
+            {
+                "variable": "temperature",  # independent variable name
+                "values": [300, 350, 400],  # one value per data point
+                "unit": "K"                 # unit for values
+            }
         """
         if not series_metadata and isinstance(system_info, dict) and "series" in system_info:
             system_info = dict(system_info)          # shallow copy to avoid mutating caller's dict

@@ -17,7 +17,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Callable
 
-from .metadata_converter import generate_metadata_json_from_text, METADATA_SCHEMA_DICT
+from .metadata_converter import (
+    generate_metadata_json_from_text,
+    METADATA_SCHEMA_DICT,
+    check_schema_conformance,
+    normalize_metadata_dict,
+    normalize_metadata_dict_with_llm,
+)
 from ..lit_agents import OwlLiteratureAgent, NoveltyScorer
 from ...skills.loader import list_skills
 
@@ -530,13 +536,37 @@ class AnalysisOrchestratorTools:
                 with open(path, 'r') as f:
                     metadata = json.load(f)
                 
-                # Always store metadata first
+                # Normalize metadata to canonical schema if needed
+                is_conformant, issues = check_schema_conformance(metadata)
+                if not is_conformant:
+                    normalized, was_modified = normalize_metadata_dict(metadata)  # Tier 1
+                    re_ok, _ = check_schema_conformance(normalized)
+                    if not re_ok:
+                        # Tier 2: LLM normalization for remaining gaps
+                        try:
+                            llm_result = normalize_metadata_dict_with_llm(
+                                metadata, self.orch.model, self.logger
+                            )
+                            if llm_result:
+                                # Preserve non-schema keys from the original
+                                for k, v in metadata.items():
+                                    if k not in llm_result:
+                                        llm_result[k] = v
+                                metadata = llm_result
+                        except Exception as e:
+                            self.logger.warning(f"LLM metadata normalization failed: {e}")
+                            if was_modified:
+                                metadata = normalized
+                    else:
+                        metadata = normalized
+
+                # Always store metadata (possibly normalized)
                 self.orch.current_metadata = metadata
-                
+
                 # Validate basic structure
                 required_fields = ["experiment_type", "experiment", "sample"]
                 missing = [f for f in required_fields if f not in metadata]
-                
+
                 if missing:
                     return json.dumps({
                         "status": "warning",
@@ -761,7 +791,8 @@ class AnalysisOrchestratorTools:
             hints: str = None,
             auxiliary_data: str = None,
             auxiliary_label: str = None,
-            skill: str = None
+            skill: str = None,
+            series_metadata: str = None
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
@@ -778,6 +809,18 @@ class AnalysisOrchestratorTools:
             (e.g. TGA curve alongside DSC, or a microscopy image) as context for
             the analysis without fitting/unmixing it. Supported by CurveFitting
             and Hyperspectral agents.
+
+            series_metadata is a JSON string describing the independent variable
+            across spectra in a series. When ``values`` is a dict mapping
+            filenames to values, files are automatically sorted by value for
+            correct physical ordering and the dict is converted to a sorted
+            list before passing to the agent. Expected format::
+
+                {"variable": "temperature", "values": {"spec_5K.csv": 5, ...}, "unit": "K"}
+
+            If multiple data files are detected and no series_metadata is
+            provided, returns a ``needs_series_metadata`` status prompting the
+            caller to supply it.
 
             Output directory format: results/analysis_{dataset_name}_{timestamp}_{counter}/
             """
@@ -912,6 +955,75 @@ class AnalysisOrchestratorTools:
                         if len(actual_data_input) > 3:
                             print(f"      ... and {len(actual_data_input) - 3} more")
                 
+                # === Handle series metadata ===
+                is_series = isinstance(actual_data_input, list) and len(actual_data_input) > 1
+                has_series_meta = (
+                    isinstance(self.orch.current_metadata, dict)
+                    and "series" in self.orch.current_metadata
+                )
+
+                if series_metadata is not None:
+                    # Parse and inject series metadata from the tool call
+                    try:
+                        parsed_series = json.loads(series_metadata) if isinstance(series_metadata, str) else series_metadata
+                        self.orch.current_metadata["series"] = parsed_series
+                        has_series_meta = True
+                    except (json.JSONDecodeError, TypeError) as e:
+                        self.logger.warning(f"Failed to parse series_metadata: {e}")
+
+                if is_series and not has_series_meta:
+                    num_files = len(actual_data_input)
+                    return json.dumps({
+                        "status": "needs_series_metadata",
+                        "message": (
+                            f"Detected {num_files} spectra (series mode) but no series metadata found. "
+                            "Series metadata describes the experimental variable that changes across spectra "
+                            "(e.g. temperature, concentration, voltage). "
+                            "Ask the user what variable changes across the spectra, the range or "
+                            "values, and the units. The user can describe this naturally — e.g. "
+                            "'temperature from 300 to 500 K in 50 K steps' or 'concentration: "
+                            "0.1, 0.2, 0.5 mM'. Use the filenames and the user's response to "
+                            "build the values dict mapping each filename to its value, then "
+                            "re-call run_analysis with the series_metadata parameter. "
+                            "Files will be sorted by value automatically for correct trend analysis."
+                        ),
+                        "num_spectra": num_files,
+                        "expected_format": {
+                            "variable": "<variable name, e.g. temperature>",
+                            "values": {"<filename>": "<value>", "...": "..."},
+                            "unit": "<unit string, e.g. K, mM, V>"
+                        },
+                        "files": [Path(f).name for f in actual_data_input],
+                    })
+
+                # Sort files by series values for correct physical ordering
+                if is_series and has_series_meta:
+                    series_info = self.orch.current_metadata.get("series", {})
+                    values = series_info.get("values")
+                    if isinstance(values, dict):
+                        # Map filenames to full paths
+                        name_to_path = {Path(f).name: f for f in actual_data_input}
+                        # Build sorted (path, value) pairs by value
+                        paired = []
+                        for fname, val in values.items():
+                            full_path = name_to_path.get(fname)
+                            if full_path is not None:
+                                try:
+                                    paired.append((full_path, float(val)))
+                                except (TypeError, ValueError):
+                                    paired.append((full_path, val))
+                        # Sort by value (numeric sort when possible)
+                        try:
+                            paired.sort(key=lambda x: x[1])
+                        except TypeError:
+                            pass  # mixed types, keep original order
+                        if paired:
+                            actual_data_input = [p[0] for p in paired]
+                            sorted_values = [p[1] for p in paired]
+                            # Replace dict with sorted list for agent consumption
+                            series_info["values"] = sorted_values
+                            self.orch.current_metadata["series"] = series_info
+
                 # === Run analysis ===
                 analyze_kwargs = {
                     "data": actual_data_input,
@@ -1039,6 +1151,17 @@ class AnalysisOrchestratorTools:
                         "Supported by CurveFitting and Hyperspectral agents. "
                         f"Built-in curve_fitting skills: {list_skills('curve_fitting')}. "
                         f"Built-in hyperspectral skills: {list_skills('hyperspectral')}."
+                    )
+                },
+                "series_metadata": {
+                    "type": "string",
+                    "description": (
+                        "JSON string describing the experimental variable that changes across "
+                        "spectra in a series. Required for series analysis (multiple spectra). "
+                        "Values is a dict mapping each filename to its value — files are "
+                        "automatically sorted by value for correct trend analysis. "
+                        "Format: {\"variable\": \"<variable>\", \"values\": {\"<filename>\": <value>, ...}, \"unit\": \"<units>\"}. "
+                        "Example: {\"variable\": \"temperature\", \"values\": {\"spec_5K.csv\": 5, \"spec_10K.csv\": 10, \"spec_20K.csv\": 20}, \"unit\": \"K\"}"
                     )
                 }
             },

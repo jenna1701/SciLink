@@ -131,7 +131,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         result = agent.analyze(
             spectra_paths,
             series_metadata={
-                "series_type": "temperature",
+                "variable": "temperature",
                 "values": [300, 350, 400, 450, 500],
                 "unit": "K"
             }
@@ -298,10 +298,23 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 ``series_metadata`` takes precedence. Expected structure::
 
                     {
-                        "series_type": "temperature",   # or "time", "concentration", …
-                        "values": [300, 350, 400],      # one value per spectrum
+                        "variable": "temperature",   # or "time", "concentration", …
+                        "values": [300, 350, 400],      # one value per spectrum, in file order
                         "unit": "K"                      # unit for values
                     }
+
+                When calling through the orchestrator, ``values`` can be a dict
+                mapping filenames to values instead of a list. The orchestrator
+                sorts files by value for correct physical ordering and converts
+                the dict to a list before passing to the agent::
+
+                    {
+                        "variable": "temperature",
+                        "values": {"spec_5K.csv": 5, "spec_20K.csv": 20, "spec_10K.csv": 10},
+                        "unit": "K"
+                    }
+                    # → files sorted to [spec_5K, spec_10K, spec_20K]
+                    # → values converted to [5, 10, 20]
             auxiliary_data: Optional path to an auxiliary dataset (1D curve file
                 or 2D image) from the same sample/experiment. Not fitted or
                 analyzed in detail, but provided to the LLM as context for
@@ -334,7 +347,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             result = agent.analyze(
                 ["temp_300K.csv", "temp_350K.csv", "temp_400K.csv"],
                 series_metadata={
-                    "series_type": "temperature",
+                    "variable": "temperature",
                     "values": [300, 350, 400],
                     "unit": "K"
                 }
@@ -347,7 +360,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "sample": "Boron-doped silicon",
                     "instrument": "Raman spectrometer, 532 nm",
                     "series": {
-                        "series_type": "concentration",
+                        "variable": "concentration",
                         "values": [0.1, 0.2, 0.3],
                         "unit": "mol/L"
                     }
@@ -883,7 +896,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             spectrum_paths: List of file paths to spectra
             spectrum_stack: 3D numpy array (n_spectra x 2 x n_points)
             system_info: System/sample metadata
-            series_metadata: Metadata about the series
+            series_metadata: Dict with ``"variable"`` (str), ``"values"``
+                (list), and ``"unit"`` (str) describing the independent
+                variable across the series
             objective: High-level scientific objective
             hints: Analysis guidance
 

@@ -2922,7 +2922,7 @@ with open('series_fit_results.json', 'r') as f:
 
 results = data['results']
 series_metadata = data.get('series_metadata', {{}})
-# series_metadata has: series_type, values (one per spectrum), unit
+# series_metadata has: variable, values (one per spectrum), unit
 
 # Extract series variable and parameters...
 # Create figure with subplots...
@@ -3684,7 +3684,7 @@ class UnifiedCurveReportController:
         <div class="metadata-box">
             <p><strong>Date:</strong> {timestamp}</p>
             <p><strong>Spectra Processed:</strong> {successful}/{num_spectra}</p>
-            <p><strong>Series Type:</strong> {series_metadata.get('series_type', 'N/A')}</p>
+            <p><strong>Series Variable:</strong> {series_metadata.get('variable', 'N/A')}</p>
             <p><strong>Fitting Model:</strong> {locked_config.get('physical_model', 'N/A')}{f' ({refitted_count} spectra re-fitted with alternative models)' if refitted_count > 0 else ''}</p>
             <p><strong>Quality Status:</strong> {quality_indicator}</p>
         </div>

@@ -214,9 +214,19 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 - str: Single image path
                 - List[str]: Multiple image paths
                 - np.ndarray: 2D (single) or 3D (stack) array
-            system_info: System/sample information
-            series_metadata: Optional metadata about the series
-        
+            system_info: System/sample information. May include a ``"series"``
+                key with series metadata; it will be extracted automatically.
+            series_metadata: Optional metadata describing the experimental
+                variable that changes across images in a series. Can also
+                be provided inside ``system_info["series"]``. Expected
+                structure::
+
+                    {
+                        "variable": "temperature",  # independent variable name
+                        "values": [300, 350, 400],   # one value per image, in file order
+                        "unit": "K"                  # unit for values
+                    }
+
         Returns:
             Dict with status, detailed_analysis, scientific_claims,
             summary, output_directory, and SAM-specific fields
@@ -509,8 +519,16 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     ) -> Dict[str, Any]:
         """
         Analyze a series of images.
-        
+
         BACKWARD COMPATIBLE: Delegates to unified analyze() method.
+
+        Args:
+            image_paths: List of file paths to images
+            image_stack: 3D numpy array (n_images x height x width)
+            system_info: System/sample metadata
+            series_metadata: Dict with ``"variable"`` (str), ``"values"``
+                (list), and ``"unit"`` (str) describing the independent
+                variable across the series
         """
         if image_paths is not None:
             return self.analyze(

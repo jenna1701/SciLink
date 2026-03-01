@@ -442,7 +442,7 @@ result = agent.analyze("sample.tif", system_info=metadata)
 # Batch/series
 result = agent.analyze(
     ["frame_001.tif", "frame_002.tif"],
-    series_metadata={"series_type": "time", "values": [0, 10], "unit": "s"}
+    series_metadata={"variable": "time", "values": [0, 10], "unit": "s"}
 )
 
 # Get recommendations
@@ -505,7 +505,7 @@ print(f"R²: {result['fit_quality']['r_squared']:.4f}")
 # Series with trend analysis
 result = agent.analyze(
     ["pl_300K.csv", "pl_350K.csv", "pl_400K.csv"],
-    series_metadata={"series_type": "temperature", "values": [300, 350, 400], "unit": "K"}
+    series_metadata={"variable": "temperature", "values": [300, 350, 400], "unit": "K"}
 )
 ```
 
