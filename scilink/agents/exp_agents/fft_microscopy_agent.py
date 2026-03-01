@@ -145,8 +145,18 @@ class FFTMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 - str: Single image path
                 - List[str]: Multiple image paths
                 - np.ndarray: 2D (single) or 3D (stack) array
-            system_info: System/sample information
-            series_metadata: Optional metadata about the series
+            system_info: System/sample information. May include a ``"series"``
+                key with series metadata; it will be extracted automatically.
+            series_metadata: Optional metadata describing the experimental
+                variable that changes across images in a series. Can also
+                be provided inside ``system_info["series"]``. Expected
+                structure::
+
+                    {
+                        "variable": "temperature",  # independent variable name
+                        "values": [300, 350, 400],   # one value per image, in file order
+                        "unit": "K"                  # unit for values
+                    }
             preset_params: Skip first-frame analysis, use these params directly
             feedback_callback: Optional function for custom feedback
         

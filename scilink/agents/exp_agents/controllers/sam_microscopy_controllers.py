@@ -1256,7 +1256,7 @@ class ConditionalCustomAnalysisController:
             "successful": sum(1 for r in batch_results if r["success"]),
             "particle_counts": particle_counts,
             "mean_areas": mean_areas,
-            "series_type": series_metadata.get("series_type", "unknown"),
+            "variable": series_metadata.get("variable", "unknown"),
             "time_points": time_points,
         }
         
@@ -1817,7 +1817,7 @@ class UnifiedReportGenerationController:
         <p><strong>Date:</strong> {timestamp}</p>
         <p><strong>Images Processed:</strong> {successful}/{num_images}</p>
         <p><strong>Analysis Approach:</strong> {custom_results.get("approach", "time_series")}</p>
-        <p><strong>Series Type:</strong> {series_metadata.get("series_type", "unknown")}</p>{quality_info}
+        <p><strong>Series Variable:</strong> {series_metadata.get("variable", "unknown")}</p>{quality_info}
     </div>
 
     <h2>Scientific Analysis</h2>

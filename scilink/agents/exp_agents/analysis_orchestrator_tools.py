@@ -810,6 +810,18 @@ class AnalysisOrchestratorTools:
             the analysis without fitting/unmixing it. Supported by CurveFitting
             and Hyperspectral agents.
 
+            series_metadata is a JSON string describing the independent variable
+            across spectra in a series. When ``values`` is a dict mapping
+            filenames to values, files are automatically sorted by value for
+            correct physical ordering and the dict is converted to a sorted
+            list before passing to the agent. Expected format::
+
+                {"variable": "temperature", "values": {"spec_5K.csv": 5, ...}, "unit": "K"}
+
+            If multiple data files are detected and no series_metadata is
+            provided, returns a ``needs_series_metadata`` status prompting the
+            caller to supply it.
+
             Output directory format: results/analysis_{dataset_name}_{timestamp}_{counter}/
             """
             print(f"  ⚡ Tool: Running analysis...")
@@ -977,7 +989,7 @@ class AnalysisOrchestratorTools:
                         ),
                         "num_spectra": num_files,
                         "expected_format": {
-                            "series_type": "<variable name, e.g. temperature>",
+                            "variable": "<variable name, e.g. temperature>",
                             "values": {"<filename>": "<value>", "...": "..."},
                             "unit": "<unit string, e.g. K, mM, V>"
                         },
@@ -1148,8 +1160,8 @@ class AnalysisOrchestratorTools:
                         "spectra in a series. Required for series analysis (multiple spectra). "
                         "Values is a dict mapping each filename to its value — files are "
                         "automatically sorted by value for correct trend analysis. "
-                        "Format: {\"series_type\": \"<variable>\", \"values\": {\"<filename>\": <value>, ...}, \"unit\": \"<units>\"}. "
-                        "Example: {\"series_type\": \"temperature\", \"values\": {\"spec_5K.csv\": 5, \"spec_10K.csv\": 10, \"spec_20K.csv\": 20}, \"unit\": \"K\"}"
+                        "Format: {\"variable\": \"<variable>\", \"values\": {\"<filename>\": <value>, ...}, \"unit\": \"<units>\"}. "
+                        "Example: {\"variable\": \"temperature\", \"values\": {\"spec_5K.csv\": 5, \"spec_10K.csv\": 10, \"spec_20K.csv\": 20}, \"unit\": \"K\"}"
                     )
                 }
             },
