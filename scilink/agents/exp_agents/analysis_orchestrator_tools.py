@@ -235,6 +235,54 @@ def _llm_pick_series_variable(
         return None
 
 
+# Keys produced by the LLM metadata normalization schema.
+_CANONICAL_SCHEMA_KEYS = frozenset({
+    "experiment_type", "experiment", "sample", "spatial_info",
+    "energy_range", "title", "data_columns", "xlabel", "ylabel",
+    "custom_processing_instruction",
+})
+
+# Keys managed by the sidecar / series extraction pipeline.
+_INTERNAL_KEYS = frozenset({"per_file_metadata", "series"})
+
+
+def _structure_metadata_for_save(metadata: dict) -> dict:
+    """Restructure flat current_metadata into grouped sections for saving.
+
+    The runtime ``current_metadata`` dict is kept flat so that agents can
+    access keys directly (``system_info.get("title")``).  For the saved
+    ``metadata_used.json`` we reorganise into three clear groups:
+
+    * **global** — normalised experiment-level fields from the canonical
+      schema (experiment, sample, title, xlabel, …).
+    * **per_file_metadata** / **series** — kept at top level as-is.
+    * **raw_instrument** — remaining passthrough fields from sidecar
+      synthesis that were not consumed by the LLM normalisation.
+    """
+    if not isinstance(metadata, dict):
+        return metadata
+
+    global_section: dict = {}
+    raw_section: dict = {}
+    result: dict = {}
+
+    for key, value in metadata.items():
+        if key in _INTERNAL_KEYS:
+            # per_file_metadata and series stay at top level
+            result[key] = value
+        elif key in _CANONICAL_SCHEMA_KEYS:
+            global_section[key] = value
+        else:
+            raw_section[key] = value
+
+    if global_section:
+        result["global"] = global_section
+    if raw_section:
+        result["raw_instrument"] = raw_section
+
+    return result
+
+
 def _extract_series_from_sidecars(
     sidecar_map: dict[str, Path],
     data_files: list[Path],
@@ -1369,7 +1417,9 @@ class AnalysisOrchestratorTools:
                         "agent_name": self.AGENT_NAMES.get(agent_id),
                         "analysis_goal": analysis_goal,
                         "timestamp": datetime.now().isoformat(),
-                        "metadata": self.orch.current_metadata
+                        "metadata": _structure_metadata_for_save(
+                            self.orch.current_metadata
+                        ),
                     }, f, indent=2)
                 
                 # === Create agent with unique output directory ===
@@ -1704,7 +1754,9 @@ class AnalysisOrchestratorTools:
                         "agent_name": self.AGENT_NAMES.get(agent_id),
                         "analysis_goal": analysis_goal,
                         "timestamp": datetime.now().isoformat(),
-                        "metadata": self.orch.current_metadata
+                        "metadata": _structure_metadata_for_save(
+                            self.orch.current_metadata
+                        ),
                     }, f, indent=2)
 
                 # === Run analysis ===
