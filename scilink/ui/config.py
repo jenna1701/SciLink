@@ -3,8 +3,8 @@
 from pathlib import Path
 
 MODEL_OPTIONS = [
-    "claude-opus-4-6",
     "gemini-3.1-pro-preview",
+    "claude-opus-4-6",
     "gpt-5.2",
 ]
 
