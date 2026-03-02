@@ -1401,66 +1401,6 @@ class AnalysisOrchestratorTools:
                     })
             
             try:
-                # === Generate unique analysis output directory ===
-                analysis_id = self.orch.generate_analysis_id(data_path, agent_id)
-                analysis_output_dir = self.orch.results_dir / f"analysis_{analysis_id}"
-                analysis_output_dir.mkdir(parents=True, exist_ok=True)
-                
-                print(f"    Analysis ID: {analysis_id}")
-                print(f"    Output directory: {analysis_output_dir}")
-                
-                # === Save metadata copy for traceability ===
-                metadata_copy_path = analysis_output_dir / "metadata_used.json"
-                with open(metadata_copy_path, 'w') as f:
-                    json.dump({
-                        "analysis_id": analysis_id,
-                        "data_path": data_path,
-                        "agent_id": agent_id,
-                        "agent_name": self.AGENT_NAMES.get(agent_id),
-                        "analysis_goal": analysis_goal,
-                        "timestamp": datetime.now().isoformat(),
-                        "metadata": _structure_metadata_for_save(
-                            self.orch.current_metadata
-                        ),
-                    }, f, indent=2)
-                
-                # === Create agent with unique output directory ===
-                # NOTE: For code-executing agents (2, 3), this may prompt the user
-                # for sandbox approval and raise RuntimeError if declined.
-                try:
-                    agent = self.orch.create_agent_for_analysis(agent_id, str(analysis_output_dir))
-                except RuntimeError as e:
-                    # Handle sandbox rejection or other init failures
-                    error_msg = str(e)
-                    
-                    if "sandbox" in error_msg.lower() or "declined" in error_msg.lower():
-                        # Clean up the output directory we created
-                        import shutil
-                        if analysis_output_dir.exists():
-                            shutil.rmtree(analysis_output_dir)
-                        
-                        return json.dumps({
-                            "status": "aborted",
-                            "reason": "sandbox_declined",
-                            "message": "Analysis aborted: User declined to proceed without sandbox protection.",
-                            "agent_id": agent_id,
-                            "agent_name": self.AGENT_NAMES.get(agent_id),
-                            "recommendation": (
-                                "This agent executes AI-generated Python code and requires a secure environment.\n\n"
-                                "Please run SciLink in one of the following:\n"
-                                "  1. Docker container (recommended)\n"
-                                "  2. Virtual machine (VMware, VirtualBox, cloud VM)\n"
-                                "  3. Google Colab\n\n"
-                                "See the documentation for setup instructions."
-                            )
-                        })
-                    else:
-                        # Some other initialization error
-                        raise
-                
-                print(f"    Using agent: {type(agent).__name__}")
-                print(f"    Data: {data_path}")
-                
                 # === Handle directory input - filter out metadata files ===
                 path = Path(data_path)
                 actual_data_input = data_path  # Default: pass as-is
@@ -1747,7 +1687,19 @@ class AnalysisOrchestratorTools:
                             series_info["values"] = sorted_values
                             self.orch.current_metadata["series"] = series_info
 
-                # === Re-save metadata now that sidecar synthesis is done ===
+                # === Generate unique analysis output directory ===
+                # Deferred until after early-return checks (series variable
+                # confirmation, missing series metadata) to avoid creating
+                # orphan directories that never receive analysis results.
+                analysis_id = self.orch.generate_analysis_id(data_path, agent_id)
+                analysis_output_dir = self.orch.results_dir / f"analysis_{analysis_id}"
+                analysis_output_dir.mkdir(parents=True, exist_ok=True)
+
+                print(f"    Analysis ID: {analysis_id}")
+                print(f"    Output directory: {analysis_output_dir}")
+
+                # === Save metadata copy for traceability ===
+                metadata_copy_path = analysis_output_dir / "metadata_used.json"
                 with open(metadata_copy_path, 'w') as f:
                     json.dump({
                         "analysis_id": analysis_id,
@@ -1760,6 +1712,43 @@ class AnalysisOrchestratorTools:
                             self.orch.current_metadata
                         ),
                     }, f, indent=2)
+
+                # === Create agent with unique output directory ===
+                # NOTE: For code-executing agents (2, 3), this may prompt the user
+                # for sandbox approval and raise RuntimeError if declined.
+                try:
+                    agent = self.orch.create_agent_for_analysis(agent_id, str(analysis_output_dir))
+                except RuntimeError as e:
+                    # Handle sandbox rejection or other init failures
+                    error_msg = str(e)
+
+                    if "sandbox" in error_msg.lower() or "declined" in error_msg.lower():
+                        # Clean up the output directory we created
+                        import shutil
+                        if analysis_output_dir.exists():
+                            shutil.rmtree(analysis_output_dir)
+
+                        return json.dumps({
+                            "status": "aborted",
+                            "reason": "sandbox_declined",
+                            "message": "Analysis aborted: User declined to proceed without sandbox protection.",
+                            "agent_id": agent_id,
+                            "agent_name": self.AGENT_NAMES.get(agent_id),
+                            "recommendation": (
+                                "This agent executes AI-generated Python code and requires a secure environment.\n\n"
+                                "Please run SciLink in one of the following:\n"
+                                "  1. Docker container (recommended)\n"
+                                "  2. Virtual machine (VMware, VirtualBox, cloud VM)\n"
+                                "  3. Google Colab\n\n"
+                                "See the documentation for setup instructions."
+                            )
+                        })
+                    else:
+                        # Some other initialization error
+                        raise
+
+                print(f"    Using agent: {type(agent).__name__}")
+                print(f"    Data: {data_path}")
 
                 # === Run analysis ===
                 analyze_kwargs = {
