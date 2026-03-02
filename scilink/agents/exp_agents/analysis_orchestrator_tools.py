@@ -1240,10 +1240,23 @@ class AnalysisOrchestratorTools:
                 })
             
             if self.orch.current_metadata is None:
-                return json.dumps({
-                    "status": "error",
-                    "message": "No metadata available. Use load_metadata or convert_metadata first."
-                })
+                # When a data directory contains sidecar JSONs, allow
+                # run_analysis to proceed so the sidecar extraction code
+                # below can populate metadata automatically.
+                data_p = Path(data_path)
+                has_sidecars = False
+                if data_p.is_dir():
+                    _all = [f for f in data_p.iterdir() if f.is_file() and not f.name.startswith('.')]
+                    _data = [f for f in _all if f.suffix.lower() != ".json"]
+                    _smap, _ = _detect_sidecar_jsons(_data, _all)
+                    has_sidecars = bool(_smap)
+                if has_sidecars:
+                    self.orch.current_metadata = {}
+                else:
+                    return json.dumps({
+                        "status": "error",
+                        "message": "No metadata available. Use load_metadata or convert_metadata first."
+                    })
             
             try:
                 # === Generate unique analysis output directory ===
