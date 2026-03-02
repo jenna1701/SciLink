@@ -1176,10 +1176,16 @@ select it even if it's not perfect. Only return acceptable=false if ALL fits are
 3. Incorrect baseline behavior
 4. Wrong peak shape (too sharp, too broad, wrong tail behavior)
 
-Based on your visual inspection and the numerical results, suggest an alternative fitting model. Consider:
-1. Different functional forms (e.g., if using single Gaussian, try double Gaussian, Voigt, or Lorentzian)
-2. Additional components (e.g., baseline correction, additional peaks, shoulders)
-3. Different physical models appropriate for this type of spectroscopy
+Based on your visual inspection and the numerical results, suggest an alternative fitting model.
+
+**Physics-first rule:** Before adding more components, first try improving the existing model:
+1. Different peak shapes (e.g., Voigt instead of Gaussian, asymmetric profiles)
+2. Better baseline treatment (higher-order polynomial, different correction method)
+3. Physically motivated constraints (known peak ratios, position bounds from literature)
+
+Only add new components if you can identify a specific physical feature in the data that the
+current model is missing (a visible shoulder, a second peak, etc.). Do NOT add components
+just to absorb residual structure — that is overfitting, not physics.
 
 Return JSON with:
 {{

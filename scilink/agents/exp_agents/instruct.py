@@ -2069,6 +2069,20 @@ Examine the data and determine the appropriate fitting/analysis approach. Consid
 - Are there overlapping features requiring deconvolution?
 - Is baseline correction needed?
 
+**Physics-First Modeling (CRITICAL):**
+Every component in your model MUST correspond to a physically identifiable feature — a known
+vibrational mode, electronic transition, relaxation process, diffraction peak, etc. Do NOT
+add components solely to improve R² or reduce residuals. A simpler model with clear physical
+meaning is always preferred over a complex model with marginally better fit statistics.
+- Start with the minimum number of components that the physics demands.
+- Only add a component if you can name the physical origin (e.g., "shoulder at ~3200 cm⁻¹
+  from strongly H-bonded OH stretch") AND it is clearly visible in the data.
+- Treat R² as a sanity check, not an optimization target. An R² of 0.96 with 3 physically
+  meaningful components is far superior to R² of 0.99 with 6 components where half are
+  fitting noise or compensating for an incorrect baseline.
+- If residuals show systematic structure, first reconsider the baseline or peak shape
+  (e.g., Voigt vs Gaussian) before adding more peaks.
+
 **Common Analysis Approaches** (for reference):
 - Peak fitting (Gaussian, Lorentzian, Voigt, Pseudo-Voigt, Pearson VII, asymmetric profiles)
 - Peak deconvolution (overlapping features with constraints)
@@ -2142,6 +2156,9 @@ Add a `"series_analysis_plan"` field to your JSON response:
 - When in doubt, use a single model — the adaptive refit step can recover individual failures later.
 - Consider the experimental metadata and user objective when deciding regime boundaries.
 - If you detect a gradual transition, place the boundary where the dominant spectral feature changes.
+- Do NOT inflate the model to accommodate every spectrum perfectly. A physically grounded
+  model that fits most spectra well is better than an overparameterized model that fits all
+  spectra but loses interpretability. Let the adaptive refit handle outliers.
 """
 
 
