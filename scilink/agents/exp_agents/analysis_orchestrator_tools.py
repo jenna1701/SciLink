@@ -264,19 +264,21 @@ def _structure_metadata_for_save(metadata: dict) -> dict:
 
     global_section: dict = {}
     raw_section: dict = {}
-    result: dict = {}
+    internal_section: dict = {}
 
     for key, value in metadata.items():
         if key in _INTERNAL_KEYS:
-            # per_file_metadata and series stay at top level
-            result[key] = value
+            internal_section[key] = value
         elif key in _CANONICAL_SCHEMA_KEYS:
             global_section[key] = value
         else:
             raw_section[key] = value
 
+    # Build result with global first for readability
+    result: dict = {}
     if global_section:
         result["global"] = global_section
+    result.update(internal_section)
     if raw_section:
         result["raw_instrument"] = raw_section
 
