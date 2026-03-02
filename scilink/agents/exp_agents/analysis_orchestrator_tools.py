@@ -1413,6 +1413,54 @@ class AnalysisOrchestratorTools:
                                 f"    Auto-extracted series variable "
                                 f"'{extracted_series['variable']}' from sidecar JSONs"
                             )
+                            # In co-pilot / supervised modes, let the user
+                            # know which control variable was extracted and
+                            # give them a chance to confirm or correct it
+                            # before proceeding with the analysis.
+                            mode = self.orch.analysis_mode.value
+                            if mode in ("co-pilot", "supervised"):
+                                values = extracted_series.get("values", {})
+                                unit = extracted_series.get("unit", "")
+                                # Build a readable summary of the mapping
+                                sample_items = list(values.items())[:5]
+                                mapping_lines = [
+                                    f"  {fname}: {val}"
+                                    for fname, val in sample_items
+                                ]
+                                if len(values) > 5:
+                                    mapping_lines.append(
+                                        f"  ... and {len(values) - 5} more"
+                                    )
+                                mapping_str = "\n".join(mapping_lines)
+                                return json.dumps({
+                                    "status": "series_variable_extracted",
+                                    "message": (
+                                        f"Auto-extracted series control variable "
+                                        f"'{extracted_series['variable']}'"
+                                        f"{(' (' + unit + ')') if unit else ''} "
+                                        f"from per-file sidecar JSON metadata. "
+                                        f"File-to-value mapping:\n{mapping_str}\n\n"
+                                        f"Present this to the user and ask them "
+                                        f"to confirm it is correct before "
+                                        f"proceeding.\n"
+                                        f"- If the user CONFIRMS: re-call "
+                                        f"run_analysis with the same parameters "
+                                        f"(no series_metadata needed — it is "
+                                        f"already stored).\n"
+                                        f"- If the user DISAGREES or wants a "
+                                        f"different variable: ask them for the "
+                                        f"correct variable name, values, and "
+                                        f"unit, then re-call run_analysis with "
+                                        f"an explicit series_metadata parameter "
+                                        f"containing the corrected mapping. "
+                                        f"The explicit parameter will override "
+                                        f"the auto-extracted one."
+                                    ),
+                                    "variable": extracted_series["variable"],
+                                    "unit": unit,
+                                    "values": values,
+                                    "num_files": len(values),
+                                })
 
                 if is_series and not has_series_meta:
                     num_files = len(actual_data_input)
