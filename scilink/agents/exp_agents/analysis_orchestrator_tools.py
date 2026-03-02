@@ -885,6 +885,98 @@ class AnalysisOrchestratorTools:
                     metadata_path = non_sidecar_jsons[0]
                 
                 if metadata_path is None:
+                    # ---------------------------------------------------------
+                    # Synthesize global metadata from sidecar JSONs
+                    # ---------------------------------------------------------
+                    # When there is no dedicated metadata file but per-file
+                    # sidecars exist, extract fields that are identical across
+                    # ALL sidecars as shared (global) metadata.  This lets
+                    # users skip writing a separate metadata.json when the
+                    # sidecars already contain experiment/sample information.
+                    sidecar_paths = [
+                        jf for jf in json_files if jf.stem in _data_stems
+                    ]
+                    if sidecar_paths:
+                        try:
+                            all_sidecar_dicts = []
+                            for sp in sidecar_paths:
+                                with open(sp, "r") as _f:
+                                    all_sidecar_dicts.append(json.load(_f))
+
+                            if all_sidecar_dicts:
+                                # Collect keys shared by every sidecar
+                                shared_keys = set(all_sidecar_dicts[0].keys())
+                                for sd in all_sidecar_dicts[1:]:
+                                    shared_keys &= sd.keys()
+
+                                # Keep only fields whose value is the same in
+                                # every sidecar (these describe the experiment,
+                                # not the varying control variable).
+                                synthesized: dict = {}
+                                for key in shared_keys:
+                                    values = [sd[key] for sd in all_sidecar_dicts]
+                                    ref = values[0]
+                                    if all(v == ref for v in values):
+                                        synthesized[key] = ref
+
+                                if synthesized:
+                                    # Normalize to canonical schema
+                                    is_conformant, _ = check_schema_conformance(synthesized)
+                                    if not is_conformant:
+                                        normed, _ = normalize_metadata_dict(synthesized)
+                                        re_ok, _ = check_schema_conformance(normed)
+                                        if not re_ok:
+                                            try:
+                                                llm_result = normalize_metadata_dict_with_llm(
+                                                    synthesized, self.orch.model, self.logger
+                                                )
+                                                if llm_result:
+                                                    for k, v in synthesized.items():
+                                                        if k not in llm_result:
+                                                            llm_result[k] = v
+                                                    synthesized = llm_result
+                                            except Exception:
+                                                synthesized = normed
+                                        else:
+                                            synthesized = normed
+
+                                    self.orch.current_metadata = synthesized
+                                    print(
+                                        f"    Synthesized global metadata from "
+                                        f"{len(sidecar_paths)} sidecar JSON(s)"
+                                    )
+
+                                    required_fields = ["experiment_type", "experiment", "sample"]
+                                    missing = [f for f in required_fields if f not in synthesized]
+                                    status = "warning" if missing else "success"
+                                    result_payload = {
+                                        "status": status,
+                                        "source": "synthesized_from_sidecars",
+                                        "num_sidecars": len(sidecar_paths),
+                                        "metadata": synthesized,
+                                        "experiment_type": synthesized.get("experiment_type"),
+                                        "technique": (
+                                            synthesized.get("experiment", {}).get("technique")
+                                            if isinstance(synthesized.get("experiment"), dict)
+                                            else synthesized.get("technique")
+                                        ),
+                                        "material": (
+                                            synthesized.get("sample", {}).get("material")
+                                            if isinstance(synthesized.get("sample"), dict)
+                                            else synthesized.get("material")
+                                        ),
+                                    }
+                                    if missing:
+                                        result_payload["message"] = (
+                                            f"Metadata synthesized from sidecar JSONs "
+                                            f"but missing recommended fields: {missing}"
+                                        )
+                                    return json.dumps(result_payload)
+                        except Exception as e:
+                            self.logger.warning(
+                                f"Failed to synthesize metadata from sidecars: {e}"
+                            )
+
                     # Look for .txt description files
                     txt_candidates = [
                         path / "metadata.txt",
@@ -898,7 +990,7 @@ class AnalysisOrchestratorTools:
                                 "message": f"Found text description file: {candidate.name}. Use convert_metadata to convert it to JSON.",
                                 "text_file": str(candidate)
                             })
-                    
+
                     return json.dumps({
                         "status": "error",
                         "message": f"No metadata file found in directory: {json_path}"
