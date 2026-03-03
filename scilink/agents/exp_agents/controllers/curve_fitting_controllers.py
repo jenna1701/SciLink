@@ -2645,7 +2645,22 @@ Return JSON with:
             # Apply preprocessing with locking support for series consistency
             if self.preprocessor is not None:
                 try:
-                    if idx == 0:
+                    if idx == 0 and state.get("first_spectrum_preprocessed"):
+                        # Reuse preprocessing from analyze() — avoid redundant LLM call
+                        curve_data = state.get("curve_data", curve_data)
+                        preprocess_quality = state.get(
+                            "first_spectrum_preprocess_quality", {}
+                        ) or {}
+                        locked_preprocessing_strategy = preprocess_quality.get("strategy")
+                        if locked_preprocessing_strategy:
+                            state["locked_preprocessing_strategy"] = locked_preprocessing_strategy
+                            self.logger.info(
+                                "📝 Preprocessing strategy locked (from planning stage): "
+                                f"{locked_preprocessing_strategy.get('reasoning', 'N/A')[:60]}"
+                            )
+                        else:
+                            self.logger.info("Preprocessed (reused from planning stage)")
+                    elif idx == 0:
                         curve_data, preprocess_quality = self.preprocessor.run_preprocessing(
                             curve_data, state.get("system_info", {})
                         )
