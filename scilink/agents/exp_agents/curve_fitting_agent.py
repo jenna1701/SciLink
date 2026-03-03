@@ -167,7 +167,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         use_literature: bool = False,
         run_preprocessing: bool = True,
         enable_human_feedback: bool = True,
-        executor_timeout: int = 60,
+        executor_timeout: int = 300,
         max_wait_time: int = 1000,
         # Quality control settings
         r2_threshold: float = 0.95,
