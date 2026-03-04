@@ -527,8 +527,7 @@ class SingleObjectiveOptimizer:
         """Helper: Calculates First-Order Sobol Indices for diagnostics."""
         if self.input_dim == 1: return [self.feature_names[0]], [1.0]
 
-        bounds = torch.stack([torch.zeros(self.input_dim), torch.ones(self.input_dim)]).to(self.device)
-        X_sobol = draw_sobol_samples(bounds=bounds, n=n_samples * 2, q=1).squeeze(1)
+        X_sobol = draw_sobol_samples(bounds=self.bounds, n=n_samples * 2, q=1).squeeze(1)
         A, B = X_sobol[:n_samples], X_sobol[n_samples:]
 
         def predict(X):
