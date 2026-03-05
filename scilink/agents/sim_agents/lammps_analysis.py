@@ -1582,11 +1582,11 @@ Return ONLY JSON.
                 f.write(code)
             
             # Execute using ScriptExecutor
-            exec_result = self.executor.execute(
-                code=code,
+            exec_result = self.executor.execute_script(
+                script_content=code,
                 working_dir=str(self.output_dir)
             )
-            
+
             if exec_result.get("status") == "success":
                 # Try to parse JSON output
                 stdout = exec_result.get("stdout", "")
@@ -1643,7 +1643,6 @@ Return ONLY JSON.
         
         return None
     
-    
     def _refine_failed_analysis(self,
                                  code: str,
                                  error_info: Dict[str, Any],
@@ -1654,51 +1653,71 @@ Return ONLY JSON.
         Attempt to refine failed analysis code using LAMMPSAnalysisUpdater.
         """
         from .lammps_analysis_updater import LAMMPSAnalysisUpdater
-        
+    
+        # Build data_files dict from output_data
+        data_files = {}
+        for name, info in output_data.items():
+            if info.get("all_files"):
+                data_files[name] = info["all_files"]
+            else:
+                data_files[name] = info.get("file", "")
+    
+        available_packages = self._get_available_packages()
+    
         for attempt in range(1, self.max_refinement_attempts + 1):
             self.logger.info(f"Refinement attempt {attempt}/{self.max_refinement_attempts} for {analysis_name}")
-            
+    
             try:
-                # Use the analysis updater to fix the code
-                error_msg = error_info.get("message", "") + "\n" + error_info.get("stderr", "")
-                
                 updater = LAMMPSAnalysisUpdater(
                     api_key=self.model.api_key if hasattr(self.model, 'api_key') else None,
                     model_name=self.model.model if hasattr(self.model, 'model') else "gemini-3-pro-preview",
                     base_url=self.model.base_url if hasattr(self.model, 'base_url') else None
                 )
-                
-                corrected_code = updater.fix_analysis_code(
-                    code=code,
-                    error_message=error_msg,
-                    analysis_name=analysis_name
+    
+                # Step 1: Analyze the failure
+                failure_analysis = updater.analyze_failure(
+                    analysis_name=analysis_name,
+                    generated_code=code,
+                    error_result=error_info,
+                    data_files=data_files,
+                    available_packages=available_packages
                 )
-                
+    
+                # Step 2: Generate corrected code based on failure analysis
+                corrected_code = updater.generate_corrected_code(
+                    analysis_name=analysis_name,
+                    original_code=code,
+                    failure_analysis=failure_analysis,
+                    data_files=data_files,
+                    available_packages=available_packages,
+                    analysis_description=sim_details.get("summary", "")
+                )
+    
                 if corrected_code and corrected_code.strip() != code.strip():
                     # Save refined code
                     refined_path = self.output_dir / f"{analysis_name}_refined_{attempt}.py"
                     with open(refined_path, 'w') as f:
                         f.write(corrected_code)
-                    
+    
                     # Execute refined code
                     result = self._execute_analysis_code(corrected_code, f"{analysis_name}_refined_{attempt}")
-                    
+    
                     if result.get("status") == "success":
                         result["refinement_attempts"] = attempt
                         return result
-                    
+    
                     # Update for next attempt
                     code = corrected_code
                     error_info = result
                 else:
                     self.logger.warning(f"Updater returned unchanged code on attempt {attempt}")
                     break
-                    
+    
             except Exception as e:
                 self.logger.error(f"Refinement attempt {attempt} failed: {e}")
-        
+    
         error_info["refinement_attempts"] = self.max_refinement_attempts
-        return error_info
+        return error_info    
 
     def _detect_container_environment(self) -> bool:
         """Detect if running inside a container (Docker, Apptainer, etc.)."""
