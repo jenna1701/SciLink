@@ -224,13 +224,14 @@ class ScalarizerAgent(BaseAgent):
             logging.warning(f"Reflection failed: {e}")
             return {"status": "pass", "reasoning": "Auto-reflection unavailable."}
 
-    def scalarize(self, 
-                 data_path: str, 
+    def scalarize(self,
+                 data_path: str,
                  objective_query: str = "",
                  reuse_script_path: str = None,
                  experiment_context: Optional[Dict[str, Any]] = None,
-                 metadata_path: Optional[str] = None, 
-                 enable_human_review: bool = True) -> Dict[str, Any]:
+                 metadata_path: Optional[str] = None,
+                 enable_human_review: bool = True,
+                 column_role_hints: Optional[Dict] = None) -> Dict[str, Any]:
         """
         Main entry point. Converts raw data -> Scalar Metrics.
 
@@ -272,9 +273,10 @@ class ScalarizerAgent(BaseAgent):
             exec_res = self._execute_script(Path(reuse_script_path), args=[str(data_path)])
             
             result = {
-                "status": exec_res["status"], 
+                "status": exec_res["status"],
                 "metrics": exec_res.get("metrics", {}),
                 "source_script": str(reuse_script_path),
+                "column_roles": self.state.get("column_roles", {}),
                 "error": exec_res.get("error")
             }
             
@@ -333,6 +335,15 @@ class ScalarizerAgent(BaseAgent):
         This is an absolute path - use it directly without modification.
         """
 
+        # Inject column role hints if user specified inputs/targets
+        if column_role_hints:
+            base_prompt += f"""
+        **USER-SPECIFIED COLUMN ROLES (use these exactly):**
+        - Inputs: {column_role_hints.get('inputs', [])}
+        - Targets: {column_role_hints.get('targets', [])}
+        Your column_roles output MUST match these exactly.
+        """
+
         current_prompt = base_prompt
         max_retries = 5
         human_feedback_collected = None
@@ -355,6 +366,11 @@ class ScalarizerAgent(BaseAgent):
                 print(f"    ⚠️ Generation Failed (Invalid JSON): {err_msg}")
                 current_prompt = base_prompt + f"\n\n**PREVIOUS ERROR:** JSON parsing failed ({err_msg}). Return ONLY valid JSON."
                 continue
+
+            # Extract and store column roles classification
+            column_roles = result.get("column_roles", {})
+            if column_roles:
+                self.state["column_roles"] = column_roles
 
             # Save Script
             sanitized_name = Path(data_path).stem.replace(" ", "_")
@@ -400,10 +416,19 @@ class ScalarizerAgent(BaseAgent):
 
             # Human Review
             if enable_human_review:
+                metrics = exec_res['metrics']
+                rows = metrics if isinstance(metrics, list) else [metrics]
+                columns = list(rows[0].keys()) if rows else []
                 print("\n" + "="*60)
                 print(f"👀 SCALARIZER REVIEW: {path_obj.name}")
-                print(f"• Metrics: {exec_res['metrics']}")
-                print(f"• Plot: {exec_res['plot_path']}")
+                print(f"  Extracted {len(columns)} columns from {len(rows)} data point(s):")
+                for col in columns:
+                    vals = [r.get(col) for r in rows[:3]]
+                    preview = ", ".join(str(v) for v in vals)
+                    if len(rows) > 3:
+                        preview += ", ..."
+                    print(f"    • {col}: [{preview}]")
+                print(f"  Plot: {exec_res['plot_path']}")
                 print("-" * 60)
                 user_fb = input("> Press [ENTER] to confirm or type feedback: ").strip()
                 
@@ -414,9 +439,10 @@ class ScalarizerAgent(BaseAgent):
 
             # Success - log and return
             final_result = {
-                "status": "success", 
-                "metrics": exec_res["metrics"], 
-                "source_script": str(script_path)
+                "status": "success",
+                "metrics": exec_res["metrics"],
+                "source_script": str(script_path),
+                "column_roles": self.state.get("column_roles", {})
             }
             
             self._log_action(

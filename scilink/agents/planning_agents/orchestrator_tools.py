@@ -916,17 +916,26 @@ class OrchestratorTools:
                 print(f"       Targets: {targets}")
             
             # Determine script to use
-            if force_regenerate:
+            schema_changed = (
+                inputs and targets and (
+                    set(inputs) != set(self.orch.expected_input_columns or [])
+                    or set(targets) != set(self.orch.expected_target_columns or [])
+                )
+            )
+            if force_regenerate or schema_changed:
                 script_to_use = None
-                print(f"    🔄 Force regenerate: Creating new analysis script")
+                if schema_changed:
+                    print(f"    🔄 Schema changed — regenerating analysis script")
+                else:
+                    print(f"    🔄 Force regenerate: Creating new analysis script")
             else:
                 script_to_use = self.orch.active_scalarizer_script if (
                     self.orch.active_scalarizer_script and Path(self.orch.active_scalarizer_script).exists()
                 ) else None
-                
-                if script_to_use: 
+
+                if script_to_use:
                     print(f"    (Consistency Mode: Using cached script)")
-                else: 
+                else:
                     print(f"    (Discovery Mode: Generating new script)")
             
             # Pass schema to experiment context
@@ -943,12 +952,18 @@ class OrchestratorTools:
                 }
             
             try:
+                # Pass user-specified schema as hints so scalarizer can classify
+                role_hints = None
+                if inputs and targets:
+                    role_hints = {"inputs": inputs, "targets": targets}
+
                 res = self.orch.scalarizer.scalarize(
-                    data_path=file_path, 
-                    objective_query=enhanced_objective,  
+                    data_path=file_path,
+                    objective_query=enhanced_objective,
                     reuse_script_path=script_to_use,
-                    experiment_context=exp_context, 
-                    enable_human_review=self._get_human_feedback_enabled()
+                    experiment_context=exp_context,
+                    enable_human_review=self._get_human_feedback_enabled(),
+                    column_role_hints=role_hints
                 )
                 
                 if res["status"] != "success":
@@ -1117,13 +1132,22 @@ class OrchestratorTools:
                                 suggestions[missing] = matches
                         
                         return json.dumps({
-                            "status": "error",
-                            "message": "Requested columns not found in extracted metrics",
+                            "status": "schema_mismatch",
+                            "message": (
+                                f"The analysis script could not produce the requested columns. "
+                                f"Missing inputs: {missing_inputs or 'none'}. "
+                                f"Missing targets: {missing_targets or 'none'}. "
+                                f"Available columns from extraction: {all_cols}."
+                            ),
                             "missing_inputs": missing_inputs,
                             "missing_targets": missing_targets,
                             "available_columns": all_cols,
                             "suggestions": suggestions if suggestions else None,
-                            "hint": "Column names may differ slightly. Check available_columns and retry with correct names, or use force_regenerate=True with updated extraction_goal."
+                            "recovery_options": [
+                                "Retry with corrected column names from available_columns",
+                                "Use force_regenerate=True with an updated extraction_goal",
+                                "Choose different inputs/targets from the available columns"
+                            ]
                         })
                     
                     self.orch.expected_input_columns = inputs
@@ -1138,42 +1162,98 @@ class OrchestratorTools:
                     print(f"       Inputs: {self.orch.expected_input_columns}")
                     print(f"       Targets: {self.orch.expected_target_columns}")
                 
-                # Case 3: No schema — require the LLM to classify columns
+                # Case 3: No user schema — use scalarizer's column_roles classification
                 else:
-                    print(f"    ⚠️  No schema specified. Extracted columns: {all_cols}")
-                    # Build context to help the LLM classify columns
-                    data_preview = df_to_append.head(3).to_dict(orient='records')
-                    col_stats = {}
-                    for col in all_cols:
-                        if pd.api.types.is_numeric_dtype(df_to_append[col]):
-                            col_stats[col] = {
-                                "type": "numeric",
-                                "unique": int(df_to_append[col].nunique()),
-                                "min": float(df_to_append[col].min()),
-                                "max": float(df_to_append[col].max()),
-                            }
+                    column_roles = res.get("column_roles", {})
+                    proposed_inputs = column_roles.get("inputs", [])
+                    proposed_targets = column_roles.get("targets", [])
+
+                    if proposed_inputs and proposed_targets:
+                        # Validate proposed columns exist in extracted data
+                        missing = [c for c in proposed_inputs + proposed_targets if c not in all_cols]
+                        if missing:
+                            print(f"    ⚠️  Scalarizer classification references missing columns: {missing}")
+                            # Fall through to schema_required below
+                            proposed_inputs, proposed_targets = [], []
                         else:
-                            col_stats[col] = {"type": "non-numeric", "unique": int(df_to_append[col].nunique())}
-                    n_data = len(df_to_append)
-                    numeric_cols = [c for c in all_cols if pd.api.types.is_numeric_dtype(df_to_append[c])]
-                    return json.dumps({
-                        "status": "schema_required",
-                        "message": "Cannot auto-detect which columns are inputs vs targets. Re-call analyze_file with explicit inputs and targets.",
-                        "available_columns": all_cols,
-                        "column_stats": col_stats,
-                        "data_preview": data_preview,
-                        "data_points": n_data,
-                        "objective": self.orch.objective or "Not set",
-                        "hint": (
-                            "Use the objective, column names, and data preview to decide: "
-                            "which columns are controllable INPUT parameters (experimentally set) "
-                            "and which are measured TARGET metrics (outcomes to optimize). "
-                            "Non-numeric columns (e.g., Sample_ID, Notes) should be excluded. "
-                            "Columns with very few unique values relative to rows may be controlled inputs. "
-                            "Then call: analyze_file(file_path=..., inputs=[...], targets=[...])"
-                        ),
-                        "objective_count_guidance": self._build_objective_guidance(n_data, numeric_cols)
-                    })
+                            reasoning = column_roles.get("reasoning", "")
+                            print(f"    🔬 Scalarizer classified columns:")
+                            print(f"       Inputs: {proposed_inputs}")
+                            print(f"       Targets: {proposed_targets}")
+                            if reasoning:
+                                print(f"       Reasoning: {reasoning}")
+
+                            if self.orch.autonomy_level == "CO_PILOT":
+                                # Return proposal for user confirmation
+                                n_data = len(df_to_append)
+                                return json.dumps({
+                                    "status": "schema_proposed",
+                                    "inputs": proposed_inputs,
+                                    "targets": proposed_targets,
+                                    "reasoning": reasoning,
+                                    "data_points": n_data,
+                                    "message": "Scalarizer proposes this classification. Confirm or adjust.",
+                                    "available_columns": all_cols
+                                })
+                            else:
+                                # SUPERVISED/AUTONOMOUS: accept directly
+                                self.orch.expected_input_columns = proposed_inputs
+                                self.orch.expected_target_columns = proposed_targets
+                                print(f"    ✅ Schema auto-accepted: inputs={proposed_inputs}, targets={proposed_targets}")
+
+                    # Targets found but no inputs — measurement-only data (e.g., spectra)
+                    if proposed_targets and not proposed_inputs:
+                        n_data = len(df_to_append)
+                        return json.dumps({
+                            "status": "inputs_required",
+                            "message": (
+                                "The data file contains measurement data but no experimental conditions. "
+                                "Input parameters (e.g., temperature, pH, concentration) are needed for optimization."
+                            ),
+                            "targets_found": proposed_targets,
+                            "reasoning": column_roles.get("reasoning", ""),
+                            "data_points": n_data,
+                            "options": [
+                                "Provide a metadata JSON sidecar file with experimental conditions",
+                                "Manually specify input parameter values for this data file",
+                                "Re-call analyze_file with inputs=[...] listing the parameter names to add"
+                            ]
+                        })
+
+                    # Fallback: scalarizer didn't classify or classification was invalid
+                    if not proposed_inputs or not proposed_targets:
+                        print(f"    ⚠️  No schema specified. Extracted columns: {all_cols}")
+                        data_preview = df_to_append.head(3).to_dict(orient='records')
+                        col_stats = {}
+                        for col in all_cols:
+                            if pd.api.types.is_numeric_dtype(df_to_append[col]):
+                                col_stats[col] = {
+                                    "type": "numeric",
+                                    "unique": int(df_to_append[col].nunique()),
+                                    "min": float(df_to_append[col].min()),
+                                    "max": float(df_to_append[col].max()),
+                                }
+                            else:
+                                col_stats[col] = {"type": "non-numeric", "unique": int(df_to_append[col].nunique())}
+                        n_data = len(df_to_append)
+                        numeric_cols = [c for c in all_cols if pd.api.types.is_numeric_dtype(df_to_append[c])]
+                        return json.dumps({
+                            "status": "schema_required",
+                            "message": "Could not auto-classify columns. Re-call analyze_file with explicit inputs and targets.",
+                            "available_columns": all_cols,
+                            "column_stats": col_stats,
+                            "data_preview": data_preview,
+                            "data_points": n_data,
+                            "objective": self.orch.objective or "Not set",
+                            "hint": (
+                                "Use the objective, column names, and data preview to decide: "
+                                "which columns are controllable INPUT parameters (experimentally set) "
+                                "and which are measured TARGET metrics (outcomes to optimize). "
+                                "Non-numeric columns (e.g., Sample_ID, Notes) should be excluded. "
+                                "Then call: analyze_file(file_path=..., inputs=[...], targets=[...])"
+                            ),
+                            "objective_count_guidance": self._build_objective_guidance(n_data, numeric_cols)
+                        })
                 
                 # SCHEMA ENFORCEMENT ON SAVE
                 if self.orch.bo_data_path.exists():
@@ -1207,14 +1287,11 @@ class OrchestratorTools:
                 
                 return json.dumps({
                     "status": "success",
-                    "metrics": metrics if isinstance(metrics, dict) else f"{len(metrics)} data points",
                     "data_points_collected": data_count,
                     "rows_added": num_new,
                     "optimization_ready": data_count >= 3,
-                    "schema": {
-                        "inputs": self.orch.expected_input_columns,
-                        "targets": self.orch.expected_target_columns
-                    }
+                    "inputs": self.orch.expected_input_columns,
+                    "targets": self.orch.expected_target_columns
                 })
                 
             except Exception as e:

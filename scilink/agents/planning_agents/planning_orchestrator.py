@@ -47,6 +47,14 @@ Only call `generate_implementation_code` when BOTH conditions are true:
   a) User explicitly asks for "script", "protocol", "code", or mentions equipment (Opentrons, robot, automation)
   b) Code KB is loaded OR user specifies a code directory
 
+**SCHEMA HANDLING:**
+- If `analyze_file` returns `schema_proposed`, present the proposed inputs/targets classification and reasoning to the user. Wait for confirmation or adjustment before re-calling `analyze_file` with the confirmed inputs/targets.
+- If `analyze_file` returns `schema_required` (fallback), propose a classification of the available columns into inputs vs targets. Present it clearly to the user and wait for confirmation before re-calling `analyze_file`.
+- If `analyze_file` returns `schema_mismatch`, ALWAYS inform the user which columns were missing and what columns are available. Present the recovery options and wait for the user to decide.
+- If `analyze_file` returns `inputs_required`, explain to the user that the data file contains
+  measurement results but no experimental conditions. Ask them to provide the parameter values
+  or point to a metadata sidecar JSON file.
+
 **RESPONSE STYLE:**
 - After each tool call, summarize the result and wait for user direction.
 - Do NOT end responses with generic menus like "Would you like me to..."
@@ -67,6 +75,15 @@ _SUPERVISED_DIRECTIVE = """
 - If the user did not provide a clear research objective, ask them to clarify before proceeding.
 - Otherwise, start working immediately.
 
+**ANALYZE_FILE RESULTS:**
+- On success, report data_points_collected and optimization_ready status only. Do NOT list extracted columns or ask for schema confirmation — just proceed to the next step.
+- Schema is auto-accepted from the scalarizer. If `schema_required` is returned (fallback), classify columns based on the objective and data context, then re-call with explicit inputs/targets.
+
+**SCHEMA MISMATCH HANDLING:**
+- If `analyze_file` returns `schema_mismatch`, inform the user which columns could not be produced. Try ONE automatic recovery using `suggestions` or `available_columns` (e.g., retry with corrected names). If that also fails, report to the user with available options.
+- If `analyze_file` returns `inputs_required`, inform the user that experimental conditions
+  are missing from the data and ask them to provide parameter values or a metadata file.
+
 **RESPONSE STYLE:**
 - After completing a logical phase, briefly summarize and continue to next step.
 - Do NOT ask permission between steps - just proceed.
@@ -84,6 +101,15 @@ _AUTONOMOUS_DIRECTIVE = """
 - Proceed through: plan → execute → analyze → optimize → iterate.
 - Report final results and key decision points at the end.
 - NOTE: Human still performs physical experiments in the lab
+
+**ANALYZE_FILE RESULTS:**
+- On success, do NOT display schema or ask for confirmation — proceed immediately to the next step.
+- Schema is auto-accepted from the scalarizer. If `schema_required` is returned (fallback), classify columns based on the objective and data context, then re-call with explicit inputs/targets.
+
+**SCHEMA MISMATCH HANDLING:**
+- If `analyze_file` returns `schema_mismatch`, automatically attempt recovery: use `suggestions` to map column names, or retry with `force_regenerate=True`. If all retries fail (max 2 attempts), report to the user with the mismatch details and available columns.
+- If `analyze_file` returns `inputs_required`, pause and ask the user for experimental conditions.
+  These cannot be inferred — they must come from the user.
 
 **AUTONOMOUS WORKFLOW - EXECUTE WITHOUT ASKING:**
 When starting a new campaign, execute the FULL pipeline automatically:
@@ -161,13 +187,16 @@ You are the **Research Agent**. Your goal is to coordinate a scientific campaign
     - First use: Generates analysis script automatically
     - Subsequent uses: Reuses script for consistency
     - force_regenerate=True: Use when analysis needs change
-    - On the first call for a new file, omit `inputs` and `targets` to let the tool discover available columns
-    - If the tool returns `schema_required`, it will list `available_columns` from the data.
-      Re-call `analyze_file` with the same file_path plus explicit `inputs` and `targets` chosen from those columns:
-      * `inputs`: controllable experimental parameters (e.g., temperature, concentration)
-      * `targets`: measured outcomes to optimize (e.g., yield, selectivity, extraction %)
-      * Use the scientific objective and plan context to decide which is which
-    - Do NOT guess column names — only use names from `available_columns`
+    - On the first call for a new file, omit `inputs` and `targets`. The scalarizer will automatically
+      classify columns into inputs (controllable parameters) and targets (measured outcomes).
+    - If `schema_proposed` is returned (co-pilot mode), present the proposed classification to the user for confirmation.
+      If the user adjusts, re-call `analyze_file` with the corrected inputs/targets.
+    - If `schema_required` is returned (fallback), choose inputs and targets from `available_columns`
+      and re-call with explicit values. Do NOT guess column names — only use names from `available_columns`.
+    - If `inputs_required` is returned, the data contains only measurement results (e.g., spectra)
+      with no experimental conditions. Ask the user to provide the conditions for this data
+      (e.g., "What temperature/pH/concentration was this spectrum collected at?").
+    - On success: report data_points_collected and optimization_ready. Do NOT repeat the schema back to the user.
 9. `reset_analysis_logic`: Use this if the analysis script is wrong.
 
 **OPTIMIZATION TOOLS:**
@@ -492,9 +521,9 @@ class PlanningOrchestratorAgent:
     
     def _should_enable_human_feedback(self) -> bool:
         """Determines if human feedback should be enabled based on autonomy level."""
-        # CO_PILOT and SUPERVISED both keep human review of plans/code
-        # Only AUTONOMOUS skips human feedback entirely
-        return self.autonomy_level != AutonomyLevel.AUTONOMOUS
+        # Only CO_PILOT pauses for human review
+        # SUPERVISED and AUTONOMOUS proceed without asking
+        return self.autonomy_level == AutonomyLevel.CO_PILOT
 
     def set_autonomy_level(self, level: AutonomyLevel) -> None:
         """

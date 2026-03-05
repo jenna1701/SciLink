@@ -484,6 +484,11 @@ If the goal or experimental context specifies required columns, you MUST extract
 Your output metrics MUST include ALL specified input and target columns.
 For multi-objective optimization, ensure ALL target columns are present in each row.
 
+**COLUMN NAMING RULE (CRITICAL):**
+- For columns that exist in the source data: use the EXACT original column names. Do NOT rename, abbreviate, or "improve" them. If the CSV has "Temperature_C", output "Temperature_C" — NOT "Leaching_Temperature".
+- For computed/derived metrics (e.g., selectivity ratios, integrated peak areas, normalized values): use clear descriptive names that reflect the computation (e.g., "Selectivity_Nd_Fe", "Peak_Area_nm").
+This ensures input parameters stay consistent when the script is reused across files.
+
 **OUTPUT SCHEMA (STDOUT):**
 **For multiple measurements:**
 ```json
@@ -505,11 +510,34 @@ For multi-objective optimization, ensure ALL target columns are present in each 
 }
 ```
 
+**COLUMN CLASSIFICATION (MANDATORY):**
+After writing your analysis code, classify every column in the output metrics:
+- **inputs**: Controllable experimental parameters (e.g., temperature, concentration, time, composition)
+- **targets**: Measured outcomes to optimize (e.g., yield, purity, peak area, bandgap)
+
+Rules:
+- Use column names EXACTLY as they appear in your output metrics
+- Inputs are parameters the experimenter controls between runs
+- Targets are quantities derived from measurements
+- If the objective mentions optimizing/maximizing/minimizing something, that's a target
+- Everything else is an input
+- When in doubt, prefer fewer targets (1-2) over many
+- If there are multiple potential targets, consider whether the dataset has enough points
+  (rule of thumb: at least 5 x n_inputs x n_targets for multi-objective optimization)
+- If the data file contains ONLY measurement data (e.g., spectra: wavelength/intensity,
+  time series: time/signal) with NO controllable parameters, set inputs to an empty list [].
+  This signals that experimental conditions must be provided externally (e.g., via metadata sidecar).
+
 **LLM RESPONSE FORMAT:**
-You (the Agent) must return a single JSON object containing the code:
+You (the Agent) must return a single JSON object containing the code AND column classification:
 {
   "thought_process": "Brief explanation of the approach...",
-  "implementation_code": "import pandas as pd\\nimport numpy as np..."
+  "implementation_code": "import pandas as pd\\nimport numpy as np...",
+  "column_roles": {
+    "inputs": ["Temperature_C", "Concentration_M"],
+    "targets": ["Yield_Percent"],
+    "reasoning": "Temperature and concentration are controllable parameters; yield is the measured outcome to optimize"
+  }
 }
 """
 
