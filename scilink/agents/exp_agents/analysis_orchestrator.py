@@ -710,7 +710,7 @@ class AnalysisOrchestratorAgent:
         Returns:
             Number of tools registered from this server.
         """
-        from ..mcp_client import MCPConnection
+        from ...mcp_client import MCPConnection
 
         if server_name in self._mcp_connections:
             logging.warning(
