@@ -252,6 +252,29 @@ def create_server(
                 },
             ))
 
+        # Always add the set_autonomy tool
+        tools.append(types.Tool(
+            name="scilink_set_autonomy",
+            description=(
+                "Change the autonomy mode at runtime. In 'autonomous' mode "
+                "all tools execute immediately. In 'supervised' mode high-impact "
+                "tools (run_analysis, run_optimization) pause for approval. "
+                "In 'co-pilot' mode most action tools pause for approval. "
+                "Returns the new mode and whether scilink_respond is now needed."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["autonomous", "supervised", "co-pilot"],
+                        "description": "The autonomy mode to switch to.",
+                    },
+                },
+                "required": ["mode"],
+            },
+        ))
+
         return tools
 
     # ── tools/call ───────────────────────────────────────────────────
@@ -265,6 +288,10 @@ def create_server(
         # Handle the respond tool
         if name == "scilink_respond":
             return await _handle_respond(state, arguments)
+
+        # Handle autonomy mode switch
+        if name == "scilink_set_autonomy":
+            return _handle_set_autonomy(state, arguments)
 
         # Look up which orchestrator owns this tool
         if name not in tool_map:
@@ -472,9 +499,13 @@ def _init_orchestrators(state: dict, config: dict) -> None:
             autonomy_level = autonomy_map.get(
                 config["analysis_mode"].lower(), AutonomyLevel.AUTONOMOUS
             )
-            # Planning orchestrator needs data_dir in autonomous mode
+            # Planning orchestrator needs data_dir and knowledge_dir
+            # to avoid creating directories with relative paths
+            # (fails when Claude Desktop runs from /).
             data_dir = str(Path(session_dir) / "data")
+            knowledge_dir = str(Path(session_dir) / "kb_storage")
             Path(data_dir).mkdir(parents=True, exist_ok=True)
+            Path(knowledge_dir).mkdir(parents=True, exist_ok=True)
             state["planning_orch"] = PlanningOrchestratorAgent(
                 base_dir=session_dir,
                 api_key=api_key,
@@ -483,9 +514,49 @@ def _init_orchestrators(state: dict, config: dict) -> None:
                 futurehouse_api_key=fh_key,
                 autonomy_level=autonomy_level,
                 data_dir=data_dir,
+                knowledge_dir=knowledge_dir,
             )
         except Exception as exc:
             logging.warning(f"Planning orchestrator not available: {exc}")
+
+
+# ── Autonomy mode switch ─────────────────────────────────────────────────
+
+def _handle_set_autonomy(
+    state: dict, arguments: dict
+) -> List["types.TextContent"]:
+    """Switch autonomy mode at runtime."""
+    new_mode = arguments.get("mode", "").strip().lower()
+    valid = {"autonomous", "supervised", "co-pilot"}
+    if new_mode not in valid:
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "status": "error",
+                "message": f"Invalid mode '{new_mode}'. Use: {', '.join(sorted(valid))}",
+            }),
+        )]
+
+    old_mode = state["config"]["analysis_mode"]
+    state["config"]["analysis_mode"] = new_mode
+
+    # Clear any pending action from the previous mode
+    state["pending_action"] = None
+
+    return [types.TextContent(
+        type="text",
+        text=json.dumps({
+            "status": "success",
+            "previous_mode": old_mode,
+            "current_mode": new_mode,
+            "approval_required_for": sorted(
+                _COPILOT_APPROVAL_TOOLS if new_mode == "co-pilot"
+                else _SUPERVISED_APPROVAL_TOOLS if new_mode == "supervised"
+                else set()
+            ),
+            "scilink_respond_needed": new_mode != "autonomous",
+        }),
+    )]
 
 
 # ── Respond handler (co-pilot / supervised) ──────────────────────────────
