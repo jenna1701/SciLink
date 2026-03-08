@@ -112,17 +112,6 @@ Search arXiv for recent papers on XPS peak fitting of transition metal oxides
 
 The LLM will use the arXiv MCP tools to search and retrieve papers, then use SciLink's built-in tools to analyze your data — combining literature context with experimental analysis.
 
-## Available scientific MCP servers
-
-| Server | Install | What it does |
-|--------|---------|-------------|
-| [arxiv-mcp-server](https://github.com/blazickjp/arxiv-mcp-server) | `pip install arxiv-mcp-server` | Search and read arXiv papers |
-| [PubMed MCP](https://github.com/cyanheads/pubmed-mcp-server) | npm/npx | Biomedical literature via NCBI |
-| [ChEMBL MCP](https://github.com/Augmented-Nature/ChEMBL-MCP-Server) | npm/npx | Chemical/bioactivity database |
-| [OpenMM MCP](https://github.com/PhelanShao/openmm-mcp-server) | pip | Molecular dynamics simulations |
-| [LAMMPS MCP](https://github.com/Chenghao-Wu/MCP_LAMMPS) | pip | LAMMPS MD (experimental) |
-| [Filesystem](https://github.com/modelcontextprotocol/servers) | npx | Read/write/search files |
-
 ## How tools appear to the LLM
 
 External tools are registered with a `[MCP:name]` prefix in their description so the LLM can distinguish them from built-in tools. For example:
