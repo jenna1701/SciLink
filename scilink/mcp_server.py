@@ -17,10 +17,12 @@ Requires the ``mcp`` optional dependency::
 """
 
 import asyncio
+import concurrent.futures
 import contextlib
 import io
 import json
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 try:
@@ -53,6 +55,11 @@ _SUPERVISED_APPROVAL_TOOLS = {
     "run_analysis", "run_optimization", "discard_plan",
 }
 
+# Tools that support optional background execution via ``background=true``.
+_BACKGROUND_CAPABLE_TOOLS = {
+    "run_analysis", "run_optimization",
+}
+
 
 # ── Schema conversion ───────────────────────────────────────────────────
 
@@ -60,10 +67,25 @@ def _openai_to_mcp_tool(schema: dict, prefix: str = "scilink") -> types.Tool:
     """Convert an OpenAI function-calling schema to an MCP Tool object."""
     fn = schema.get("function", schema)
     name = fn.get("name", "")
+    input_schema = fn.get("parameters", {"type": "object", "properties": {}})
+
+    # Add optional ``background`` parameter for long-running tools.
+    if name in _BACKGROUND_CAPABLE_TOOLS:
+        schema_copy = json.loads(json.dumps(input_schema))
+        schema_copy.setdefault("properties", {})["background"] = {
+            "type": "boolean",
+            "description": (
+                "If true, run in the background and return a job_id "
+                "immediately. Use scilink_job_status and scilink_job_result "
+                "to poll and retrieve results. Default: false (blocking)."
+            ),
+        }
+        input_schema = schema_copy
+
     return types.Tool(
         name=f"{prefix}_{name}" if prefix else name,
         description=fn.get("description", ""),
-        inputSchema=fn.get("parameters", {"type": "object", "properties": {}}),
+        inputSchema=input_schema,
     )
 
 
@@ -149,11 +171,16 @@ def create_server(
     server = Server("scilink")
 
     # ── State (initialized lazily on first tool list) ────────────────
+    # Thread pool for background jobs
+    _executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
     state: Dict[str, Any] = {
         "analysis_orch": None,
         "planning_orch": None,
         "pending_action": None,
         "initialized": False,
+        "jobs": {},
+        "job_counter": 0,
         "config": {
             "api_key": api_key,
             "model_name": model_name,
@@ -228,29 +255,66 @@ def create_server(
                     prefix = "scilink"
                 tools.append(_openai_to_mcp_tool(schema, prefix=prefix))
 
-        # Add the respond tool for co-pilot/supervised modes
-        if state["config"]["analysis_mode"] != "autonomous":
-            tools.append(types.Tool(
-                name="scilink_respond",
-                description=(
-                    "Send a response to a pending SciLink action that requires "
-                    "human approval. Call this after receiving a 'needs_input' "
-                    "status from another tool."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "response": {
-                            "type": "string",
-                            "description": (
-                                "User's response: 'yes'/'approve' to proceed, "
-                                "'no'/'reject' to cancel, or free-text feedback."
-                            ),
-                        },
+        # Always include scilink_respond so it's available if the user
+        # switches to co-pilot/supervised mode mid-session via
+        # scilink_set_autonomy (MCP clients only call tools/list once).
+        tools.append(types.Tool(
+            name="scilink_respond",
+            description=(
+                "Send a response to a pending SciLink action that requires "
+                "human approval. Only needed in co-pilot or supervised mode. "
+                "Call this after receiving a 'needs_input' status from another tool."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "response": {
+                        "type": "string",
+                        "description": (
+                            "User's response: 'yes'/'approve' to proceed, "
+                            "'no'/'reject' to cancel, or free-text feedback."
+                        ),
                     },
-                    "required": ["response"],
                 },
-            ))
+                "required": ["response"],
+            },
+        ))
+
+        # Background job management tools
+        tools.append(types.Tool(
+            name="scilink_job_status",
+            description=(
+                "Check the status of a background job started with "
+                "background=true. Returns 'running', 'completed', or 'failed'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "The job ID returned by the original tool call.",
+                    },
+                },
+                "required": ["job_id"],
+            },
+        ))
+        tools.append(types.Tool(
+            name="scilink_job_result",
+            description=(
+                "Retrieve the full result of a completed background job. "
+                "Returns an error if the job is still running."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "The job ID returned by the original tool call.",
+                    },
+                },
+                "required": ["job_id"],
+            },
+        ))
 
         # Always add the set_autonomy tool
         tools.append(types.Tool(
@@ -293,6 +357,12 @@ def create_server(
         if name == "scilink_set_autonomy":
             return _handle_set_autonomy(state, arguments)
 
+        # Handle background job status/result
+        if name == "scilink_job_status":
+            return _handle_job_status(state, arguments)
+        if name == "scilink_job_result":
+            return _handle_job_result(state, arguments)
+
         # Look up which orchestrator owns this tool
         if name not in tool_map:
             return [types.TextContent(
@@ -323,6 +393,39 @@ def create_server(
                     "message": prompt,
                     "tool": original_name,
                     "arguments": arguments,
+                }),
+            )]
+
+        # Background execution: if background=true and tool supports it,
+        # submit to thread pool and return job_id immediately.
+        run_in_background = arguments.pop("background", False)
+        if run_in_background and original_name in _BACKGROUND_CAPABLE_TOOLS:
+            state["job_counter"] += 1
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            job_id = f"job_{ts}_{state['job_counter']:03d}"
+
+            future = _executor.submit(
+                _execute_tool_captured, orch.tools, original_name, arguments
+            )
+            state["jobs"][job_id] = {
+                "future": future,
+                "tool": original_name,
+                "started_at": ts,
+                "status": "running",
+                "result": None,
+            }
+
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "status": "started",
+                    "job_id": job_id,
+                    "tool": original_name,
+                    "message": (
+                        f"Analysis running in background (job {job_id}). "
+                        "Use scilink_job_status to check progress, "
+                        "then scilink_job_result to retrieve the result."
+                    ),
                 }),
             )]
 
@@ -518,6 +621,86 @@ def _init_orchestrators(state: dict, config: dict) -> None:
             )
         except Exception as exc:
             logging.warning(f"Planning orchestrator not available: {exc}")
+
+
+# ── Background job handlers ──────────────────────────────────────────────
+
+def _handle_job_status(
+    state: dict, arguments: dict
+) -> List["types.TextContent"]:
+    """Check the status of a background job."""
+    job_id = arguments.get("job_id", "")
+    job = state["jobs"].get(job_id)
+    if job is None:
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "status": "error",
+                "message": f"Unknown job_id: {job_id}",
+            }),
+        )]
+
+    future = job["future"]
+    if future.done():
+        try:
+            result = future.result()
+            job["status"] = "completed"
+            job["result"] = result
+        except Exception as exc:
+            job["status"] = "failed"
+            job["result"] = json.dumps({
+                "status": "error", "message": str(exc),
+            })
+
+    return [types.TextContent(
+        type="text",
+        text=json.dumps({
+            "job_id": job_id,
+            "status": job["status"],
+            "tool": job["tool"],
+            "started_at": job["started_at"],
+        }),
+    )]
+
+
+def _handle_job_result(
+    state: dict, arguments: dict
+) -> List["types.TextContent"]:
+    """Retrieve the result of a completed background job."""
+    job_id = arguments.get("job_id", "")
+    job = state["jobs"].get(job_id)
+    if job is None:
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "status": "error",
+                "message": f"Unknown job_id: {job_id}",
+            }),
+        )]
+
+    future = job["future"]
+    if not future.done():
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "status": "running",
+                "job_id": job_id,
+                "message": "Job is still running. Check again later with scilink_job_status.",
+            }),
+        )]
+
+    # Ensure result is captured
+    if job["result"] is None:
+        try:
+            job["result"] = future.result()
+            job["status"] = "completed"
+        except Exception as exc:
+            job["result"] = json.dumps({
+                "status": "error", "message": str(exc),
+            })
+            job["status"] = "failed"
+
+    return [types.TextContent(type="text", text=job["result"])]
 
 
 # ── Autonomy mode switch ─────────────────────────────────────────────────
