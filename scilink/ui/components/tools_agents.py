@@ -317,7 +317,10 @@ def _render_mcp_section(agent) -> None:
                 key="mcp_addr",
             )
 
-    if st.button("Connect", key="mcp_connect_btn"):
+    col_connect, _ = st.columns([1, 2])
+    with col_connect:
+        connect_clicked = st.button("Connect", key="mcp_connect_btn", type="primary", width="stretch")
+    if connect_clicked:
         if not mcp_name or not mcp_addr:
             st.warning("Provide both a server name and a command/URL.")
         elif mcp_name in mcp_connections:
