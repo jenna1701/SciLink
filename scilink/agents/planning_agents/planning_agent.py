@@ -31,7 +31,8 @@ from .base_agent import BaseAgent
 from .knowledge_base import KnowledgeBase
 
 from ..lit_agents.literature_agent import LiteratureSearchAgent
-from ..lit_agents.optimize_query import optimize_search_query
+from ..lit_agents.molecules_agent import MoleculesAgent
+from ..lit_agents.optimize_query import optimize_search_query, is_molecule_design_objective
 
 from .rag_engine import (
     perform_science_rag, 
@@ -156,14 +157,20 @@ class PlanningAgent(BaseAgent):
         self.generation_config = None
 
         self.lit_agent = None
+        self.mol_agent = None
         if futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY"):
             try:
-                self.lit_agent = LiteratureSearchAgent(futurehouse_api_key, max_wait_time=1000)
+                self.lit_agent = LiteratureSearchAgent(futurehouse_api_key, max_wait_time=3000)
                 logging.info("✅ Literature Search Agent initialized.")
             except Exception as e:
                 logging.warning(f"⚠️ Failed to initialize Literature Agent: {e}")
+            try:
+                self.mol_agent = MoleculesAgent(futurehouse_api_key, max_wait_time=3000)
+                logging.info("✅ Molecules Agent initialized.")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to initialize Molecules Agent: {e}")
         else:
-            logging.info("ℹ️ No FutureHouse API key provided. Literature search will be skipped.")
+            logging.info("ℹ️ No FutureHouse API key provided. Literature search and molecule design will be skipped.")
                     
         # --- Dual KnowledgeBase Initialization ---
         base_path = Path(kb_base_path)
@@ -451,7 +458,30 @@ class PlanningAgent(BaseAgent):
             )
             if lit_res['status'] == 'success':
                 lit_context = lit_res['content']
-        
+                print(f"  - ✅ Literature search completed.")
+            else:
+                print(f"  - ⚠️ Literature search {lit_res['status']}: {lit_res.get('message', '')}")
+
+        # Molecule design (only if objective involves molecular design/synthesis)
+        mol_context = ""
+        if self.mol_agent and is_molecule_design_objective(objective, self.model):
+            print(f"  - 🧪 Querying MOLECULES agent for synthesis/design...")
+            mol_res = self.mol_agent.query(objective)
+            if mol_res['status'] == 'success':
+                mol_context = mol_res['content']
+                print(f"  - ✅ MOLECULES query completed.")
+            else:
+                print(f"  - ⚠️ MOLECULES query {mol_res['status']}: {mol_res.get('message', '')}")
+
+        # Combine external contexts
+        external_context = ""
+        if lit_context:
+            external_context += lit_context
+        if mol_context:
+            if external_context:
+                external_context += "\n\n"
+            external_context += "## Molecular Design & Synthesis Planning\n" + mol_context
+
         # RAG for science plan
         print(f"\n--- Generating Experimental Strategy ---")
         res = perform_science_rag(
@@ -465,11 +495,13 @@ class PlanningAgent(BaseAgent):
             image_paths=all_image_paths,
             image_descriptions=image_descriptions,
             additional_context=ctx_string,
-            external_context=lit_context
+            external_context=external_context
         )
-        
+
         if lit_context:
             res["literature_search"] = lit_context
+        if mol_context:
+            res["molecule_design"] = mol_context
 
         self._log_action(
             action="perform_science_rag",
@@ -477,7 +509,8 @@ class PlanningAgent(BaseAgent):
                 "objective": objective,
                 "knowledge_paths": knowledge_paths,
                 "has_primary_data": primary_data_set is not None,
-                "has_literature": bool(lit_context)
+                "has_literature": bool(lit_context),
+                "has_molecule_design": bool(mol_context)
             },
             result=res,
             rationale=res.get("proposed_experiments", [{}])[0].get("justification") if res.get("proposed_experiments") else None

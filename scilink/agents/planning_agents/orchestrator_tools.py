@@ -399,16 +399,31 @@ class OrchestratorTools:
                 output_path = self.orch.base_dir / "plan.json"
                 with open(output_path, 'w') as f:
                     json.dump(plan, f, indent=2)
-                
+
+                # Save literature and molecule design results as separate files
+                saved_extras = []
+                if plan.get("literature_search"):
+                    lit_path = self.orch.base_dir / "literature_search.md"
+                    with open(lit_path, 'w') as f:
+                        f.write("# Literature Search Results\n\n")
+                        f.write(plan["literature_search"])
+                    saved_extras.append(str(lit_path))
+                if plan.get("molecule_design"):
+                    mol_path = self.orch.base_dir / "molecule_design.md"
+                    with open(mol_path, 'w') as f:
+                        f.write("# Molecular Design & Synthesis Planning Results\n\n")
+                        f.write(plan["molecule_design"])
+                    saved_extras.append(str(mol_path))
+
                 # Generate HTML
                 from .html_generator import HTMLReportGenerator
                 html_path = self.orch.base_dir / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
-                
+
                 num_experiments = len(plan.get('proposed_experiments', []))
-                
-                return json.dumps({
+
+                result = {
                     "status": "success",
                     "iteration": plan.get('iteration'),
                     "num_experiments": num_experiments,
@@ -418,7 +433,10 @@ class OrchestratorTools:
                     "primary_data_used": primary_dataset is not None,
                     "tea_context_included": self.orch.latest_tea_results is not None,
                     "hint": "Use generate_implementation_code() to add executable code"
-                })
+                }
+                if saved_extras:
+                    result["external_results_files"] = saved_extras
+                return json.dumps(result)
                 
             except Exception as e:
                 logging.error(f"Plan generation error: {e}", exc_info=True)
