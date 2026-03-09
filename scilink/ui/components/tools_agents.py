@@ -1,4 +1,4 @@
-"""Tools & Agents tab — upload custom tools and view registered agents/tools."""
+"""Tools tab — upload custom tools, connect MCP servers, and view registered tools."""
 
 import importlib.util
 import inspect
@@ -9,26 +9,29 @@ import streamlit as st
 
 
 def render_tools_agents_tab() -> None:
-    """Render the Tools & Agents tab content."""
+    """Render the Tools tab content."""
     agent = st.session_state.get("agent")
-    app_mode = st.session_state.get("app_mode", "analyze")
 
     if agent is None:
-        st.info("Start a session to view tools and agents.")
+        st.info("Start a session to view tools.")
         return
 
-    tools_col, agents_col = st.columns(2)
+    left_col, _, right_col = st.columns([10, 1, 10])
 
-    with tools_col:
-        _render_tools_section(agent, app_mode)
+    with left_col:
+        _render_upload_section(agent)
+        st.divider()
+        _render_mcp_section(agent)
 
-    with agents_col:
-        _render_agents_section(agent, app_mode)
+    with right_col:
+        _render_custom_tools(agent)
+        st.divider()
+        _render_builtin_tools(agent)
 
 
-def _render_tools_section(agent, app_mode: str) -> None:
-    """Upload custom tool files and list registered tools."""
-    st.subheader("Custom Tools")
+def _render_upload_section(agent) -> None:
+    """Upload custom tool files."""
+    st.subheader("Upload Tools")
     uploaded = st.file_uploader(
         "Upload a custom tool file (.py)",
         type=["py"],
@@ -48,24 +51,21 @@ def _render_tools_section(agent, app_mode: str) -> None:
             _load_tool_file(agent, f)
             st.session_state._processed_uploads.add(upload_key)
 
-    # List registered external tools
+
+def _render_custom_tools(agent) -> None:
+    """Show registered external tools."""
+    st.subheader("Registered External Tools")
     external_tools = getattr(agent, "_external_tools", [])
     if external_tools:
-        st.markdown("**Registered custom tools:**")
         for t in external_tools:
             with st.expander(t["name"], expanded=False):
                 st.markdown(t.get("description", "No description."))
     else:
         st.caption("No custom tools registered yet.")
 
-    st.divider()
 
-    # MCP server connections
-    _render_mcp_section(agent)
-
-    st.divider()
-
-    # List built-in orchestrator tools
+def _render_builtin_tools(agent) -> None:
+    """Show built-in orchestrator tools."""
     st.subheader("Built-in Tools")
     external_names = {
         t["name"] for t in getattr(agent, "_external_tools", [])
@@ -83,84 +83,8 @@ def _render_tools_section(agent, app_mode: str) -> None:
         st.caption("Agent tools not available.")
 
 
-def _render_agents_section(agent, app_mode: str) -> None:
-    """Display registered agents or sub-agents."""
-    if app_mode == "analyze":
-        _render_analysis_agents(agent)
-    elif app_mode == "plan":
-        st.subheader("Available Agents")
-        _render_planning_agents(agent)
-
-
-def _render_analysis_agents(agent) -> None:
-    """Upload custom agent files and show analysis agent registry."""
-    # Custom agent upload
-    st.subheader("Custom Agents")
-    uploaded = st.file_uploader(
-        "Upload a custom agent file (.py)",
-        type=["py"],
-        key="agent_file_uploader",
-        accept_multiple_files=True,
-        help=(
-            "Python file with a class extending BaseAnalysisAgent. "
-            "Must implement analyze()."
-        ),
-    )
-
-    if uploaded:
-        for f in uploaded:
-            upload_key = ("custom_agent", f.name)
-            if upload_key in st.session_state._processed_uploads:
-                continue
-            _load_agent_file(agent, f)
-            st.session_state._processed_uploads.add(upload_key)
-
-    st.divider()
-
-    # List registered agents
-    st.subheader("Registered Agents")
-    registry = getattr(agent, "_agent_registry", {})
-    if not registry:
-        st.caption("No agents registered.")
-        return
-
-    selected_id = getattr(agent, "selected_agent_id", None)
-
-    for agent_id in sorted(registry.keys()):
-        entry = registry[agent_id]
-        name = entry.get("name", f"Agent {agent_id}")
-        desc = entry.get("description", "")
-        short = entry.get("short_name", "")
-        is_selected = agent_id == selected_id
-
-        with st.expander(f"[{agent_id}] {short} — {name}", expanded=is_selected):
-            if is_selected:
-                st.success("Currently active")
-            st.markdown(desc if desc else "No description available.")
-
-
-def _render_planning_agents(agent) -> None:
-    """Show planning sub-agents."""
-    sub_agents = [
-        ("PlanningAgent", "planner",
-         "Hypothesis generation, literature-backed experimental design, and RAG-powered knowledge retrieval."),
-        ("ScalarizerAgent", "scalarizer",
-         "Converts raw experimental results into scalar objective values for optimization."),
-        ("BOAgent", "bo",
-         "Bayesian optimization for iterative experimental parameter tuning."),
-    ]
-
-    for name, attr, desc in sub_agents:
-        instance = getattr(agent, attr, None)
-        status = "Initialized" if instance is not None else "Not initialized"
-        with st.expander(name, expanded=False):
-            st.markdown(desc)
-            st.caption(f"Status: {status}")
-
-
 def _load_tool_file(agent, uploaded_file) -> None:
     """Load a custom tool .py file and register it with the agent."""
-    # Save to session dir
     session_dir = st.session_state.get("session_dir")
     if session_dir is None:
         st.error("No active session.")
@@ -232,60 +156,6 @@ def _load_tool_file(agent, uploaded_file) -> None:
         st.success(f"Registered {count} tool(s) from {uploaded_file.name}")
     except Exception as e:
         st.error(f"Failed to register tools: {e}")
-
-
-def _load_agent_file(agent, uploaded_file) -> None:
-    """Load a custom agent .py file and register it with the orchestrator."""
-    from scilink.agents.exp_agents.base_agent import BaseAnalysisAgent
-
-    # Save to session dir
-    session_dir = st.session_state.get("session_dir")
-    if session_dir is None:
-        st.error("No active session.")
-        return
-
-    agents_dir = Path(session_dir) / "custom_agents"
-    agents_dir.mkdir(parents=True, exist_ok=True)
-    dest = agents_dir / uploaded_file.name
-    dest.write_bytes(uploaded_file.getvalue())
-
-    # Load module (suppress __pycache__ in session directory)
-    try:
-        spec = importlib.util.spec_from_file_location(dest.stem, dest)
-        module = importlib.util.module_from_spec(spec)
-        _prev = sys.dont_write_bytecode
-        sys.dont_write_bytecode = True
-        try:
-            spec.loader.exec_module(module)
-        finally:
-            sys.dont_write_bytecode = _prev
-    except Exception as e:
-        st.error(f"Failed to load {uploaded_file.name}: {e}")
-        return
-
-    # Discover BaseAnalysisAgent subclasses
-    registry = getattr(agent, "_agent_registry", {})
-    found = 0
-    for _, cls in inspect.getmembers(module, inspect.isclass):
-        if (
-            issubclass(cls, BaseAnalysisAgent)
-            and cls is not BaseAnalysisAgent
-            and cls.__module__ == module.__name__
-        ):
-            next_id = max(registry.keys()) + 1 if registry else 4
-            try:
-                agent.register_agent(next_id, cls)
-                name = getattr(cls, "AGENT_NAME", cls.__name__)
-                st.success(f"Registered agent '{name}' as ID {next_id}")
-                found += 1
-            except Exception as e:
-                st.error(f"Failed to register {cls.__name__}: {e}")
-
-    if found == 0:
-        st.warning(
-            f"No BaseAnalysisAgent subclasses found in {uploaded_file.name}. "
-            "The agent class must inherit from BaseAnalysisAgent and implement analyze()."
-        )
 
 
 def _render_mcp_section(agent) -> None:
