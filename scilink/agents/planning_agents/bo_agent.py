@@ -705,12 +705,13 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
     # Main Optimization Loop
     # =====================================================================
 
-    def run_optimization_loop(self, data_path: str, objective_text: str, 
-                             input_cols: List[str], input_bounds: List[List[float]], 
+    def run_optimization_loop(self, data_path: str, objective_text: str,
+                             input_cols: List[str], input_bounds: List[List[float]],
                              target_cols: List[str], output_dir: str = "./bo_artifacts",
                              batch_size: int = 1,
                              experimental_budget: Optional[int] = None,
                              physical_constraints: Optional[str] = None,
+                             strategy_hint: Optional[str] = None,
                              save_acq: bool = True,
                              plot_acq: bool = True) -> Dict[str, Any]:
         """
@@ -747,6 +748,11 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 - "Only 5 catalyst concentrations available: 0.1, 0.5, 1.0, 2.0, 5.0 mM"
                 - "Reactor zones A,B share cooling; C,D share heating. Max 4 temps total."
                 When None, standard unconstrained BO is used (original behavior).
+            strategy_hint: Optional natural language hint from the user to guide
+                strategy selection (kernel, acquisition function, noise prior).
+                Examples: "use RBF kernel", "try UCB with high exploration",
+                "switch to Thompson sampling". Respected unless it conflicts
+                with budget constraints.
             save_acq: If True, saves acquisition function landscape data to .npz file.
                 Supported for single-objective only; ignored for multi-objective.
             plot_acq: If True, generates and saves a plot of the acquisition function.
@@ -802,7 +808,27 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             )
 
         # 2. Configure Strategy (LLM)
-        trend_context = f"Last 5 strategies: {[h.get('config', {}).get('rationale', 'N/A') for h in history[-5:]]}" if history else "No history."
+        if history:
+            trend_parts = []
+            for h in history[-5:]:
+                rationale = h.get("config", {}).get("rationale", "N/A")
+                insp = h.get("inspection", {})
+                insp_status = insp.get("status", "")
+                insp_reason = insp.get("reason", "")
+                insp_adj = insp.get("suggested_adjustments", {})
+                entry = f"Strategy: {rationale}"
+                if insp_status:
+                    entry += f" | Diagnostics: {insp_status}"
+                    if insp_reason:
+                        entry += f" — {insp_reason}"
+                    if insp_adj:
+                        entry += f" | Suggested adjustments: {insp_adj}"
+                trend_parts.append(entry)
+            trend_context = "Last steps:\n" + "\n".join(
+                f"  Step {i+1}: {p}" for i, p in enumerate(trend_parts)
+            )
+        else:
+            trend_context = "No history."
         
         prompt_tmpl = BO_CONFIG_MOO_PROMPT if is_moo else BO_CONFIG_SOO_PROMPT
         prompt_parts = [
@@ -829,6 +855,14 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 f"Focus on selecting the best kernel, noise, and acquisition strategy."
             )
         
+        if strategy_hint:
+            prompt_parts.append(
+                f"\n**User Strategy Hint:**\n{strategy_hint}\n"
+                f"The user has requested specific strategy preferences. "
+                f"Respect this hint when selecting kernel, noise, and acquisition, "
+                f"unless it directly conflicts with budget constraints."
+            )
+
         print(f"  - 🤖 BO Agent: Configuring strategy (Batch={batch_size})...")
         resp = self.model.generate_content(prompt_parts, generation_config=self.generation_config)
         raw_config, parse_error = parse_json_from_response(resp)

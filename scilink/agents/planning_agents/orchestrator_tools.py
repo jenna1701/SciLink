@@ -1938,7 +1938,8 @@ class OrchestratorTools:
             batch_size: int = None,
             physical_constraints: str = None,
             experimental_budget: int = None,
-            targets: list[str] = None
+            targets: list[str] = None,
+            strategy_hint: str = None
         ):
             """
             Runs Bayesian Optimization to suggest next parameters.
@@ -2167,12 +2168,13 @@ class OrchestratorTools:
                     data_path=str(self.orch.bo_data_path),
                     objective_text=self.orch.objective,
                     input_cols=self.orch.expected_input_columns,
-                    input_bounds=input_bounds,                    
+                    input_bounds=input_bounds,
                     target_cols=self.orch.expected_target_columns,
                     output_dir=str(self.orch.base_dir / "bo_artifacts"),
                     batch_size=int(final_batch_size),
                     physical_constraints=physical_constraints,
                     experimental_budget=experimental_budget,
+                    strategy_hint=strategy_hint,
                     plot_acq=True,
                     save_acq=True,
                 )
@@ -2300,6 +2302,16 @@ class OrchestratorTools:
                         "Example: targets=['Peak_Area'] to optimize only peak area when "
                         "the scalarizer extracted multiple metrics. The specified targets "
                         "must exist in the optimization data."
+                    )
+                },
+                "strategy_hint": {
+                    "type": "string",
+                    "description": (
+                        "Optional user preference for BO strategy. Pass when the user "
+                        "requests a specific kernel, acquisition function, or noise prior. "
+                        "Examples: 'use RBF kernel', 'try Thompson sampling', "
+                        "'switch to Matern-1.5', 'use UCB with high exploration'. "
+                        "The hint is respected unless it conflicts with budget constraints."
                     )
                 }
             },
