@@ -119,7 +119,7 @@ result = analyzer.chat("Analyze ./stem_image.tif and generate scientific claims"
 
 ## MCP Integration
 
-SciLink supports the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) as both a **server** (exposing its tools and agents to external clients like Claude Code or Cursor) and a **client** (connecting to external MCP servers for additional capabilities).
+SciLink supports the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) as both a **server** (exposing its tools/agents to external clients like Claude Code) and a **client** (connecting to external MCP servers for additional capabilities).
 
 ### As an MCP Server
 
