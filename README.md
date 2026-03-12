@@ -147,8 +147,6 @@ Connect external MCP servers to extend SciLink with additional tools:
 scilink analyze --mcp stdio:arxiv:python,-m,arxiv_mcp_server,--storage-path,/tmp/papers
 ```
 
-In the **web UI**, go to the **Tools** tab > **MCP Servers** section, select a transport (stdio/SSE), enter the server name and command, and click **Connect**.
-
 Programmatically:
 
 ```python
@@ -158,6 +156,8 @@ tool_count = orchestrator.connect_mcp_server(
     command=["python", "-m", "arxiv_mcp_server", "--storage-path", "/tmp/papers"]
 )
 ```
+
+In the **web UI**, go to the **Tools** tab > **MCP Servers** section, select a transport (stdio/SSE), enter the server name and command, and click **Connect**.
 
 See [docs/mcp_client_integration.md](docs/mcp_client_integration.md) for the full MCP guide.
 
