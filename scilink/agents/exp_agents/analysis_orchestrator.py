@@ -179,16 +179,28 @@ _SYSTEM_PROMPT_BODY_POST = """
 **CUSTOM PREPROCESSING:**
 13. `set_preprocessing_instruction`: Add custom preprocessing to loaded metadata.
    - Use when: user says "divide by baseline", "subtract dark reference", "normalize to peak", etc.
+   - This is for DATA PREPROCESSING ONLY (operations applied to raw data before fitting).
+   - Do NOT use for fitting model choices (e.g., "use Lorentzian", "fit with Fano").
+     Fitting model guidance goes in the `hints` parameter of `run_analysis`.
    - Requires: metadata already loaded
    - Example flow: load_metadata → set_preprocessing_instruction → run_analysis
 
 **KNOWLEDGE SYNTHESIS:**
 14. `synthesize_knowledge`: Distill findings from completed analyses into reusable knowledge.
    - Use when: user wants to learn from reference spectra, derive calibration, build a reference model, etc.
-   - Input: analysis_ids (list), focus (what to extract/learn)
+   - Input: analysis_ids (list), focus (what to extract/learn), synthesis_type (reference/trend/failure/method)
    - The synthesized knowledge is automatically injected into all subsequent run_analysis calls.
 15. `list_knowledge`: Show all active knowledge entries.
 16. `clear_knowledge`: Remove active knowledge (specific ID or all).
+
+**SKILL GRADUATION:**
+17. `graduate_to_skill`: Convert a knowledge entry into a reusable skill (.md file).
+   - Use when: user wants to make synthesized knowledge persistent and structured.
+   - Input: knowledge_id, skill_name, domain
+   - The skill is auto-registered for use in subsequent run_analysis calls.
+18. `update_skill`: Update a graduated skill with new knowledge.
+   - Use when: new knowledge has been synthesized and a linked graduated skill should be updated.
+   - Input: skill_name, knowledge_ids (optional — auto-detects if omitted)
 
 **AGENT SELECTION DECISION TREE:**
 
@@ -428,6 +440,9 @@ class AnalysisOrchestratorAgent:
 
         # Custom skills registered via register_skill() (name → path)
         self._custom_skills: Dict[str, str] = {}
+
+        # Graduated skill sources: skill_name → [source_knowledge_ids]
+        self._graduated_skill_sources: Dict[str, list] = {}
 
         # MCP server connections (keyed by server name)
         self._mcp_connections: Dict[str, Any] = {}
@@ -1015,6 +1030,7 @@ class AnalysisOrchestratorAgent:
             self.selected_agent_id = state.get("selected_agent_id")
             self.analysis_results = state.get("analysis_results", [])
             self.active_knowledge = state.get("active_knowledge", [])
+            self._graduated_skill_sources = state.get("graduated_skill_sources", {})
             self._analysis_run_counter = state.get("analysis_run_counter", 0)
             
             # Restore analysis mode if saved
@@ -1105,6 +1121,7 @@ class AnalysisOrchestratorAgent:
                 "message_count": self.message_count,
                 "analysis_mode": self.analysis_mode.value,
                 "active_knowledge": self.active_knowledge,
+                "graduated_skill_sources": self._graduated_skill_sources,
             }
 
             with open(self.checkpoint_path, 'w') as f:

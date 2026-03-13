@@ -2402,5 +2402,148 @@ You MUST output a valid JSON object with exactly two keys:
 Ensure the final output is ONLY the JSON object and nothing else.
 """
 
+KNOWLEDGE_TREND_INSTRUCTIONS = """You are an expert scientific data analyst. You have been given detailed results from multiple analyses of related datasets. Your task is to identify systematic trends and correlations across these results.
+
+**Focus Area:** {focus}
+
+**Analysis Results:**
+{analysis_texts}
+
+{human_feedback_section}
+
+**Instructions:**
+1. Compare results across all analyses to find systematic trends.
+2. Identify correlations between experimental parameters and outcomes.
+3. Note turning points, thresholds, or transitions in the data.
+4. Quantitative relationships (slopes, ratios, critical values) are highly valued.
+5. Distinguish robust trends from noise or single-sample artifacts.
+
+You MUST output a valid JSON object with exactly two keys:
+
+{{
+    "summary": "A concise paragraph describing the systematic trends discovered across the analyses, focused on {focus}.",
+    "key_findings": [
+        "Finding 1: specific trend or correlation with quantitative detail",
+        "Finding 2: another systematic observation",
+        "..."
+    ]
+}}
+
+Ensure the final output is ONLY the JSON object and nothing else.
+"""
+
+KNOWLEDGE_FAILURE_INSTRUCTIONS = """You are an expert scientific data analyst. You have been given detailed results from analyses, some of which may have failed or produced suboptimal results. Your task is to identify failure patterns and learn from them.
+
+**Focus Area:** {focus}
+
+**Analysis Results:**
+{analysis_texts}
+
+{human_feedback_section}
+
+**Instructions:**
+1. Identify common failure modes across the analyses.
+2. Look for data characteristics that predict failures (noise levels, missing features, artifacts).
+3. Note which analysis approaches or parameter choices led to poor outcomes.
+4. Suggest mitigations or early-warning indicators.
+5. Distinguish systematic issues from one-off failures.
+
+You MUST output a valid JSON object with exactly two keys:
+
+{{
+    "summary": "A concise paragraph describing the failure patterns discovered, focused on {focus}.",
+    "key_findings": [
+        "Finding 1: failure mode with predictive characteristics",
+        "Finding 2: mitigation strategy or early warning sign",
+        "..."
+    ]
+}}
+
+Ensure the final output is ONLY the JSON object and nothing else.
+"""
+
+KNOWLEDGE_METHOD_INSTRUCTIONS = """You are an expert scientific data analyst. You have been given detailed results from analyses that used different methods or parameter settings. Your task is to compare method effectiveness and build selection heuristics.
+
+**Focus Area:** {focus}
+
+**Analysis Results:**
+{analysis_texts}
+
+{human_feedback_section}
+
+**Instructions:**
+1. Compare which methods or parameter choices worked best for different data types.
+2. Identify when each method is most appropriate (data characteristics, sample type, etc.).
+3. Build concrete selection heuristics: "If X, use method Y with parameters Z."
+4. Note parameter ranges that consistently produce good results.
+5. Include quantitative performance comparisons where available.
+
+You MUST output a valid JSON object with exactly two keys:
+
+{{
+    "summary": "A concise paragraph describing method effectiveness comparisons, focused on {focus}.",
+    "key_findings": [
+        "Finding 1: method selection heuristic with conditions",
+        "Finding 2: optimal parameter range for a specific scenario",
+        "..."
+    ]
+}}
+
+Ensure the final output is ONLY the JSON object and nothing else.
+"""
+
+KNOWLEDGE_TO_SKILL_INSTRUCTIONS = """You are an expert scientific data analyst. You need to convert accumulated knowledge into a structured, reusable skill document.
+
+**Skill Name:** {skill_name}
+**Domain:** {domain}
+
+**Source Knowledge:**
+{knowledge_text}
+
+**Source Analysis Details:**
+{analysis_details}
+
+**Instructions:**
+Organize the knowledge into exactly five sections. Each section should contain actionable, specific guidance. Use markdown formatting.
+
+# overview
+Describe what domain/technique this skill covers, what types of data it applies to, and when to use it.
+
+# planning
+List strategy constraints, recommended parameter ranges, and setup considerations. Include any user-specified corrections or preferences.
+
+# analysis
+Describe code patterns, workflows, or processing steps that have proven effective. Include specific parameter values that worked.
+
+# interpretation
+Provide reference values, peak assignments, expected ranges, and how to interpret results. Include quantitative benchmarks from the key findings.
+
+# validation
+Define quality criteria, acceptable tolerance ranges, failure indicators, and sanity checks. Include any corrections from user feedback.
+
+Output ONLY the skill document content in markdown, starting with `# overview`. Do not wrap in code blocks.
+"""
+
+SKILL_UPDATE_INSTRUCTIONS = """You are an expert scientific data analyst. You need to update an existing skill document with new knowledge while preserving what is already correct.
+
+**Skill Name:** {skill_name}
+
+**Existing Skill Content:**
+{existing_skill}
+
+**New Knowledge to Incorporate:**
+{new_knowledge}
+
+**Instructions:**
+1. Review the existing skill content carefully.
+2. Integrate the new findings into the appropriate sections.
+3. Do NOT remove existing content unless the new knowledge explicitly contradicts it.
+4. When there is a conflict, prefer the newer knowledge but note the discrepancy.
+5. Maintain the five-section structure (overview, planning, analysis, interpretation, validation).
+6. Add new quantitative details, parameter ranges, or heuristics from the new knowledge.
+
+Output ONLY the updated skill document content in markdown, starting with `# overview`. Do not wrap in code blocks.
+"""
+
 # Backwards compatibility
 FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS = FITTING_INTERPRETATION_INSTRUCTIONS

@@ -7,6 +7,14 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+# Map synthesis_type to prompt template names
+_SYNTHESIS_PROMPT_MAP = {
+    "reference": "KNOWLEDGE_SYNTHESIS_INSTRUCTIONS",
+    "trend": "KNOWLEDGE_TREND_INSTRUCTIONS",
+    "failure": "KNOWLEDGE_FAILURE_INSTRUCTIONS",
+    "method": "KNOWLEDGE_METHOD_INSTRUCTIONS",
+}
+
 
 def synthesize_knowledge(
     analysis_results: List[Dict[str, Any]],
@@ -16,6 +24,7 @@ def synthesize_knowledge(
     model_name: str = "gemini-3.1-pro-preview",
     api_key: Optional[str] = None,
     knowledge_id: Optional[str] = None,
+    synthesis_type: str = "reference",
 ) -> Dict[str, Any]:
     """Distill findings from completed analyses into reusable prior knowledge.
 
@@ -37,6 +46,11 @@ def synthesize_knowledge(
         api_key: API key used when *model* is *None*.
         knowledge_id: Optional identifier for the entry.  Defaults to
             ``"knowledge_001"``.
+        synthesis_type: Type of synthesis to perform. One of:
+            ``"reference"`` (default) — calibration/reference extraction,
+            ``"trend"`` — cross-sample trend detection,
+            ``"failure"`` — failure pattern learning,
+            ``"method"`` — method selection heuristics.
 
     Returns:
         A knowledge entry dict::
@@ -44,13 +58,15 @@ def synthesize_knowledge(
             {
                 "id": "knowledge_001",
                 "focus": "...",
+                "synthesis_type": "reference",
                 "summary": "...",
                 "key_findings": ["...", ...],
                 "timestamp": "..."
             }
 
     Raises:
-        ValueError: If no ``detailed_analysis`` text is found in any result.
+        ValueError: If no ``detailed_analysis`` text is found in any result,
+            or if *synthesis_type* is not recognized.
         RuntimeError: If the LLM call fails or returns unparseable output.
 
     Example::
@@ -69,26 +85,89 @@ def synthesize_knowledge(
             prior_knowledge=[knowledge],
         )
     """
+    if synthesis_type not in _SYNTHESIS_PROMPT_MAP:
+        raise ValueError(
+            f"Unknown synthesis_type '{synthesis_type}'. "
+            f"Must be one of: {list(_SYNTHESIS_PROMPT_MAP.keys())}"
+        )
+
     # ── Collect detailed_analysis texts ──────────────────────────────────
     analysis_texts: list[str] = []
+    human_feedback_texts: list[str] = []
     for i, result in enumerate(analysis_results):
+        label = result.get("analysis_id", f"analysis_{i}")
+
         text = result.get("detailed_analysis", "")
         if text:
-            label = result.get("analysis_id", f"analysis_{i}")
             analysis_texts.append(f"### Analysis: {label}\n{text}")
+
+        # Collect fitting parameters if present
+        fitting_params = result.get("fitting_parameters")
+        if fitting_params:
+            params_str = json.dumps(fitting_params, indent=2, default=str)
+            analysis_texts.append(
+                f"### Fitting Parameters ({label}):\n```json\n{params_str}\n```"
+            )
+
+        # Collect status for failure-pattern learning
+        status = result.get("status")
+        if status:
+            analysis_texts.append(f"### Status ({label}): {status}")
+
+        # Collect human feedback
+        hf = result.get("human_feedback", {})
+        if isinstance(hf, dict):
+            user_fb = hf.get("user_feedback", "")
+            if user_fb:
+                human_feedback_texts.append(
+                    f"### User Feedback ({label}):\n{user_fb}"
+                )
 
     if not analysis_texts:
         raise ValueError(
             "No detailed_analysis text found in the provided results."
         )
 
-    # ── Build LLM prompt ─────────────────────────────────────────────────
-    from scilink.agents.exp_agents.instruct import KNOWLEDGE_SYNTHESIS_INSTRUCTIONS
+    # ── Build human feedback section ──────────────────────────────────────
+    if human_feedback_texts:
+        human_feedback_section = (
+            "**Human Feedback / Domain Corrections:**\n"
+            + "\n\n".join(human_feedback_texts)
+            + "\n\nIncorporate these corrections and domain expertise into your findings."
+        )
+    else:
+        human_feedback_section = ""
 
-    prompt_text = KNOWLEDGE_SYNTHESIS_INSTRUCTIONS.format(
-        focus=focus,
-        analysis_texts="\n\n".join(analysis_texts),
+    # ── Build LLM prompt ─────────────────────────────────────────────────
+    from scilink.agents.exp_agents.instruct import (
+        KNOWLEDGE_SYNTHESIS_INSTRUCTIONS,
+        KNOWLEDGE_TREND_INSTRUCTIONS,
+        KNOWLEDGE_FAILURE_INSTRUCTIONS,
+        KNOWLEDGE_METHOD_INSTRUCTIONS,
     )
+
+    prompt_map = {
+        "reference": KNOWLEDGE_SYNTHESIS_INSTRUCTIONS,
+        "trend": KNOWLEDGE_TREND_INSTRUCTIONS,
+        "failure": KNOWLEDGE_FAILURE_INSTRUCTIONS,
+        "method": KNOWLEDGE_METHOD_INSTRUCTIONS,
+    }
+
+    template = prompt_map[synthesis_type]
+
+    format_kwargs = {
+        "focus": focus,
+        "analysis_texts": "\n\n".join(analysis_texts),
+    }
+    # The reference template doesn't have a human_feedback_section placeholder
+    if synthesis_type != "reference":
+        format_kwargs["human_feedback_section"] = human_feedback_section
+    else:
+        # For reference type, append human feedback to analysis texts if present
+        if human_feedback_section:
+            format_kwargs["analysis_texts"] += "\n\n" + human_feedback_section
+
+    prompt_text = template.format(**format_kwargs)
 
     # ── Resolve model ────────────────────────────────────────────────────
     if model is None:
@@ -117,6 +196,7 @@ def synthesize_knowledge(
     return {
         "id": knowledge_id or "knowledge_001",
         "focus": focus,
+        "synthesis_type": synthesis_type,
         "summary": llm_output.get("summary", ""),
         "key_findings": llm_output.get("key_findings", []),
         "timestamp": datetime.now().isoformat(),
