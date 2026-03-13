@@ -2157,6 +2157,7 @@ class AnalysisOrchestratorTools:
                     "message_count": self.orch.message_count,
                     "analysis_mode": self.orch.analysis_mode.value,
                     "active_knowledge": self.orch.active_knowledge,
+                    "graduated_skill_sources": self.orch._graduated_skill_sources,
                 }
 
                 with open(self.orch.checkpoint_path, 'w') as f:
@@ -2665,9 +2666,11 @@ class AnalysisOrchestratorTools:
             func=set_preprocessing_instruction,
             name="set_preprocessing_instruction",
             description=(
-                "Add or update a custom preprocessing instruction in the currently loaded metadata. "
-                "Use when the user wants custom preprocessing (e.g., baseline division, "
-                "background subtraction, normalization) on top of existing metadata. "
+                "Add or update a custom DATA PREPROCESSING instruction in the currently loaded metadata. "
+                "Use ONLY for raw data transformations BEFORE fitting: baseline division/subtraction, "
+                "background correction, normalization, dark reference subtraction, smoothing, etc. "
+                "Do NOT use for fitting model choices (e.g., 'use Lorentzian', 'fit with Fano', "
+                "'fit the peak with a Voigt') — those go in the `hints` parameter of `run_analysis`. "
                 "If metadata already has a preprocessing instruction, returns a conflict "
                 "for you to resolve with the user. When appending, an LLM check detects "
                 "redundant instructions to prevent double-processing. "
@@ -2700,7 +2703,7 @@ class AnalysisOrchestratorTools:
         # =====================================================================
         # 13. SYNTHESIZE KNOWLEDGE
         # =====================================================================
-        def synthesize_knowledge(analysis_ids: list, focus: str) -> str:
+        def synthesize_knowledge(analysis_ids: list, focus: str, synthesis_type: str = "reference") -> str:
             """
             Distill findings from completed analyses into reusable knowledge.
             The synthesized knowledge is automatically injected into all
@@ -2708,7 +2711,7 @@ class AnalysisOrchestratorTools:
             """
             from scilink.knowledge import synthesize_knowledge as _synthesize
 
-            print(f"  ⚡ Tool: Synthesizing knowledge from {len(analysis_ids)} analyses...")
+            print(f"  ⚡ Tool: Synthesizing knowledge ({synthesis_type}) from {len(analysis_ids)} analyses...")
 
             # Collect result dicts by analysis ID
             results = []
@@ -2738,6 +2741,7 @@ class AnalysisOrchestratorTools:
                     results, focus,
                     model=self.orch.model,
                     knowledge_id=f"knowledge_{counter:03d}",
+                    synthesis_type=synthesis_type,
                 )
             except (ValueError, RuntimeError) as e:
                 return json.dumps({"status": "error", "message": str(e)})
@@ -2752,15 +2756,35 @@ class AnalysisOrchestratorTools:
             with open(knowledge_file, 'w') as f:
                 json.dump(entry, f, indent=2)
 
-            return json.dumps({
+            response = {
                 "status": "success",
                 "knowledge_id": entry["id"],
                 "focus": focus,
+                "synthesis_type": synthesis_type,
                 "summary": entry["summary"],
                 "key_findings": entry["key_findings"],
                 "saved_to": str(knowledge_file),
                 "note": "This knowledge will be automatically injected into all subsequent run_analysis calls."
-            })
+            }
+
+            # Check if any graduated skill is linked to knowledge with same focus
+            for skill_name, source_ids in self.orch._graduated_skill_sources.items():
+                for kid in source_ids:
+                    for k in self.orch.active_knowledge:
+                        if k.get("id") == kid and k.get("focus", "").lower() == focus.lower():
+                            response["skill_update_suggested"] = skill_name
+                            response["skill_update_note"] = (
+                                f"Graduated skill '{skill_name}' is linked to knowledge "
+                                f"with the same focus area. Consider calling update_skill "
+                                f"to incorporate the new findings."
+                            )
+                            break
+                    if "skill_update_suggested" in response:
+                        break
+                if "skill_update_suggested" in response:
+                    break
+
+            return json.dumps(response)
 
         self._register_tool(
             func=synthesize_knowledge,
@@ -2768,7 +2792,8 @@ class AnalysisOrchestratorTools:
             description=(
                 "Distill findings from completed analyses into reusable knowledge. "
                 "Use when the user wants to learn from reference spectra, derive calibration, "
-                "build a reference model, etc. The synthesized knowledge is automatically "
+                "build a reference model, detect trends, learn from failures, or compare methods. "
+                "The synthesized knowledge is automatically "
                 "injected into all subsequent run_analysis calls as prior knowledge context."
             ),
             parameters={
@@ -2780,6 +2805,16 @@ class AnalysisOrchestratorTools:
                 "focus": {
                     "type": "string",
                     "description": "What to extract/learn (e.g., 'peak assignments for Ti 2p XPS', 'baseline behavior in DSC curves')"
+                },
+                "synthesis_type": {
+                    "type": "string",
+                    "enum": ["reference", "trend", "failure", "method"],
+                    "description": (
+                        "Type of synthesis: 'reference' (calibration/reference extraction, default), "
+                        "'trend' (cross-sample trend detection), "
+                        "'failure' (failure pattern learning), "
+                        "'method' (method selection heuristics)"
+                    )
                 }
             },
             required=["analysis_ids", "focus"]
@@ -2879,7 +2914,252 @@ class AnalysisOrchestratorTools:
         )
 
         # =====================================================================
-        # 16. SAVE FILE
+        # 16. GRADUATE TO SKILL
+        # =====================================================================
+        def graduate_to_skill(knowledge_id: str, skill_name: str, domain: str = "curve_fitting") -> str:
+            """
+            Convert a knowledge entry into a reusable skill (.md file).
+            The skill is automatically registered for use in subsequent analyses.
+            """
+            from scilink.agents.exp_agents.instruct import KNOWLEDGE_TO_SKILL_INSTRUCTIONS
+
+            print(f"  ⚡ Tool: Graduating knowledge '{knowledge_id}' to skill '{skill_name}'...")
+
+            # Find the knowledge entry
+            knowledge_entry = None
+            for entry in self.orch.active_knowledge:
+                if entry.get("id") == knowledge_id:
+                    knowledge_entry = entry
+                    break
+
+            if knowledge_entry is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Knowledge ID not found: {knowledge_id}"
+                })
+
+            # Build knowledge text
+            knowledge_text = f"**Focus:** {knowledge_entry.get('focus', '')}\n"
+            knowledge_text += f"**Summary:** {knowledge_entry.get('summary', '')}\n"
+            knowledge_text += "**Key Findings:**\n"
+            for finding in knowledge_entry.get("key_findings", []):
+                knowledge_text += f"- {finding}\n"
+
+            # Collect source analysis details
+            analysis_details_parts = []
+            source_ids = knowledge_entry.get("source_analyses", [])
+            for aid in source_ids:
+                for record in self.orch.analysis_results:
+                    if record.get("analysis_id") == aid:
+                        full_result = record.get("full_result", {})
+                        parts = [f"### Analysis: {aid}"]
+
+                        da = full_result.get("detailed_analysis", "")
+                        if da:
+                            parts.append(da[:2000])  # Truncate for prompt size
+
+                        fp = full_result.get("fitting_parameters")
+                        if fp:
+                            parts.append(f"Fitting parameters: {json.dumps(fp, indent=2, default=str)}")
+
+                        hf = full_result.get("human_feedback", {})
+                        if isinstance(hf, dict) and hf.get("user_feedback"):
+                            parts.append(f"User feedback: {hf['user_feedback']}")
+
+                        analysis_details_parts.append("\n".join(parts))
+                        break
+
+            analysis_details = "\n\n".join(analysis_details_parts) if analysis_details_parts else "No source analysis details available."
+
+            # Call LLM to generate skill content
+            prompt = KNOWLEDGE_TO_SKILL_INSTRUCTIONS.format(
+                skill_name=skill_name,
+                domain=domain,
+                knowledge_text=knowledge_text,
+                analysis_details=analysis_details,
+            )
+
+            try:
+                response = self.orch.model.generate_content(
+                    contents=[prompt],
+                    generation_config=None,
+                    safety_settings=None,
+                )
+                skill_content = response.text if hasattr(response, "text") else str(response)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": f"LLM call failed: {e}"})
+
+            # Save skill file
+            skill_dir = self.orch.base_dir / "graduated_skills"
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            skill_path = skill_dir / f"{skill_name}.md"
+            skill_path.write_text(skill_content)
+
+            # Register the skill
+            self.orch.register_skill(str(skill_path))
+
+            # Track the link
+            self.orch._graduated_skill_sources[skill_name] = [knowledge_id]
+
+            return json.dumps({
+                "status": "success",
+                "skill_name": skill_name,
+                "skill_path": str(skill_path),
+                "source_knowledge_id": knowledge_id,
+                "note": f"Skill '{skill_name}' has been registered and will be available in run_analysis."
+            })
+
+        self._register_tool(
+            func=graduate_to_skill,
+            name="graduate_to_skill",
+            description=(
+                "Convert a knowledge entry into a reusable skill (.md file). "
+                "The skill is organized into 5 sections (overview, planning, analysis, "
+                "interpretation, validation) and automatically registered for use in "
+                "subsequent analyses."
+            ),
+            parameters={
+                "knowledge_id": {
+                    "type": "string",
+                    "description": "ID of the knowledge entry to graduate"
+                },
+                "skill_name": {
+                    "type": "string",
+                    "description": "Name for the new skill (used as filename and reference)"
+                },
+                "domain": {
+                    "type": "string",
+                    "description": "Domain/technique area (e.g., 'curve_fitting', 'xps', 'raman'). Default: 'curve_fitting'"
+                }
+            },
+            required=["knowledge_id", "skill_name"]
+        )
+
+        # =====================================================================
+        # 17. UPDATE SKILL
+        # =====================================================================
+        def update_skill(skill_name: str, knowledge_ids: list = None) -> str:
+            """
+            Update a graduated skill with new knowledge entries.
+            Preserves the old version as {name}.prev.md.
+            """
+            from scilink.agents.exp_agents.instruct import SKILL_UPDATE_INSTRUCTIONS
+
+            print(f"  ⚡ Tool: Updating skill '{skill_name}'...")
+
+            # Find the existing skill file
+            skill_dir = self.orch.base_dir / "graduated_skills"
+            skill_path = skill_dir / f"{skill_name}.md"
+            if not skill_path.exists():
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Graduated skill not found: {skill_name}"
+                })
+
+            existing_skill = skill_path.read_text()
+
+            # Determine source knowledge IDs
+            tracked_ids = self.orch._graduated_skill_sources.get(skill_name, [])
+            if knowledge_ids:
+                new_ids = knowledge_ids
+            else:
+                # Use all knowledge entries with matching focus
+                focus_areas = set()
+                for kid in tracked_ids:
+                    for k in self.orch.active_knowledge:
+                        if k.get("id") == kid:
+                            focus_areas.add(k.get("focus", "").lower())
+                new_ids = [
+                    k["id"] for k in self.orch.active_knowledge
+                    if k["id"] not in tracked_ids and k.get("focus", "").lower() in focus_areas
+                ]
+
+            if not new_ids:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No new knowledge entries found to update the skill with."
+                })
+
+            # Collect new knowledge texts
+            new_knowledge_parts = []
+            for kid in new_ids:
+                for k in self.orch.active_knowledge:
+                    if k.get("id") == kid:
+                        part = f"### {kid}\n**Focus:** {k.get('focus', '')}\n"
+                        part += f"**Summary:** {k.get('summary', '')}\n"
+                        part += "**Key Findings:**\n"
+                        for f in k.get("key_findings", []):
+                            part += f"- {f}\n"
+                        new_knowledge_parts.append(part)
+                        break
+
+            new_knowledge = "\n\n".join(new_knowledge_parts)
+
+            # Call LLM to produce updated skill
+            prompt = SKILL_UPDATE_INSTRUCTIONS.format(
+                skill_name=skill_name,
+                existing_skill=existing_skill,
+                new_knowledge=new_knowledge,
+            )
+
+            try:
+                response = self.orch.model.generate_content(
+                    contents=[prompt],
+                    generation_config=None,
+                    safety_settings=None,
+                )
+                updated_content = response.text if hasattr(response, "text") else str(response)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": f"LLM call failed: {e}"})
+
+            # Save previous version
+            prev_path = skill_dir / f"{skill_name}.prev.md"
+            prev_path.write_text(existing_skill)
+
+            # Write updated skill
+            skill_path.write_text(updated_content)
+
+            # Update source tracking
+            all_ids = list(set(tracked_ids + new_ids))
+            self.orch._graduated_skill_sources[skill_name] = all_ids
+
+            # Re-register the skill
+            self.orch.register_skill(str(skill_path))
+
+            return json.dumps({
+                "status": "success",
+                "skill_name": skill_name,
+                "skill_path": str(skill_path),
+                "previous_version": str(prev_path),
+                "new_knowledge_ids": new_ids,
+                "total_source_ids": all_ids,
+                "note": f"Skill '{skill_name}' has been updated. Previous version saved as {prev_path.name}."
+            })
+
+        self._register_tool(
+            func=update_skill,
+            name="update_skill",
+            description=(
+                "Update a graduated skill with new knowledge entries. "
+                "Use when new knowledge has been synthesized and a linked skill "
+                "should incorporate the new findings. The old version is preserved."
+            ),
+            parameters={
+                "skill_name": {
+                    "type": "string",
+                    "description": "Name of the graduated skill to update"
+                },
+                "knowledge_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Specific knowledge IDs to incorporate (omit to auto-detect from matching focus area)"
+                }
+            },
+            required=["skill_name"]
+        )
+
+        # =====================================================================
+        # 18. SAVE FILE
         # =====================================================================
         def save_file(filename: str, content: str, subfolder: str = "") -> str:
             """
