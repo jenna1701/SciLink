@@ -409,11 +409,30 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         self.logger.info("Loading processed data and mask from script output...")
         processed_data = np.load(processed_data_path)
         mask_2d = np.load(mask_path)
-        
+
+        # Validate shapes before allowing data to propagate downstream
+        if processed_data.shape != hspy_data.shape:
+            raise RuntimeError(
+                f"Custom script output shape {processed_data.shape} does not "
+                f"match expected input shape {hspy_data.shape}"
+            )
+        expected_mask_shape = hspy_data.shape[:2]
+        if mask_2d.shape != expected_mask_shape:
+            raise RuntimeError(
+                f"Custom script mask shape {mask_2d.shape} does not "
+                f"match expected spatial shape {expected_mask_shape}"
+            )
+        if mask_2d.dtype != bool:
+            self.logger.warning(
+                f"Custom script mask has dtype {mask_2d.dtype}, expected bool. "
+                f"Casting via > 0."
+            )
+            mask_2d = mask_2d > 0
+
         os.remove(input_data_path)
         os.remove(processed_data_path)
         os.remove(mask_path)
-        
+
         return processed_data, mask_2d, script_save_path
     
 
@@ -782,6 +801,18 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                 raise RuntimeError(f"1D script finished but did not create 'processed_data.npy'")
             processed_data = np.load(processed_data_path)
 
+            # Shape validation
+            if processed_data.ndim != 2 or processed_data.shape[1] != 2:
+                raise RuntimeError(
+                    f"Custom script output shape {processed_data.shape} is not "
+                    f"a valid (N, 2) curve"
+                )
+            if processed_data.shape[0] != curve_data.shape[0]:
+                raise RuntimeError(
+                    f"Custom script output has {processed_data.shape[0]} points, "
+                    f"expected {curve_data.shape[0]} to match input"
+                )
+
             # 3. Validation step (LLM quality check)
             self.logger.info("🤖 Validating custom preprocessing script output...")
             raw_plot_bytes = self._plot_curve_to_bytes(curve_data, "1. Raw Data (Before)")
@@ -869,6 +900,19 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                 )
 
             processed_data = np.load(processed_data_path)
+
+            # Shape validation — no LLM quality check on replay path
+            if processed_data.ndim != 2 or processed_data.shape[1] != 2:
+                raise RuntimeError(
+                    f"Locked script output shape {processed_data.shape} is not "
+                    f"a valid (N, 2) curve"
+                )
+            if processed_data.shape[0] != curve_data.shape[0]:
+                raise RuntimeError(
+                    f"Locked script output has {processed_data.shape[0]} points, "
+                    f"expected {curve_data.shape[0]} to match input"
+                )
+
             return processed_data
 
         finally:
