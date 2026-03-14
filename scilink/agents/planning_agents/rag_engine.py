@@ -119,8 +119,8 @@ def verify_plan_relevance(objective: str,
         return True, ""
 
 
-def perform_science_rag(objective: str, 
-                        instructions: str, 
+def perform_science_rag(objective: str,
+                        instructions: str,
                         task_name: str,
                         kb_docs: Any,  # Pass the KB object here
                         model: Any,    # Pass the LLM object here
@@ -129,7 +129,8 @@ def perform_science_rag(objective: str,
                         image_paths: Optional[List[str]] = None,
                         image_descriptions: Optional[List[str]] = None,
                         additional_context: Optional[str] = None,
-                        external_context: Optional[str] = None) -> Dict[str, Any]:
+                        external_context: Optional[str] = None,
+                        skill_context: Optional[str] = None) -> Dict[str, Any]:
     """
     Executes the Scientific/TEA RAG loop using the Docs KnowledgeBase.
     Includes logic for handling Primary Data (Excel) and Fallback generation.
@@ -206,6 +207,9 @@ def perform_science_rag(objective: str,
         
     prompt_parts.append(f"\n## Retrieved Context:\n{retrieved_context_str}")
 
+    if skill_context:
+        prompt_parts.append(skill_context)
+
     # --- 4. Generation & Fallback Logic ---
     print(f"--- Generating {task_name} ---")
     try:
@@ -263,7 +267,8 @@ def perform_code_rag(
     kb_code: Any,
     model: Any,
     generation_config: Any,
-    previous_implementations: Optional[List[Dict[str, Any]]] = None
+    previous_implementations: Optional[List[Dict[str, Any]]] = None,
+    skill_context: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Retrieves API syntax from the Code KB and generates implementation scripts.
@@ -363,6 +368,10 @@ Write a complete Python script from scratch using the API Reference below.
 
 """
 
+        # Add skill context if available
+        if skill_context:
+            prompt += f"\n{skill_context}\n"
+
         # Add API context
         prompt += f"""
 **REPOSITORY STRUCTURES (for correct import paths):**
@@ -418,13 +427,14 @@ Respond with a JSON object:
     return result
 
 
-def refine_plan_with_feedback(original_result: Dict[str, Any], 
-                              feedback: str, 
+def refine_plan_with_feedback(original_result: Dict[str, Any],
+                              feedback: str,
                               objective: str,
                               model: Any,
                               generation_config: Any,
                               new_context: Optional[str] = None,
-                              result_images: Optional[List[Any]] = None
+                              result_images: Optional[List[Any]] = None,
+                              skill_context: Optional[str] = None
                               ) -> Dict[str, Any]:
     """
     Refines the experimental plan based on user input or experimental results.
@@ -466,7 +476,10 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
     """
 
     prompt_parts = [refinement_prompt]
-    
+
+    if skill_context:
+        prompt_parts.append(skill_context)
+
     if result_images:
         print(f"    + 📎 Attaching {len(result_images)} images to refinement prompt.")
         prompt_parts.extend(result_images)

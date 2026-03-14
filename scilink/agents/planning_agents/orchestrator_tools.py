@@ -325,15 +325,16 @@ class OrchestratorTools:
         
         # 1. GENERATE INITIAL PLAN
         def generate_initial_plan(
-            specific_objective: str = None, 
-            knowledge_paths: str = None, 
+            specific_objective: str = None,
+            knowledge_paths: str = None,
             primary_data_set: str = None,
-            additional_context: str = None
+            additional_context: str = None,
+            skill: str = None
         ):
             """
             Generates experimental plan (science strategy only, no code).
-            
-            Note: code_paths parameter is deprecated. Use generate_implementation_code() 
+
+            Note: code_paths parameter is deprecated. Use generate_implementation_code()
             as a separate step to add code after plan approval.
             """
             obj = specific_objective if specific_objective else self.orch.objective
@@ -414,6 +415,9 @@ class OrchestratorTools:
             if context_parts:
                 context_dict = {"user_context": "\n\n".join(context_parts)}
             
+            # Resolve skill: use provided value or fall back to orchestrator's active skill
+            effective_skill = skill or getattr(self.orch, '_active_skill', None)
+
             try:
                 # Call the new generate_plan method (not propose_experiments!)
                 plan = self.orch.planner.generate_plan(
@@ -422,8 +426,13 @@ class OrchestratorTools:
                     primary_data_set=primary_dataset,
                     additional_context=context_dict,
                     enable_human_feedback=self._get_human_feedback_enabled(),
-                    reset_state=False
+                    reset_state=False,
+                    skill=effective_skill
                 )
+
+                # Store skill on orchestrator for downstream tools
+                if effective_skill:
+                    self.orch._active_skill = effective_skill
                 
                 if plan.get("error"):
                     return json.dumps({
@@ -494,7 +503,8 @@ class OrchestratorTools:
                 "specific_objective": {"type": "string", "description": "Research objective"},
                 "knowledge_paths": {"type": "string", "description": "Comma-separated paths to papers/reports/docs folders"},
                 "primary_data_set": {"type": "string", "description": "Path to experimental data file or folder"},
-                "additional_context": {"type": "string", "description": "Lab constraints, equipment, reagents, budget, etc."}
+                "additional_context": {"type": "string", "description": "Lab constraints, equipment, reagents, budget, etc."},
+                "skill": {"type": "string", "description": "Domain skill name or path to custom .md skill file"}
             },
             required=[]
         )

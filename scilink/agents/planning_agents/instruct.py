@@ -37,6 +37,8 @@ You MUST respond with a single JSON object containing a key "proposed_experiment
 - "expected_outcome": (String) A description of what results would support or refute the hypothesis.
 - "justification": (String) A brief explanation of why this experiment is a logical step, citing information from the retrieved context.
 - "source_documents": (List of Strings) A list of the unique source filenames that informed this experimental plan.
+
+**Domain Skill Rules (when provided):** If a "MANDATORY Domain Skill Rules" section appears below, its rules are MANDATORY constraints on your experimental plan. These rules encode validated domain expertise and override general-purpose defaults. Follow them exactly.
 """
 
 TEA_INSTRUCTIONS = """
@@ -70,6 +72,8 @@ You MUST respond with a single JSON object containing a key "technoeconomic_asse
 - "comparison_to_alternatives": (String) A brief comparison to alternative technologies/materials *if explicitly discussed in the context* in economic terms. (e.g., "Context mentions silicon carbide offers higher efficiency than silicon but at a higher projected cost.", "No direct economic comparison to alternatives found in context.").
 - "data_gaps_for_quantitative_analysis": (List of Strings) Specific types of economic data clearly missing *from the provided context* that would be needed for a more rigorous quantitative TEA. (e.g., "Specific cost per kg of precursor materials", "Detailed breakdown of capital expenditure for manufacturing setup", "Energy consumption per unit produced").
 - "source_documents": (List of Strings) A list of the unique source filenames that informed this assessment.
+
+**Domain Skill Rules (when provided):** If a "MANDATORY Domain Skill Rules" section appears below, its rules are MANDATORY constraints on your assessment. These rules encode validated domain expertise and override general-purpose defaults. Follow them exactly.
 """
 
 
@@ -106,6 +110,8 @@ You MUST respond with a single JSON object containing a key "proposed_experiment
 - "expected_outcome": (String) A description of what results would support the hypothesis.
 - "justification": (String) **MUST be 'Warning: This proposal is based on general scientific knowledge as the provided documents lacked specific context.'** If external literature was used, append: ' External literature search results were incorporated.'
 - "source_documents": (List of Strings) If external literature was used, list relevant sources here. Otherwise, an empty list `[]`.
+
+**Domain Skill Rules (when provided):** If a "MANDATORY Domain Skill Rules" section appears below, its rules are MANDATORY constraints on your experimental plan. These rules encode validated domain expertise and override general-purpose defaults. Follow them exactly.
 """
 
 
@@ -134,6 +140,8 @@ You MUST include the following fields, populated based on general knowledge:
 - "comparison_to_alternatives": (String) Comparison to standard industry benchmarks.
 - "data_gaps_for_quantitative_analysis": (List of Strings) What specific data would you need for a real TEA?
 - "source_documents": (List of Strings) If external literature was used, list relevant sources here. Otherwise, an empty list `[]`.
+
+**Domain Skill Rules (when provided):** If a "MANDATORY Domain Skill Rules" section appears below, its rules are MANDATORY constraints on your assessment. These rules encode validated domain expertise and override general-purpose defaults. Follow them exactly.
 """
 
 BO_OBJECTIVE_DISTILL_PROMPT = """
