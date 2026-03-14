@@ -296,7 +296,7 @@ class ScriptExecutor:
 
         temp_script_file = None
         try:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir=os.getcwd()) as tf:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir=os.getcwd(), encoding='utf-8') as tf:
                 tf.write(script_content)
                 temp_script_file = tf.name
 
