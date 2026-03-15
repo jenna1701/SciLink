@@ -2793,16 +2793,22 @@ class OrchestratorTools:
 
             print(f"  ⚡ Tool: Synthesizing knowledge ({synthesis_type}) from {len(plan_ids)} plan iterations...")
 
-            plan_history = self.orch.planner.state.get("plan_history", []) if self.orch.planner.state else []
+            planner_state = self.orch.planner.state if self.orch.planner.state else {}
+            plan_history = planner_state.get("plan_history", [])
+            feedback_history = planner_state.get("human_feedback_history", [])
             results = []
             missing_ids = []
 
             for pid in plan_ids:
                 found = False
-                for plan in plan_history:
-                    if str(plan.get("iteration")) == str(pid):
-                        # Build synthetic detailed_analysis from plan experiments
-                        parts = []
+                # Collect ALL plan_history entries for this iteration (draft, refined, constraint-adjusted)
+                matching_plans = [p for p in plan_history if str(p.get("iteration")) == str(pid)]
+
+                if matching_plans:
+                    parts = []
+                    for plan in matching_plans:
+                        stage = plan.get("stage", "Unknown")
+                        parts.append(f"--- Stage: {stage} ---")
                         for exp in plan.get("proposed_experiments", []):
                             parts.append(f"Experiment: {exp.get('experiment_name', '')}")
                             parts.append(f"Hypothesis: {exp.get('hypothesis', '')}")
@@ -2811,14 +2817,27 @@ class OrchestratorTools:
                                 parts.append(f"Steps: {'; '.join(steps)}")
                             parts.append(f"Justification: {exp.get('justification', '')}")
                             parts.append(f"Expected outcome: {exp.get('expected_outcome', '')}")
-                        result_dict = {
-                            "detailed_analysis": "\n".join(parts),
-                            "analysis_id": f"plan_iter_{pid}",
-                            "status": plan.get("stage", "")
+
+                    # Collect human feedback entries relevant to this iteration
+                    user_feedback_parts = []
+                    for fb in feedback_history:
+                        feedback_text = fb.get("feedback", "")
+                        phase = fb.get("phase", "")
+                        if feedback_text:
+                            user_feedback_parts.append(f"[{phase}] {feedback_text}")
+
+                    result_dict = {
+                        "detailed_analysis": "\n".join(parts),
+                        "analysis_id": f"plan_iter_{pid}",
+                        "status": matching_plans[-1].get("stage", ""),
+                    }
+                    if user_feedback_parts:
+                        result_dict["human_feedback"] = {
+                            "user_feedback": "\n".join(user_feedback_parts)
                         }
-                        results.append(result_dict)
-                        found = True
-                        break
+                    results.append(result_dict)
+                    found = True
+
                 if not found:
                     missing_ids.append(pid)
 
