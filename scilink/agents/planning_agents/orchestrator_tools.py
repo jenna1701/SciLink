@@ -2648,13 +2648,28 @@ class OrchestratorTools:
                 
                 print(f"    💾 Checkpoint saved: {checkpoint_path}")
                 
-                return json.dumps({
+                result = {
                     "status": "success",
                     "checkpoint_path": str(checkpoint_path),
                     "data_points": data_points,
                     "message_count": message_count,
                     "timestamp": state["timestamp"]
-                })
+                }
+
+                # Check if knowledge synthesis might be valuable
+                planner_state = self.orch.planner.state if self.orch.planner.state else {}
+                plan_history = planner_state.get("plan_history", [])
+                iterations_with_results = len(planner_state.get("experimental_results", []))
+                existing_knowledge = len(self.orch.active_knowledge)
+
+                if iterations_with_results >= 2 and existing_knowledge == 0:
+                    result["knowledge_synthesis_available"] = True
+                    result["plan_iterations_with_results"] = iterations_with_results
+                elif existing_knowledge > 0 and iterations_with_results > existing_knowledge:
+                    result["knowledge_update_available"] = True
+                    result["unsynthesized_iterations"] = iterations_with_results - existing_knowledge
+
+                return json.dumps(result)
                 
             except Exception as e:
                 logging.error(f"Checkpoint save failed: {e}")
