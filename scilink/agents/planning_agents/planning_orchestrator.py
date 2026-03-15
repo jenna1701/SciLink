@@ -329,6 +329,8 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
       → omit experimental_budget (default behavior)
       
 11. `save_checkpoint`: Save campaign state. Use after every 3-5 experiments.
+12. `read_file`: Read and return the contents of a file (JSON, text, scripts, logs, protocols).
+    Use to inspect any file without triggering analysis pipelines.
 
 **KNOWLEDGE & SKILL TOOLS:**
 12. `synthesize_knowledge`: Distill findings from completed planning iterations into reusable knowledge.

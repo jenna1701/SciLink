@@ -2780,6 +2780,84 @@ class OrchestratorTools:
         )
 
         # =====================================================================
+        # READ FILE (non-destructive inspection)
+        # =====================================================================
+        def read_file(file_path: str, max_lines: int = 200) -> str:
+            """
+            Read and return the contents of a file. Use this to inspect
+            plans, protocols, configs, logs, or any text/JSON file without
+            triggering analysis pipelines.
+            """
+            print(f"  ⚡ Tool: Reading file '{file_path}'...")
+
+            # Resolve path
+            resolved, error = self._resolve_data_path(file_path)
+            if error:
+                return error
+
+            path = Path(resolved)
+            if not path.is_file():
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Not a file: {file_path}"
+                })
+
+            # Size guard
+            size_mb = path.stat().st_size / (1024 * 1024)
+            if size_mb > 5:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"File too large ({size_mb:.1f} MB). Use analyze_file for large data files."
+                })
+
+            try:
+                if path.suffix.lower() == ".json":
+                    with open(path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    content = json.dumps(data, indent=2)
+                else:
+                    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                        lines = f.readlines()
+                    if len(lines) > max_lines:
+                        content = "".join(lines[:max_lines])
+                        content += f"\n... ({len(lines) - max_lines} more lines truncated)"
+                    else:
+                        content = "".join(lines)
+
+                return json.dumps({
+                    "status": "success",
+                    "file_path": str(path),
+                    "content": content
+                })
+
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Failed to read file: {e}"
+                })
+
+        self._register_tool(
+            func=read_file,
+            name="read_file",
+            description=(
+                "Read and return the contents of a text or JSON file. "
+                "Use this to inspect plans, protocols, scripts, configs, or logs. "
+                "Do NOT use analyze_file for reading — that triggers the scalarizer pipeline."
+            ),
+            parameters={
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the file to read"
+                },
+                "max_lines": {
+                    "type": "integer",
+                    "description": "Maximum lines to return for large files (default: 200)"
+                }
+            },
+            required=["file_path"]
+        )
+
+        # =====================================================================
         # KNOWLEDGE & SKILL TOOLS
         # =====================================================================
 
