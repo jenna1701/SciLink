@@ -12,7 +12,7 @@ from typing import Dict
 
 _SKILLS_DIR = Path(__file__).parent
 
-_KNOWN_SECTIONS = {"overview", "planning", "analysis", "interpretation", "validation"}
+_KNOWN_SECTIONS = {"overview", "planning", "analysis", "interpretation", "validation", "implementation"}
 
 
 def list_skills(domain: str = "curve_fitting") -> list:

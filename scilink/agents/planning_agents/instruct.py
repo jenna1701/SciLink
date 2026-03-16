@@ -37,6 +37,8 @@ You MUST respond with a single JSON object containing a key "proposed_experiment
 - "expected_outcome": (String) A description of what results would support or refute the hypothesis.
 - "justification": (String) A brief explanation of why this experiment is a logical step, citing information from the retrieved context.
 - "source_documents": (List of Strings) A list of the unique source filenames that informed this experimental plan.
+
+**Domain Skill Rules (when provided):** If a "MANDATORY Domain Skill Rules" section appears below, its rules are MANDATORY constraints on your experimental plan. These rules encode validated domain expertise and override general-purpose defaults. Follow them exactly.
 """
 
 TEA_INSTRUCTIONS = """
@@ -70,6 +72,8 @@ You MUST respond with a single JSON object containing a key "technoeconomic_asse
 - "comparison_to_alternatives": (String) A brief comparison to alternative technologies/materials *if explicitly discussed in the context* in economic terms. (e.g., "Context mentions silicon carbide offers higher efficiency than silicon but at a higher projected cost.", "No direct economic comparison to alternatives found in context.").
 - "data_gaps_for_quantitative_analysis": (List of Strings) Specific types of economic data clearly missing *from the provided context* that would be needed for a more rigorous quantitative TEA. (e.g., "Specific cost per kg of precursor materials", "Detailed breakdown of capital expenditure for manufacturing setup", "Energy consumption per unit produced").
 - "source_documents": (List of Strings) A list of the unique source filenames that informed this assessment.
+
+**Domain Skill Rules (when provided):** If a "MANDATORY Domain Skill Rules" section appears below, its rules are MANDATORY constraints on your assessment. These rules encode validated domain expertise and override general-purpose defaults. Follow them exactly.
 """
 
 
@@ -106,6 +110,8 @@ You MUST respond with a single JSON object containing a key "proposed_experiment
 - "expected_outcome": (String) A description of what results would support the hypothesis.
 - "justification": (String) **MUST be 'Warning: This proposal is based on general scientific knowledge as the provided documents lacked specific context.'** If external literature was used, append: ' External literature search results were incorporated.'
 - "source_documents": (List of Strings) If external literature was used, list relevant sources here. Otherwise, an empty list `[]`.
+
+**Domain Skill Rules (when provided):** If a "MANDATORY Domain Skill Rules" section appears below, its rules are MANDATORY constraints on your experimental plan. These rules encode validated domain expertise and override general-purpose defaults. Follow them exactly.
 """
 
 
@@ -134,6 +140,8 @@ You MUST include the following fields, populated based on general knowledge:
 - "comparison_to_alternatives": (String) Comparison to standard industry benchmarks.
 - "data_gaps_for_quantitative_analysis": (List of Strings) What specific data would you need for a real TEA?
 - "source_documents": (List of Strings) If external literature was used, list relevant sources here. Otherwise, an empty list `[]`.
+
+**Domain Skill Rules (when provided):** If a "MANDATORY Domain Skill Rules" section appears below, its rules are MANDATORY constraints on your assessment. These rules encode validated domain expertise and override general-purpose defaults. Follow them exactly.
 """
 
 BO_OBJECTIVE_DISTILL_PROMPT = """
@@ -644,3 +652,64 @@ You will be given:
 OR 
 { "status": "fail", "feedback": "The baseline correction failed; plot shows slope." }
 """
+
+PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS = """You are an expert scientific research strategist. \
+You need to convert accumulated knowledge into a structured, reusable skill document for experimental planning.
+
+**Skill Name:** {skill_name}
+**Domain:** {domain}
+
+**Source Knowledge:**
+{knowledge_text}
+
+**Source Planning Details:**
+{planning_details}
+
+**Instructions:**
+Organize the knowledge into exactly five sections. Each section should contain actionable, \
+specific guidance derived from the source knowledge. Use markdown formatting.
+
+## overview
+Describe what domain/technique this skill covers, what types of experiments it applies to, \
+and when to use it.
+
+## planning
+List strategy constraints, recommended parameter ranges, protocols, safety rules, \
+and setup considerations. Include any user-specified corrections or preferences.
+
+## implementation
+Describe experimental protocols, equipment configurations, code patterns, or processing \
+steps that have proven effective. Include specific parameter values that worked.
+
+## interpretation
+Provide reference values, expected ranges, success criteria, and how to interpret \
+experimental outcomes. Include quantitative benchmarks from the key findings.
+
+## validation
+Define quality criteria, acceptable tolerance ranges, failure indicators, and sanity checks. \
+Include any corrections from user feedback.
+
+Output ONLY the skill document content in markdown, starting with `## overview`. \
+Do not wrap in code blocks."""
+
+PLANNING_SKILL_UPDATE_INSTRUCTIONS = """You are an expert scientific research strategist. \
+You need to update an existing skill document with new knowledge while preserving what is already correct.
+
+**Skill Name:** {skill_name}
+
+**Existing Skill Content:**
+{existing_skill}
+
+**New Knowledge to Incorporate:**
+{new_knowledge}
+
+**Instructions:**
+1. Review the existing skill content carefully.
+2. Integrate the new findings into the appropriate sections.
+3. Do NOT remove existing content unless the new knowledge explicitly contradicts it.
+4. When there is a conflict, prefer the newer knowledge but note the discrepancy.
+5. Maintain the five-section structure (overview, planning, implementation, interpretation, validation).
+6. Add new quantitative details, parameter ranges, or heuristics from the new knowledge.
+
+Output ONLY the updated skill document content in markdown, starting with `## overview`. \
+Do not wrap in code blocks."""

@@ -98,7 +98,7 @@ class OrchestratorTools:
     def _parse_result_input(self, result_data: str):
         """
         Helper to parse result_data into appropriate format.
-        
+
         Returns:
             - String (text input)
             - String (single file path)
@@ -106,35 +106,30 @@ class OrchestratorTools:
         """
         if len(result_data) < 500:  # Reasonable path length
             try:
-                # Check if it's a single file path
-                path = Path(result_data.strip())
-                if path.exists() and path.is_file():
-                    print(f"    (Detected file path: {path.name})")
-                    return str(path)
-                
                 # Check if it's comma-separated file paths
                 if ',' in result_data:
                     paths = [p.strip() for p in result_data.split(',')]
                     valid_paths = []
                     for p in paths:
-                        p_obj = Path(p)
-                        if p_obj.exists():
-                            valid_paths.append(p)
-                    
+                        resolved, error = self._resolve_data_path(p)
+                        if not error:
+                            valid_paths.append(resolved)
+
                     if valid_paths:
                         print(f"    (Detected {len(valid_paths)} file paths)")
                         return valid_paths
-                    else:
-                        # Treat as text if no valid paths found
-                        text_preview = result_data[:100] + "..." if len(result_data) > 100 else result_data
-                        print(f"    (Processing as text: '{text_preview}')")
-                        return result_data
-                else:
-                    # Not a valid path - treat as text
-                    text_preview = result_data[:100] + "..." if len(result_data) > 100 else result_data
-                    print(f"    (Processing text input: '{text_preview}')")
-                    return result_data
-                    
+
+                # Check if it's a single file path (try session-aware resolution)
+                resolved, error = self._resolve_data_path(result_data.strip())
+                if not error and Path(resolved).is_file():
+                    print(f"    (Detected file path: {Path(resolved).name})")
+                    return str(resolved)
+
+                # Not a valid path - treat as text
+                text_preview = result_data[:100] + "..." if len(result_data) > 100 else result_data
+                print(f"    (Processing text input: '{text_preview}')")
+                return result_data
+
             except (OSError, ValueError, RuntimeError):
                 # Not a valid path - treat as text
                 text_preview = result_data[:100] + "..." if len(result_data) > 100 else result_data
@@ -146,6 +141,52 @@ class OrchestratorTools:
             print(f"    (Processing text input: '{text_preview}')")
             return result_data
         
+    def _collect_scalarizer_context(self, payload) -> list:
+        """Collect scalarizer metrics and plot for files that were already analyzed.
+
+        Checks whether any file path in *payload* has a corresponding entry in
+        ``self.orch.analyzed_files``.  If so, appends:
+        - The computed metrics from ``optimization_data.csv`` as a text summary
+        - The scalarizer debug plot image path (if it exists)
+
+        Returns a list of extra items to append to the refinement payload
+        (may be empty).
+        """
+        paths = payload if isinstance(payload, list) else [payload]
+        extras = []
+        seen_bo = False
+
+        for item in paths:
+            if not isinstance(item, str):
+                continue
+
+            abs_path = str(Path(item).resolve())
+            if abs_path not in self.orch.analyzed_files:
+                continue
+
+            # Append computed metrics from optimization_data.csv (once)
+            if not seen_bo and self.orch.bo_data_path.exists():
+                try:
+                    df = pd.read_csv(self.orch.bo_data_path)
+                    summary = (
+                        f"SCALARIZER ANALYSIS RESULTS (computed metrics):\n"
+                        f"{df.to_string(index=False)}"
+                    )
+                    extras.append(summary)
+                    seen_bo = True
+                    print(f"    📊 Attached scalarizer metrics ({len(df)} rows)")
+                except Exception:
+                    pass
+
+            # Append debug plot if it exists
+            stem = Path(item).stem
+            plot_path = self.orch.base_dir / "scalarizer_outputs" / f"debug_{stem}.png"
+            if plot_path.exists():
+                extras.append(str(plot_path))
+                print(f"    📈 Attached scalarizer plot: {plot_path.name}")
+
+        return extras
+
     def _resolve_knowledge_paths(self, knowledge_paths: str | None) -> list[str] | None:
         """Resolve knowledge paths with fallback to orchestrator's knowledge_dir.
 
@@ -325,15 +366,16 @@ class OrchestratorTools:
         
         # 1. GENERATE INITIAL PLAN
         def generate_initial_plan(
-            specific_objective: str = None, 
-            knowledge_paths: str = None, 
+            specific_objective: str = None,
+            knowledge_paths: str = None,
             primary_data_set: str = None,
-            additional_context: str = None
+            additional_context: str = None,
+            skill: str = None
         ):
             """
             Generates experimental plan (science strategy only, no code).
-            
-            Note: code_paths parameter is deprecated. Use generate_implementation_code() 
+
+            Note: code_paths parameter is deprecated. Use generate_implementation_code()
             as a separate step to add code after plan approval.
             """
             obj = specific_objective if specific_objective else self.orch.objective
@@ -414,6 +456,9 @@ class OrchestratorTools:
             if context_parts:
                 context_dict = {"user_context": "\n\n".join(context_parts)}
             
+            # Resolve skill: use provided value or fall back to orchestrator's active skill
+            effective_skill = skill or getattr(self.orch, '_active_skill', None)
+
             try:
                 # Call the new generate_plan method (not propose_experiments!)
                 plan = self.orch.planner.generate_plan(
@@ -422,8 +467,13 @@ class OrchestratorTools:
                     primary_data_set=primary_dataset,
                     additional_context=context_dict,
                     enable_human_feedback=self._get_human_feedback_enabled(),
-                    reset_state=False
+                    reset_state=False,
+                    skill=effective_skill
                 )
+
+                # Store skill on orchestrator for downstream tools
+                if effective_skill:
+                    self.orch._active_skill = effective_skill
                 
                 if plan.get("error"):
                     return json.dumps({
@@ -494,7 +544,8 @@ class OrchestratorTools:
                 "specific_objective": {"type": "string", "description": "Research objective"},
                 "knowledge_paths": {"type": "string", "description": "Comma-separated paths to papers/reports/docs folders"},
                 "primary_data_set": {"type": "string", "description": "Path to experimental data file or folder"},
-                "additional_context": {"type": "string", "description": "Lab constraints, equipment, reagents, budget, etc."}
+                "additional_context": {"type": "string", "description": "Lab constraints, equipment, reagents, budget, etc."},
+                "skill": {"type": "string", "description": "Domain skill name or path to custom .md skill file"}
             },
             required=[]
         )
@@ -812,10 +863,18 @@ class OrchestratorTools:
             - Comma-separated files: "./data.csv,./plot.png"
             """
             print(f"  ⚡ Tool: Refining Plan based on Results...")
-            
+
             # Parse input - handle both single paths and comma-separated lists
             payload = self._parse_result_input(result_data)
-            
+
+            # Enrich with scalarizer metrics and plot if the file was already analyzed
+            extras = self._collect_scalarizer_context(payload)
+            if extras:
+                if isinstance(payload, list):
+                    payload.extend(extras)
+                else:
+                    payload = [payload] + extras
+
             try:
                 plan = self.orch.planner.refine_plan(
                     results=payload,
@@ -2589,13 +2648,28 @@ class OrchestratorTools:
                 
                 print(f"    💾 Checkpoint saved: {checkpoint_path}")
                 
-                return json.dumps({
+                result = {
                     "status": "success",
                     "checkpoint_path": str(checkpoint_path),
                     "data_points": data_points,
                     "message_count": message_count,
                     "timestamp": state["timestamp"]
-                })
+                }
+
+                # Check if knowledge synthesis might be valuable
+                planner_state = self.orch.planner.state if self.orch.planner.state else {}
+                plan_history = planner_state.get("plan_history", [])
+                iterations_with_results = len(planner_state.get("experimental_results", []))
+                existing_knowledge = len(self.orch.active_knowledge)
+
+                if iterations_with_results >= 2 and existing_knowledge == 0:
+                    result["knowledge_synthesis_available"] = True
+                    result["plan_iterations_with_results"] = iterations_with_results
+                elif existing_knowledge > 0 and iterations_with_results > existing_knowledge:
+                    result["knowledge_update_available"] = True
+                    result["unsynthesized_iterations"] = iterations_with_results - existing_knowledge
+
+                return json.dumps(result)
                 
             except Exception as e:
                 logging.error(f"Checkpoint save failed: {e}")
@@ -2767,6 +2841,571 @@ class OrchestratorTools:
             ),
             parameters={},
             required=[]
+        )
+
+        # =====================================================================
+        # READ FILE (non-destructive inspection)
+        # =====================================================================
+        def read_file(file_path: str, max_lines: int = 200) -> str:
+            """
+            Read and return the contents of a file. Use this to inspect
+            plans, protocols, configs, logs, or any text/JSON file without
+            triggering analysis pipelines.
+            """
+            print(f"  ⚡ Tool: Reading file '{file_path}'...")
+
+            # Resolve path
+            resolved, error = self._resolve_data_path(file_path)
+            if error:
+                return error
+
+            path = Path(resolved)
+            if not path.is_file():
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Not a file: {file_path}"
+                })
+
+            # Size guard
+            size_mb = path.stat().st_size / (1024 * 1024)
+            if size_mb > 5:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"File too large ({size_mb:.1f} MB). Use analyze_file for large data files."
+                })
+
+            try:
+                if path.suffix.lower() == ".json":
+                    with open(path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    content = json.dumps(data, indent=2)
+                else:
+                    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                        lines = f.readlines()
+                    if len(lines) > max_lines:
+                        content = "".join(lines[:max_lines])
+                        content += f"\n... ({len(lines) - max_lines} more lines truncated)"
+                    else:
+                        content = "".join(lines)
+
+                return json.dumps({
+                    "status": "success",
+                    "file_path": str(path),
+                    "content": content
+                })
+
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Failed to read file: {e}"
+                })
+
+        self._register_tool(
+            func=read_file,
+            name="read_file",
+            description=(
+                "Read and return the contents of a text or JSON file. "
+                "Use this to inspect plans, protocols, scripts, configs, or logs. "
+                "Do NOT use analyze_file for reading — that triggers the scalarizer pipeline."
+            ),
+            parameters={
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the file to read"
+                },
+                "max_lines": {
+                    "type": "integer",
+                    "description": "Maximum lines to return for large files (default: 200)"
+                }
+            },
+            required=["file_path"]
+        )
+
+        # =====================================================================
+        # KNOWLEDGE & SKILL TOOLS
+        # =====================================================================
+
+        # 12. SYNTHESIZE KNOWLEDGE
+        def synthesize_knowledge(plan_ids: list, focus: str, synthesis_type: str = "reference") -> str:
+            """
+            Distill findings from completed planning iterations into reusable knowledge.
+            The synthesized knowledge can be graduated into a skill for future campaigns.
+            """
+            from scilink.knowledge import synthesize_knowledge as _synthesize
+
+            print(f"  ⚡ Tool: Synthesizing knowledge ({synthesis_type}) from {len(plan_ids)} plan iterations...")
+
+            planner_state = self.orch.planner.state if self.orch.planner.state else {}
+            plan_history = planner_state.get("plan_history", [])
+            feedback_history = planner_state.get("human_feedback_history", [])
+            results = []
+            missing_ids = []
+
+            for pid in plan_ids:
+                found = False
+                # Collect ALL plan_history entries for this iteration (draft, refined, constraint-adjusted)
+                matching_plans = [p for p in plan_history if str(p.get("iteration")) == str(pid)]
+
+                if matching_plans:
+                    parts = []
+                    for plan in matching_plans:
+                        stage = plan.get("stage", "Unknown")
+                        parts.append(f"--- Stage: {stage} ---")
+                        for exp in plan.get("proposed_experiments", []):
+                            parts.append(f"Experiment: {exp.get('experiment_name', '')}")
+                            parts.append(f"Hypothesis: {exp.get('hypothesis', '')}")
+                            steps = exp.get("experimental_steps", [])
+                            if steps:
+                                parts.append(f"Steps: {'; '.join(steps)}")
+                            parts.append(f"Justification: {exp.get('justification', '')}")
+                            parts.append(f"Expected outcome: {exp.get('expected_outcome', '')}")
+
+                    # Collect human feedback entries relevant to this iteration
+                    user_feedback_parts = []
+                    for fb in feedback_history:
+                        feedback_text = fb.get("feedback", "")
+                        phase = fb.get("phase", "")
+                        if feedback_text:
+                            user_feedback_parts.append(f"[{phase}] {feedback_text}")
+
+                    result_dict = {
+                        "detailed_analysis": "\n".join(parts),
+                        "analysis_id": f"plan_iter_{pid}",
+                        "status": matching_plans[-1].get("stage", ""),
+                    }
+                    if user_feedback_parts:
+                        result_dict["human_feedback"] = {
+                            "user_feedback": "\n".join(user_feedback_parts)
+                        }
+                    results.append(result_dict)
+                    found = True
+
+                if not found:
+                    missing_ids.append(pid)
+
+            if missing_ids:
+                available = sorted(set(
+                    str(p.get("iteration")) for p in plan_history if p.get("iteration") is not None
+                ))
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Plan iteration(s) not found: {missing_ids}",
+                    "available_iterations": available
+                })
+
+            if not results:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No plan history available. Generate a plan first."
+                })
+
+            # Synthesize via the standalone function
+            counter = len(self.orch.active_knowledge) + 1
+            try:
+                entry = _synthesize(
+                    results, focus,
+                    model=self.orch.planner.model,
+                    knowledge_id=f"knowledge_{counter:03d}",
+                    synthesis_type=synthesis_type,
+                )
+            except (ValueError, RuntimeError) as e:
+                return json.dumps({"status": "error", "message": str(e)})
+
+            entry["source_plans"] = plan_ids
+            self.orch.active_knowledge.append(entry)
+
+            # Save to disk
+            knowledge_dir = self.orch.base_dir / "knowledge"
+            knowledge_dir.mkdir(parents=True, exist_ok=True)
+            knowledge_file = knowledge_dir / f"{entry['id']}.json"
+            with open(knowledge_file, 'w') as f:
+                json.dump(entry, f, indent=2)
+
+            response = {
+                "status": "success",
+                "knowledge_id": entry["id"],
+                "focus": focus,
+                "synthesis_type": synthesis_type,
+                "summary": entry["summary"],
+                "key_findings": entry["key_findings"],
+                "saved_to": str(knowledge_file),
+                "note": "Use graduate_to_skill to convert this knowledge into a reusable domain skill."
+            }
+
+            # Check if any graduated skill is linked to knowledge with same focus
+            for skill_name, source_ids in self.orch._graduated_skill_sources.items():
+                for kid in source_ids:
+                    for k in self.orch.active_knowledge:
+                        if k.get("id") == kid and k.get("focus", "").lower() == focus.lower():
+                            response["skill_update_suggested"] = skill_name
+                            response["skill_update_note"] = (
+                                f"Graduated skill '{skill_name}' is linked to knowledge "
+                                f"with the same focus area. Consider calling update_skill."
+                            )
+                            break
+                    if "skill_update_suggested" in response:
+                        break
+                if "skill_update_suggested" in response:
+                    break
+
+            return json.dumps(response)
+
+        self._register_tool(
+            func=synthesize_knowledge,
+            name="synthesize_knowledge",
+            description=(
+                "Distill findings from completed planning iterations into reusable knowledge. "
+                "Use when the user wants to capture learnings from plan iterations — e.g., "
+                "experimental design patterns, parameter ranges that worked, or failure modes."
+            ),
+            parameters={
+                "plan_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of plan iteration numbers (as strings) to synthesize knowledge from"
+                },
+                "focus": {
+                    "type": "string",
+                    "description": "What to extract/learn (e.g., 'optimal cycling protocol for NMC811', 'catalyst screening workflow')"
+                },
+                "synthesis_type": {
+                    "type": "string",
+                    "enum": ["reference", "trend", "failure", "method"],
+                    "description": (
+                        "Type of synthesis: 'reference' (default), 'trend', 'failure', or 'method'"
+                    )
+                }
+            },
+            required=["plan_ids", "focus"]
+        )
+
+        # 13. LIST KNOWLEDGE
+        def list_knowledge() -> str:
+            """List all active knowledge entries."""
+            print(f"  ⚡ Tool: Listing active knowledge...")
+
+            if not self.orch.active_knowledge:
+                return json.dumps({
+                    "status": "success",
+                    "message": "No active knowledge entries.",
+                    "entries": []
+                })
+
+            entries = []
+            for entry in self.orch.active_knowledge:
+                entries.append({
+                    "id": entry["id"],
+                    "focus": entry["focus"],
+                    "source_count": len(entry.get("source_plans", entry.get("source_analyses", []))),
+                    "findings_count": len(entry.get("key_findings", [])),
+                    "timestamp": entry.get("timestamp")
+                })
+
+            return json.dumps({
+                "status": "success",
+                "total_entries": len(entries),
+                "entries": entries
+            })
+
+        self._register_tool(
+            func=list_knowledge,
+            name="list_knowledge",
+            description="Show all active knowledge entries synthesized from planning iterations.",
+            parameters={},
+            required=[]
+        )
+
+        # 14. CLEAR KNOWLEDGE
+        def clear_knowledge(knowledge_id: str = None) -> str:
+            """Remove active knowledge entries. If knowledge_id is None, removes all."""
+            print(f"  ⚡ Tool: Clearing knowledge...")
+
+            knowledge_dir = self.orch.base_dir / "knowledge"
+
+            if knowledge_id is None:
+                count = len(self.orch.active_knowledge)
+                self.orch.active_knowledge.clear()
+                if knowledge_dir.exists():
+                    for f in knowledge_dir.glob("knowledge_*.json"):
+                        f.unlink()
+                return json.dumps({
+                    "status": "success",
+                    "message": f"Cleared all {count} knowledge entries."
+                })
+
+            for i, entry in enumerate(self.orch.active_knowledge):
+                if entry["id"] == knowledge_id:
+                    self.orch.active_knowledge.pop(i)
+                    knowledge_file = knowledge_dir / f"{knowledge_id}.json"
+                    if knowledge_file.exists():
+                        knowledge_file.unlink()
+                    return json.dumps({
+                        "status": "success",
+                        "message": f"Removed knowledge entry: {knowledge_id}"
+                    })
+
+            return json.dumps({
+                "status": "error",
+                "message": f"Knowledge ID not found: {knowledge_id}"
+            })
+
+        self._register_tool(
+            func=clear_knowledge,
+            name="clear_knowledge",
+            description=(
+                "Remove active knowledge entries. Specify a knowledge_id to remove a "
+                "specific entry, or omit to clear all knowledge."
+            ),
+            parameters={
+                "knowledge_id": {
+                    "type": "string",
+                    "description": "ID of knowledge entry to remove (omit to clear all)"
+                }
+            },
+            required=[]
+        )
+
+        # 15. GRADUATE TO SKILL
+        def graduate_to_skill(knowledge_id: str, skill_name: str, domain: str = "planning") -> str:
+            """
+            Convert a knowledge entry into a reusable planning skill (.md file).
+            The skill is automatically registered for use in subsequent plan generation.
+            """
+            from .instruct import PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS
+
+            print(f"  ⚡ Tool: Graduating knowledge '{knowledge_id}' to skill '{skill_name}'...")
+
+            # Find the knowledge entry
+            knowledge_entry = None
+            for entry in self.orch.active_knowledge:
+                if entry.get("id") == knowledge_id:
+                    knowledge_entry = entry
+                    break
+
+            if knowledge_entry is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Knowledge ID not found: {knowledge_id}"
+                })
+
+            # Build knowledge text
+            knowledge_text = f"**Focus:** {knowledge_entry.get('focus', '')}\n"
+            knowledge_text += f"**Summary:** {knowledge_entry.get('summary', '')}\n"
+            knowledge_text += "**Key Findings:**\n"
+            for finding in knowledge_entry.get("key_findings", []):
+                knowledge_text += f"- {finding}\n"
+
+            # Collect source planning details
+            planning_details_parts = []
+            source_ids = knowledge_entry.get("source_plans", [])
+            plan_history = self.orch.planner.state.get("plan_history", []) if self.orch.planner.state else []
+
+            for pid in source_ids:
+                for plan in plan_history:
+                    if str(plan.get("iteration")) == str(pid):
+                        parts = [f"### Plan Iteration: {pid} (Stage: {plan.get('stage', 'N/A')})"]
+                        for exp in plan.get("proposed_experiments", []):
+                            parts.append(f"Experiment: {exp.get('experiment_name', '')}")
+                            parts.append(f"Hypothesis: {exp.get('hypothesis', '')}")
+                            steps = exp.get("experimental_steps", [])
+                            if steps:
+                                parts.append(f"Steps: {'; '.join(steps[:10])}")
+                            parts.append(f"Expected outcome: {exp.get('expected_outcome', '')}")
+                        planning_details_parts.append("\n".join(parts))
+                        break
+
+            # Also include feedback history if available
+            feedback_history = self.orch.planner.state.get("human_feedback_history", []) if self.orch.planner.state else []
+            for fb in feedback_history:
+                planning_details_parts.append(
+                    f"### User Feedback ({fb.get('phase', 'unknown')}):\n{fb.get('feedback', '')}"
+                )
+
+            planning_details = "\n\n".join(planning_details_parts) if planning_details_parts else "No source planning details available."
+
+            # Call LLM to generate skill content
+            prompt = PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS.format(
+                skill_name=skill_name,
+                domain=domain,
+                knowledge_text=knowledge_text,
+                planning_details=planning_details,
+            )
+
+            try:
+                response = self.orch.planner.model.generate_content(
+                    contents=[prompt],
+                    generation_config=None,
+                    safety_settings=None,
+                )
+                skill_content = response.text if hasattr(response, "text") else str(response)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": f"LLM call failed: {e}"})
+
+            # Save skill file
+            skill_dir = self.orch.base_dir / "graduated_skills"
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            skill_path = skill_dir / f"{skill_name}.md"
+            skill_path.write_text(skill_content)
+
+            # Register the skill
+            self.orch.register_skill(str(skill_path))
+
+            # Track the link
+            self.orch._graduated_skill_sources[skill_name] = [knowledge_id]
+
+            return json.dumps({
+                "status": "success",
+                "skill_name": skill_name,
+                "skill_path": str(skill_path),
+                "source_knowledge_id": knowledge_id,
+                "note": f"Skill '{skill_name}' has been registered and will be applied to future plan generation."
+            })
+
+        self._register_tool(
+            func=graduate_to_skill,
+            name="graduate_to_skill",
+            description=(
+                "Convert a knowledge entry into a reusable planning skill (.md file). "
+                "The skill is organized into 5 sections (overview, planning, implementation, "
+                "interpretation, validation) and automatically registered for use in "
+                "subsequent plan generation."
+            ),
+            parameters={
+                "knowledge_id": {
+                    "type": "string",
+                    "description": "ID of the knowledge entry to graduate"
+                },
+                "skill_name": {
+                    "type": "string",
+                    "description": "Name for the new skill (used as filename and reference)"
+                },
+                "domain": {
+                    "type": "string",
+                    "description": "Domain area (default: 'planning')"
+                }
+            },
+            required=["knowledge_id", "skill_name"]
+        )
+
+        # 16. UPDATE SKILL
+        def update_skill(skill_name: str, knowledge_ids: list = None) -> str:
+            """
+            Update a graduated skill with new knowledge entries.
+            Preserves the old version as {name}.prev.md.
+            """
+            from .instruct import PLANNING_SKILL_UPDATE_INSTRUCTIONS
+
+            print(f"  ⚡ Tool: Updating skill '{skill_name}'...")
+
+            # Find the existing skill file
+            skill_dir = self.orch.base_dir / "graduated_skills"
+            skill_path = skill_dir / f"{skill_name}.md"
+            if not skill_path.exists():
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Graduated skill not found: {skill_name}"
+                })
+
+            existing_skill = skill_path.read_text()
+
+            # Determine source knowledge IDs
+            tracked_ids = self.orch._graduated_skill_sources.get(skill_name, [])
+            if knowledge_ids:
+                new_ids = knowledge_ids
+            else:
+                # Use all knowledge entries with matching focus
+                focus_areas = set()
+                for kid in tracked_ids:
+                    for k in self.orch.active_knowledge:
+                        if k.get("id") == kid:
+                            focus_areas.add(k.get("focus", "").lower())
+                new_ids = [
+                    k["id"] for k in self.orch.active_knowledge
+                    if k["id"] not in tracked_ids and k.get("focus", "").lower() in focus_areas
+                ]
+
+            if not new_ids:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No new knowledge entries found to update the skill with."
+                })
+
+            # Collect new knowledge texts
+            new_knowledge_parts = []
+            for kid in new_ids:
+                for k in self.orch.active_knowledge:
+                    if k.get("id") == kid:
+                        part = f"### {kid}\n**Focus:** {k.get('focus', '')}\n"
+                        part += f"**Summary:** {k.get('summary', '')}\n"
+                        part += "**Key Findings:**\n"
+                        for f in k.get("key_findings", []):
+                            part += f"- {f}\n"
+                        new_knowledge_parts.append(part)
+                        break
+
+            new_knowledge = "\n\n".join(new_knowledge_parts)
+
+            # Call LLM to produce updated skill
+            prompt = PLANNING_SKILL_UPDATE_INSTRUCTIONS.format(
+                skill_name=skill_name,
+                existing_skill=existing_skill,
+                new_knowledge=new_knowledge,
+            )
+
+            try:
+                response = self.orch.planner.model.generate_content(
+                    contents=[prompt],
+                    generation_config=None,
+                    safety_settings=None,
+                )
+                updated_content = response.text if hasattr(response, "text") else str(response)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": f"LLM call failed: {e}"})
+
+            # Save previous version
+            prev_path = skill_dir / f"{skill_name}.prev.md"
+            prev_path.write_text(existing_skill)
+
+            # Write updated skill
+            skill_path.write_text(updated_content)
+
+            # Update source tracking
+            all_ids = list(set(tracked_ids + new_ids))
+            self.orch._graduated_skill_sources[skill_name] = all_ids
+
+            # Re-register the skill
+            self.orch.register_skill(str(skill_path))
+
+            return json.dumps({
+                "status": "success",
+                "skill_name": skill_name,
+                "skill_path": str(skill_path),
+                "previous_version": str(prev_path),
+                "new_knowledge_ids": new_ids,
+                "total_source_ids": all_ids,
+                "note": f"Skill '{skill_name}' has been updated. Previous version saved as {prev_path.name}."
+            })
+
+        self._register_tool(
+            func=update_skill,
+            name="update_skill",
+            description=(
+                "Update a graduated skill with new knowledge entries. "
+                "Use when new knowledge has been synthesized and a linked skill "
+                "should incorporate the new findings. The old version is preserved."
+            ),
+            parameters={
+                "skill_name": {
+                    "type": "string",
+                    "description": "Name of the graduated skill to update"
+                },
+                "knowledge_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Specific knowledge IDs to incorporate (omit to auto-detect from matching focus area)"
+                }
+            },
+            required=["skill_name"]
         )
     
     def _register_tool(self, func: Callable, name: str, description: str, 

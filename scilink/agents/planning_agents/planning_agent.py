@@ -35,12 +35,14 @@ from ..lit_agents.molecules_agent import MoleculesAgent
 from ..lit_agents.optimize_query import optimize_search_query, is_molecule_design_objective
 
 from .rag_engine import (
-    perform_science_rag, 
-    perform_code_rag, 
+    perform_science_rag,
+    perform_code_rag,
     refine_plan_with_feedback,
     refine_code_with_feedback,
     verify_plan_relevance
 )
+
+from ...skills.loader import load_skill
 
 from .ingestor import ingest_files, extract_images
 
@@ -285,7 +287,52 @@ class PlanningAgent(BaseAgent):
             }
         )
         return self.state
-    
+
+    def _build_skill_context(self, stage: str) -> Optional[str]:
+        """Build a skill context string for injection into LLM prompts.
+
+        Args:
+            stage: Primary skill section to use. One of ``"planning"``,
+                ``"implementation"``, ``"interpretation"``, ``"overview"``.
+
+        Returns:
+            Formatted skill context string, or ``None`` if no skill is loaded
+            or the requested section is empty.
+        """
+        skill_sections = self.state.get("skill_sections") if self.state else None
+        if not skill_sections:
+            return None
+
+        skill_name = self.state.get("skill_name", "domain skill")
+
+        parts = []
+
+        # Always include overview for domain context
+        overview = skill_sections.get("overview", "")
+        if overview and stage != "overview":
+            parts.append(f"### Overview\n{overview}")
+
+        # Primary section
+        content = skill_sections.get(stage, "")
+        if content:
+            parts.append(f"### {stage.title()}\n{content}")
+
+        # Include validation rules alongside planning, interpretation, and implementation
+        if stage in ("planning", "interpretation", "implementation"):
+            validation = skill_sections.get("validation", "")
+            if validation:
+                parts.append(f"### Validation Criteria\n{validation}")
+
+        if not parts:
+            return None
+
+        return (
+            f"\n## MANDATORY Domain Skill Rules: {skill_name}\n"
+            "The following rules are MANDATORY constraints on your experimental plan. "
+            "These encode validated domain expertise and override general-purpose defaults.\n\n"
+            + "\n\n".join(parts)
+        )
+
     def _save_results_to_json(self, results: Dict[str, Any], file_path: str):
         try:
             p = Path(file_path)
@@ -363,7 +410,8 @@ class PlanningAgent(BaseAgent):
                     image_paths: Optional[List[str]] = None,
                     image_descriptions: Optional[List[str]] = None,
                     enable_human_feedback: bool = True,
-                    reset_state: bool = False) -> Dict[str, Any]:
+                    reset_state: bool = False,
+                    skill: Optional[str] = None) -> Dict[str, Any]:
         """
         Generate experimental plan (science only, no implementation code/protocol).
 
@@ -425,11 +473,21 @@ class PlanningAgent(BaseAgent):
             if objective:
                 self.state["objective"] = objective
         
+        # Load skill (once, at entry point)
+        if skill:
+            try:
+                parsed = load_skill(skill, domain="planning")
+                self.state["skill_name"] = parsed["name"]
+                self.state["skill_sections"] = parsed
+                print(f"  - 📖 Skill loaded: {parsed['name']}")
+            except FileNotFoundError:
+                logging.warning(f"Skill '{skill}' not found — proceeding without domain skill")
+
         # Increment iteration
         existing_iter = self.state.get("iteration_index", 0)
         self.state["iteration_index"] = existing_iter + 1
         current_iter = self.state["iteration_index"]
-        
+
         # Build KB (docs only)
         if not self._ensure_kb_is_ready(knowledge_paths, code_paths=None):
             self.state["status"] = "failed"
@@ -482,6 +540,9 @@ class PlanningAgent(BaseAgent):
                 external_context += "\n\n"
             external_context += "## Molecular Design & Synthesis Planning\n" + mol_context
 
+        # Build skill context for plan generation
+        skill_planning_context = self._build_skill_context("planning")
+
         # RAG for science plan
         print(f"\n--- Generating Experimental Strategy ---")
         res = perform_science_rag(
@@ -495,7 +556,8 @@ class PlanningAgent(BaseAgent):
             image_paths=all_image_paths,
             image_descriptions=image_descriptions,
             additional_context=ctx_string,
-            external_context=external_context
+            external_context=external_context,
+            skill_context=skill_planning_context
         )
 
         if lit_context:
@@ -533,9 +595,10 @@ class PlanningAgent(BaseAgent):
                     feedback=f"CRITICAL: {critique}",
                     objective=objective,
                     model=self.model,
-                    generation_config=self.generation_config
+                    generation_config=self.generation_config,
+                    skill_context=skill_planning_context
                 )
-                
+
                 res["iteration"] = current_iter
                 res["stage"] = "Auto-Corrected"
                 self.state["plan_history"].append(res.copy())
@@ -562,7 +625,8 @@ class PlanningAgent(BaseAgent):
                     feedback=human_feedback,
                     objective=objective,
                     model=self.model,
-                    generation_config=self.generation_config
+                    generation_config=self.generation_config,
+                    skill_context=skill_planning_context
                 )
 
                 if refined.get("error"):
@@ -653,12 +717,16 @@ class PlanningAgent(BaseAgent):
         # Generate code
         print(f"\n--- Generating Implementation Code ---")
         current_iter = plan.get("iteration", self.state.get("iteration_index", 1))
-        
+
+        # Build skill context for implementation
+        skill_impl_context = self._build_skill_context("implementation")
+
         res = perform_code_rag(
             result=plan,
             kb_code=self.kb_code,
             model=self.model,
-            generation_config=self.generation_config
+            generation_config=self.generation_config,
+            skill_context=skill_impl_context
         )
         
         # Snapshot: Code Generated
@@ -746,8 +814,8 @@ class PlanningAgent(BaseAgent):
         )
         return res
 
-    def propose_experiments(self, objective: str, 
-                            knowledge_paths: Optional[List[str]] = None, 
+    def propose_experiments(self, objective: str,
+                            knowledge_paths: Optional[List[str]] = None,
                             code_paths: Optional[List[str]] = None,
                             additional_context: Optional[Dict[str, str]] = None,
                             primary_data_set: Optional[Union[str, Dict[str, str]]] = None,
@@ -755,7 +823,8 @@ class PlanningAgent(BaseAgent):
                             image_descriptions: Optional[List[str]] = None,
                             output_json_path: Optional[str] = None,
                             enable_human_feedback: bool = True,
-                            reset_state: bool = False) -> Dict[str, Any]: # Default False to enable cumulative workflows
+                            reset_state: bool = False,
+                            skill: Optional[str] = None) -> Dict[str, Any]:
         """
         Generate an experimental plan based on scientific literature and implementation knowledge.
 
@@ -846,7 +915,8 @@ class PlanningAgent(BaseAgent):
             image_paths=image_paths,
             image_descriptions=image_descriptions,
             enable_human_feedback=enable_human_feedback,
-            reset_state=reset_state
+            reset_state=reset_state,
+            skill=skill
         )
         
         if plan.get("error"):
@@ -964,7 +1034,9 @@ Select the most appropriate strategy:
         else:
             print(f"  - Reasoning over results...")
 
-        
+        # Build skill context for refinement (interpretation + validation)
+        skill_refine_context = self._build_skill_context("interpretation")
+
         new_plan = refine_plan_with_feedback(
             original_result=current_plan,
             feedback=feedback_prompt,
@@ -972,7 +1044,8 @@ Select the most appropriate strategy:
             model=self.model,
             generation_config=self.generation_config,
             new_context=new_literature_context,
-            result_images=loaded_images
+            result_images=loaded_images,
+            skill_context=skill_refine_context
         )
 
         if new_plan.get("error"):
@@ -1026,7 +1099,8 @@ Select the most appropriate strategy:
                     feedback=human_feedback,
                     objective=objective,
                     model=self.model,
-                    generation_config=self.generation_config
+                    generation_config=self.generation_config,
+                    skill_context=skill_refine_context
                 )
                 # Snapshot: Human Refined
                 new_plan["iteration"] = next_plan_idx
@@ -1092,13 +1166,17 @@ Select the most appropriate strategy:
             f"- Do NOT treat this as experimental results — no experiment was run."
         )
 
+        # Build skill context for constraint adjustment
+        skill_constraint_context = self._build_skill_context("planning")
+
         print(f"  - Reasoning over constraint...")
         new_plan = refine_plan_with_feedback(
             original_result=current_plan,
             feedback=adjustment_prompt,
             objective=objective,
             model=self.model,
-            generation_config=self.generation_config
+            generation_config=self.generation_config,
+            skill_context=skill_constraint_context
         )
 
         if new_plan.get("error"):
@@ -1145,7 +1223,8 @@ Select the most appropriate strategy:
                     feedback=human_feedback,
                     objective=objective,
                     model=self.model,
-                    generation_config=self.generation_config
+                    generation_config=self.generation_config,
+                    skill_context=skill_constraint_context
                 )
                 new_plan["iteration"] = current_plan.get("iteration", 0)
                 new_plan["stage"] = "Human Refined (Constraint)"
@@ -1674,17 +1753,21 @@ Select the most appropriate strategy:
                 lit_context = lit_res['content']
 
         # 4. Perform RAG
+        # Build skill context for TEA (overview section if relevant)
+        skill_tea_context = self._build_skill_context("overview")
+
         res = perform_science_rag(
-            objective=objective, 
-            instructions=TEA_INSTRUCTIONS, 
+            objective=objective,
+            instructions=TEA_INSTRUCTIONS,
             task_name="Technoeconomic Analysis",
             kb_docs=self.kb_docs,
             model=self.model,
             generation_config=self.generation_config,
-            primary_data_set=primary_data_set, 
-            image_paths=all_image_paths, 
+            primary_data_set=primary_data_set,
+            image_paths=all_image_paths,
             image_descriptions=image_descriptions,
-            external_context=lit_context
+            external_context=lit_context,
+            skill_context=skill_tea_context
         )
 
         if lit_context:
