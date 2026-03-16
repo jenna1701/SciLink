@@ -470,6 +470,7 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
     - You MUST return the exact same JSON structure (keys: "proposed_experiments", etc.).
     - Update "experimental_steps", "hypothesis", or "required_equipment" as requested.
     - Do NOT add explanations outside the JSON.
+    - Do NOT carry forward quantitative claims from the original plan that contradict the experimental results.
     
     **Output:**
     A single valid JSON object containing the updated plan.
