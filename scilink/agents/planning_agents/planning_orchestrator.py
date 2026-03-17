@@ -413,6 +413,10 @@ Assume user runs agent from project directory. For example, when user says "file
 - If `generate_implementation_code` or `refine_implementation_code` returns status="error",
   clearly inform the user of the failure and the reason before proceeding with any alternative.
 
+**MCP OUTPUT PERSISTENCE:**
+- When an MCP tool returns generated code, protocols, or other text artifacts, call `save_file`
+  to persist the output BEFORE calling any other tool.
+
 **BEHAVIOR:**
 - Extract ALL paths mentioned by user (papers, data, code, reports)
 - Extract specific_objective from user's goal/intent
@@ -1119,6 +1123,32 @@ class PlanningOrchestratorAgent:
             
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
 
+    def _compress_large_tool_results(self):
+        """Compress large tool results in chat history to prevent context overflow.
+
+        Only triggers when total history exceeds 100K chars. Truncates tool
+        results larger than 30K chars to 5K chars, preserving the file_path
+        for re-reading. Skips the 2 most recent messages to avoid truncating
+        results the LLM hasn't responded to yet.
+        """
+        total_chars = sum(len(m.get("content", "") or "") for m in self.messages)
+        if total_chars > 100000:
+            compressed = 0
+            for msg in self.messages[:-2]:
+                if msg["role"] == "tool" and len(msg.get("content", "")) > 30000:
+                    original_len = len(msg["content"])
+                    msg["content"] = (
+                        msg["content"][:5000]
+                        + f"\n\n... ({original_len - 5000} chars truncated from history. "
+                        f"Use read_file to re-read the full content only if "
+                        f"the truncated portion above is insufficient for your current task.)"
+                    )
+                    compressed += 1
+            if compressed:
+                new_total = sum(len(m.get("content", "") or "") for m in self.messages)
+                print(f"  📦 Compressed {compressed} large tool result(s) in history "
+                      f"({total_chars:,} → {new_total:,} chars)")
+
     def _auto_checkpoint(self):
         """Internal auto-checkpoint without LLM interaction."""
         try:
@@ -1166,15 +1196,21 @@ class PlanningOrchestratorAgent:
             system_msg = self.messages[0]
             recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
             self.messages = [system_msg] + recent_msgs
-        
+
+        self._compress_large_tool_results()
+
         max_iterations = 20
         iteration = 0
-        
+
         while iteration < max_iterations:
             iteration += 1
 
-            print(f"  ⏳ Waiting for LLM response ...") 
-            
+            # Also compress within the loop — tool calls can grow history mid-conversation
+            if iteration > 1:
+                self._compress_large_tool_results()
+
+            print(f"  ⏳ Waiting for LLM response ...")
+
             response = client.chat.completions.create(
                 model=self.model.model,
                 messages=self.messages,
@@ -1233,26 +1269,18 @@ class PlanningOrchestratorAgent:
             system_msg = self.messages[0]
             recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
             self.messages = [system_msg] + recent_msgs
-        
+
+        self._compress_large_tool_results()
+
         max_iterations = 20
         iteration = 0
-        
+
         while iteration < max_iterations:
             iteration += 1
 
-            # Compress large tool results when chat history gets too big.
-            # Only triggers near context limit — leaves history untouched otherwise.
-            total_chars = sum(len(m.get("content", "") or "") for m in self.messages)
-            if total_chars > 400000:  # ~100K tokens — compress to stay within limits
-                for msg in self.messages[:-2]:  # skip most recent messages
-                    if msg["role"] == "tool" and len(msg.get("content", "")) > 20000:
-                        original_len = len(msg["content"])
-                        msg["content"] = (
-                            msg["content"][:5000]
-                            + f"\n\n... ({original_len - 5000} chars truncated from history. "
-                            f"Use read_file to re-read the full content only if "
-                            f"the truncated portion above is insufficient for your current task.)"
-                        )
+            # Also compress within the loop — tool calls can grow history mid-conversation
+            if iteration > 1:
+                self._compress_large_tool_results()
 
             print(f"  ⏳ Waiting for LLM response ...")
 

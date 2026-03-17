@@ -491,13 +491,45 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
         refined_result, error_msg = parse_json_from_response(response)
         
         if error_msg:
-            print(f"    - ⚠️ JSON Parsing Failed: {error_msg}")
-            # Return an error object so the agent knows to stop.
-            return {
-                "error": "JSON_PARSE_ERROR",
-                "message": f"LLM output invalid: {error_msg}",
-                "raw_output": str(response.text)[:500] if hasattr(response, 'text') else "No text"
-            }
+            print(f"    - ⚠️ JSON Parsing Failed: {error_msg}. Retrying...")
+
+            raw_text = ""
+            if hasattr(response, 'text'):
+                raw_text = response.text
+            elif hasattr(response, 'parts') and response.parts:
+                raw_text = response.parts[0].text
+
+            repair_prompt = (
+                "The following text was intended to be valid JSON but has a formatting error.\n\n"
+                f"**Error:** {error_msg}\n\n"
+                f"**Raw text:**\n{raw_text}\n\n"
+                "Fix ONLY the JSON formatting issues (missing commas, unescaped characters, "
+                "trailing commas, etc.). Do NOT change any content or values. "
+                "Return ONLY the corrected JSON object with no explanation."
+            )
+
+            try:
+                retry_response = model.generate_content(
+                    [repair_prompt], generation_config=generation_config
+                )
+                refined_result, retry_error = parse_json_from_response(retry_response)
+
+                if retry_error:
+                    print(f"    - ⚠️ JSON Retry Also Failed: {retry_error}")
+                    return {
+                        "error": "JSON_PARSE_ERROR",
+                        "message": f"LLM output invalid after retry: {retry_error}",
+                        "raw_output": str(raw_text)[:500]
+                    }
+                else:
+                    print(f"    - ✅ JSON repair succeeded on retry.")
+            except Exception as retry_exc:
+                print(f"    - ⚠️ JSON retry call failed: {retry_exc}")
+                return {
+                    "error": "JSON_PARSE_ERROR",
+                    "message": f"LLM output invalid: {error_msg}",
+                    "raw_output": str(raw_text)[:500]
+                }
         
         # Structure Validation
         if "proposed_experiments" not in refined_result:
