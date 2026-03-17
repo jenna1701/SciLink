@@ -1240,8 +1240,22 @@ class PlanningOrchestratorAgent:
         while iteration < max_iterations:
             iteration += 1
 
-            print(f"  ⏳ Waiting for LLM response ...") 
-            
+            # Compress large tool results when chat history gets too big.
+            # Only triggers near context limit — leaves history untouched otherwise.
+            total_chars = sum(len(m.get("content", "") or "") for m in self.messages)
+            if total_chars > 400000:  # ~100K tokens — compress to stay within limits
+                for msg in self.messages[:-2]:  # skip most recent messages
+                    if msg["role"] == "tool" and len(msg.get("content", "")) > 20000:
+                        original_len = len(msg["content"])
+                        msg["content"] = (
+                            msg["content"][:5000]
+                            + f"\n\n... ({original_len - 5000} chars truncated from history. "
+                            f"Use read_file to re-read the full content only if "
+                            f"the truncated portion above is insufficient for your current task.)"
+                        )
+
+            print(f"  ⏳ Waiting for LLM response ...")
+
             response = litellm.completion(
                 model=self.model.model,
                 messages=self.messages,
