@@ -769,13 +769,8 @@ Provide a brief summary of what the results mean and any actions needed.
 
     def _convert_amber_to_lammps_inline(self, prmtop, inpcrd):
         output_data = os.path.join(self.working_dir, "system.data")
-        import parmed as pmd
-        system = pmd.load_file(prmtop, xyz=inpcrd)
-        self.logger.info(f"ParmEd loaded: {len(system.atoms)} atoms")
-        system.save(output_data, format="lammps", overwrite=True)
-        if not os.path.exists(output_data):
-            raise FileNotFoundError(f"ParmEd did not create {output_data}")
-        return output_data
+        from ...tools.amber_tools import convert_amber_to_lammps
+        return convert_amber_to_lammps(prmtop, inpcrd, output_data)
 
     # ================================================================
     # CORE UTILITY METHODS (unchanged)
