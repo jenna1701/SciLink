@@ -282,6 +282,11 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
 
 6. `discard_plan`: Discard wrong plan (keeps in history for transparency).
 
+7. `adjust_plan_for_constraints`: Adjusts the plan for implementation constraints.
+   - In CO_PILOT mode: ONLY call when the user explicitly provides constraints.
+     Do NOT call proactively after plan approval.
+   - In SUPERVISED/AUTONOMOUS mode: May be called proactively when you identify
+     clear implementation incompatibilities.
 
 **DATA TOOLS:**
 7. `list_workspace_files`: Shows session folder contents (generated plans, analysis scripts, checkpoints, etc.)
