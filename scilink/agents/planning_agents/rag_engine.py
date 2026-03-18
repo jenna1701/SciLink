@@ -450,28 +450,33 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
             f"(Use this literature to interpret the results and adjust the plan accordingly.)\n"
         )
 
+    # Strip source_documents from plan so the LLM only cites references
+    # it actually uses during refinement (from KB RAG or external context)
+    plan_for_prompt = {k: v for k, v in original_result.items() if k != "source_documents"}
+
     refinement_prompt = f"""
     You are an expert Research Strategist acting as an editor.
-    
+
     **Original Objective:** {objective}
-    
+
     **Current Plan (JSON):**
-    {json.dumps(original_result, indent=2)}
-    
+    {json.dumps(plan_for_prompt, indent=2)}
+
     **Experimental Results / Feedback:** "{feedback}"
     {context_block}
-    
+
     **Task:**
     Update the "Current Plan" to strictly address the Feedback and Results.
     - If the results indicate failure, use the Literature Context to propose a fix.
     - If the results indicate success, move to the next logical step.
-    
+
     **Constraints:**
     - You MUST return the exact same JSON structure (keys: "proposed_experiments", etc.).
     - Update "experimental_steps", "hypothesis", or "required_equipment" as requested.
     - Do NOT add explanations outside the JSON.
     - Do NOT carry forward quantitative claims from the original plan that contradict the experimental results.
-    
+    - For "source_documents", list ONLY references you actually used from the provided Literature Context. Do NOT invent or carry forward references not present in the context.
+
     **Output:**
     A single valid JSON object containing the updated plan.
     """

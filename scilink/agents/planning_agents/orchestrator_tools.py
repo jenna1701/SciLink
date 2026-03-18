@@ -1068,6 +1068,12 @@ class OrchestratorTools:
                 lp = Path(literature_context)
                 ext_parts.append(lp.read_text() if lp.is_file() else literature_context)
                 print(f"    📚 Literature context provided")
+            else:
+                # Auto-load hypothesis context from session if available
+                lit_path = self.orch.base_dir / "literature_search_hypothesis_context.md"
+                if lit_path.is_file():
+                    ext_parts.append(lit_path.read_text())
+                    print(f"    📚 Auto-loaded literature hypothesis context from session")
             if molecule_context:
                 mp = Path(molecule_context)
                 mol_text = mp.read_text() if mp.is_file() else molecule_context
