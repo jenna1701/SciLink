@@ -450,28 +450,33 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
             f"(Use this literature to interpret the results and adjust the plan accordingly.)\n"
         )
 
+    # Strip source_documents from plan so the LLM only cites references
+    # it actually uses during refinement (from KB RAG or external context)
+    plan_for_prompt = {k: v for k, v in original_result.items() if k != "source_documents"}
+
     refinement_prompt = f"""
     You are an expert Research Strategist acting as an editor.
-    
+
     **Original Objective:** {objective}
-    
+
     **Current Plan (JSON):**
-    {json.dumps(original_result, indent=2)}
-    
+    {json.dumps(plan_for_prompt, indent=2)}
+
     **Experimental Results / Feedback:** "{feedback}"
     {context_block}
-    
+
     **Task:**
     Update the "Current Plan" to strictly address the Feedback and Results.
     - If the results indicate failure, use the Literature Context to propose a fix.
     - If the results indicate success, move to the next logical step.
-    
+
     **Constraints:**
     - You MUST return the exact same JSON structure (keys: "proposed_experiments", etc.).
     - Update "experimental_steps", "hypothesis", or "required_equipment" as requested.
     - Do NOT add explanations outside the JSON.
     - Do NOT carry forward quantitative claims from the original plan that contradict the experimental results.
-    
+    - For "source_documents", list ONLY references you actually used from the provided Literature Context. Do NOT invent or carry forward references not present in the context.
+
     **Output:**
     A single valid JSON object containing the updated plan.
     """
@@ -491,13 +496,45 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
         refined_result, error_msg = parse_json_from_response(response)
         
         if error_msg:
-            print(f"    - ⚠️ JSON Parsing Failed: {error_msg}")
-            # Return an error object so the agent knows to stop.
-            return {
-                "error": "JSON_PARSE_ERROR",
-                "message": f"LLM output invalid: {error_msg}",
-                "raw_output": str(response.text)[:500] if hasattr(response, 'text') else "No text"
-            }
+            print(f"    - ⚠️ JSON Parsing Failed: {error_msg}. Retrying...")
+
+            raw_text = ""
+            if hasattr(response, 'text'):
+                raw_text = response.text
+            elif hasattr(response, 'parts') and response.parts:
+                raw_text = response.parts[0].text
+
+            repair_prompt = (
+                "The following text was intended to be valid JSON but has a formatting error.\n\n"
+                f"**Error:** {error_msg}\n\n"
+                f"**Raw text:**\n{raw_text}\n\n"
+                "Fix ONLY the JSON formatting issues (missing commas, unescaped characters, "
+                "trailing commas, etc.). Do NOT change any content or values. "
+                "Return ONLY the corrected JSON object with no explanation."
+            )
+
+            try:
+                retry_response = model.generate_content(
+                    [repair_prompt], generation_config=generation_config
+                )
+                refined_result, retry_error = parse_json_from_response(retry_response)
+
+                if retry_error:
+                    print(f"    - ⚠️ JSON Retry Also Failed: {retry_error}")
+                    return {
+                        "error": "JSON_PARSE_ERROR",
+                        "message": f"LLM output invalid after retry: {retry_error}",
+                        "raw_output": str(raw_text)[:500]
+                    }
+                else:
+                    print(f"    - ✅ JSON repair succeeded on retry.")
+            except Exception as retry_exc:
+                print(f"    - ⚠️ JSON retry call failed: {retry_exc}")
+                return {
+                    "error": "JSON_PARSE_ERROR",
+                    "message": f"LLM output invalid: {error_msg}",
+                    "raw_output": str(raw_text)[:500]
+                }
         
         # Structure Validation
         if "proposed_experiments" not in refined_result:

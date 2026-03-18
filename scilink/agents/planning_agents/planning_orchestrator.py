@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -204,6 +205,27 @@ You are the **Research Agent**. Your goal is to coordinate a scientific campaign
 
 **STRATEGY & PLANNING TOOLS:**
 
+**LITERATURE SEARCH WORKFLOW:**
+When the objective could benefit from external scientific literature, call
+`search_literature` FIRST, then pass the returned `file_path` as `literature_context`
+to the downstream tool. If you call `search_literature` and do NOT pass the file_path
+to the next tool that accepts it, the literature search was wasted.
+
+TEA and planning use different search types — call `search_literature` separately
+for each:
+  search_literature(objective="...", search_type="economic_data") → tea_lit_path
+  run_economic_analysis(..., literature_context=tea_lit_path)
+
+  search_literature(objective="...", search_type="hypothesis_context") → plan_lit_path
+  generate_initial_plan(..., literature_context=plan_lit_path)
+
+For refinement, reuse existing literature or run a new search as needed.
+
+**MOLECULAR DESIGN WORKFLOW:**
+When the objective involves molecular design, molecular synthesis planning, or molecular discovery,
+call `query_molecules` FIRST, then pass the returned `file_path` as `molecule_context`
+to `generate_initial_plan` or `refine_plan_with_results`.
+
 **TEA-FIRST RULE:** Run `run_economic_analysis` BEFORE `generate_initial_plan` when the
 objective or subject implies economic relevance — e.g., critical materials recovery,
 process scale-up, cost optimization, resource extraction, manufacturing, market-driven
@@ -216,6 +238,8 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
    - Extract knowledge_paths when user mentions papers/PDFs/documents
    - Extract primary_data_set when user mentions experimental data or results folders or files
    - additional_context: Lab constraints, equipment, reagents, budget
+   - literature_context: File path from search_literature() (optional)
+   - molecule_context: File path from query_molecules() (optional)
    - Previous TEA results automatically included when available
    - Example:
      * "Generate plan for Li recovery using info in ./papers/ and preliminary results in ./data/"
@@ -225,6 +249,7 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
 
 2. `run_economic_analysis`: Assess economic viability, costs, market fit.
     - Run BEFORE generate_initial_plan when the objective is economically motivated.
+    - literature_context: File path from search_literature(search_type="economic_data") (optional)
     - When primary_data_set is provided, ALL analysis and planning must be constrained to materials/conditions actually present in that data. Literature provides process knowledge, not feedstock assumptions.
     - Results are stored and automatically included in subsequent plan generation.
 
@@ -241,6 +266,8 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
 4. `refine_plan_with_results`: Refine scientific strategy based on experimental results.
    - Use for: failures, pivots, qualitative observations, visual analysis
    - Accepts: text descriptions, file paths, or comma-separated files
+   - literature_context: File path from search_literature() (optional)
+   - molecule_context: File path from query_molecules() (optional)
    - Updates: Scientific plan only (no code changes)
    - Example:
      * "Refine based on ./run_005.csv and ./plot.png"
@@ -255,6 +282,11 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
 
 6. `discard_plan`: Discard wrong plan (keeps in history for transparency).
 
+7. `adjust_plan_for_constraints`: Adjusts the plan for implementation constraints.
+   - In CO_PILOT mode: ONLY call when the user explicitly provides constraints.
+     Do NOT call proactively after plan approval.
+   - In SUPERVISED/AUTONOMOUS mode: May be called proactively when you identify
+     clear implementation incompatibilities.
 
 **DATA TOOLS:**
 7. `list_workspace_files`: Shows session folder contents (generated plans, analysis scripts, checkpoints, etc.)
@@ -385,6 +417,10 @@ Assume user runs agent from project directory. For example, when user says "file
     grounded in the user's codebase.
 - If `generate_implementation_code` or `refine_implementation_code` returns status="error",
   clearly inform the user of the failure and the reason before proceeding with any alternative.
+
+**MCP OUTPUT PERSISTENCE:**
+- When an MCP tool returns generated code, protocols, or other text artifacts, call `save_file`
+  to persist the output BEFORE calling any other tool.
 
 **BEHAVIOR:**
 - Extract ALL paths mentioned by user (papers, data, code, reports)
@@ -577,6 +613,26 @@ class PlanningOrchestratorAgent:
         if self.knowledge_dir:
             planner_kwargs["kb_base_path"] = str(self.knowledge_dir / "default_kb")
         self.planner = PlanningAgent(**planner_kwargs)
+
+        # Literature & Molecules agents (orchestrator-level tools)
+        self.lit_agent = None
+        self.mol_agent = None
+        if futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY"):
+            from ..lit_agents.literature_agent import LiteratureSearchAgent
+            from ..lit_agents.molecules_agent import MoleculesAgent
+            from ..lit_agents.optimize_query import optimize_search_query
+            fh_key = futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY")
+            try:
+                self.lit_agent = LiteratureSearchAgent(fh_key, max_wait_time=3000)
+                logging.info("✅ Orchestrator: Literature Search Agent initialized.")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to initialize Literature Agent: {e}")
+            try:
+                self.mol_agent = MoleculesAgent(fh_key, max_wait_time=3000)
+                logging.info("✅ Orchestrator: Molecules Agent initialized.")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to initialize Molecules Agent: {e}")
+
         self.scalarizer = ScalarizerAgent(
             api_key=api_key,
             model_name=model_name,
@@ -1072,6 +1128,32 @@ class PlanningOrchestratorAgent:
             
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
 
+    def _compress_large_tool_results(self):
+        """Compress large tool results in chat history to prevent context overflow.
+
+        Only triggers when total history exceeds 100K chars. Truncates tool
+        results larger than 30K chars to 5K chars, preserving the file_path
+        for re-reading. Skips the 2 most recent messages to avoid truncating
+        results the LLM hasn't responded to yet.
+        """
+        total_chars = sum(len(m.get("content", "") or "") for m in self.messages)
+        if total_chars > 100000:
+            compressed = 0
+            for msg in self.messages[:-2]:
+                if msg["role"] == "tool" and len(msg.get("content", "")) > 30000:
+                    original_len = len(msg["content"])
+                    msg["content"] = (
+                        msg["content"][:5000]
+                        + f"\n\n... ({original_len - 5000} chars truncated from history. "
+                        f"Use read_file to re-read the full content only if "
+                        f"the truncated portion above is insufficient for your current task.)"
+                    )
+                    compressed += 1
+            if compressed:
+                new_total = sum(len(m.get("content", "") or "") for m in self.messages)
+                print(f"  📦 Compressed {compressed} large tool result(s) in history "
+                      f"({total_chars:,} → {new_total:,} chars)")
+
     def _auto_checkpoint(self):
         """Internal auto-checkpoint without LLM interaction."""
         try:
@@ -1119,15 +1201,21 @@ class PlanningOrchestratorAgent:
             system_msg = self.messages[0]
             recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
             self.messages = [system_msg] + recent_msgs
-        
+
+        self._compress_large_tool_results()
+
         max_iterations = 20
         iteration = 0
-        
+
         while iteration < max_iterations:
             iteration += 1
 
-            print(f"  ⏳ Waiting for LLM response ...") 
-            
+            # Also compress within the loop — tool calls can grow history mid-conversation
+            if iteration > 1:
+                self._compress_large_tool_results()
+
+            print(f"  ⏳ Waiting for LLM response ...")
+
             response = client.chat.completions.create(
                 model=self.model.model,
                 messages=self.messages,
@@ -1186,15 +1274,21 @@ class PlanningOrchestratorAgent:
             system_msg = self.messages[0]
             recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
             self.messages = [system_msg] + recent_msgs
-        
+
+        self._compress_large_tool_results()
+
         max_iterations = 20
         iteration = 0
-        
+
         while iteration < max_iterations:
             iteration += 1
 
-            print(f"  ⏳ Waiting for LLM response ...") 
-            
+            # Also compress within the loop — tool calls can grow history mid-conversation
+            if iteration > 1:
+                self._compress_large_tool_results()
+
+            print(f"  ⏳ Waiting for LLM response ...")
+
             response = litellm.completion(
                 model=self.model.model,
                 messages=self.messages,
