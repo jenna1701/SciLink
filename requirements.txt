@@ -1,6 +1,7 @@
 litellm>=1.80.16
 atomai>=0.8.1
 edison-client>=0.7.6
+newrelic>=12.0.0
 ase>=0.8.5
 aimsgb>=1.1.1
 gdown>=5.2.0
