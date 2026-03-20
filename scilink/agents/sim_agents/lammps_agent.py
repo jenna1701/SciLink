@@ -227,7 +227,7 @@ class LAMMPSSimulationAgent:
                 Dictionary with generated simulation info
             """
             # Copy the data file to the working directory
-            local_data_file = self._copy_data_file(data_file)
+            #local_data_file = self._copy_data_file(data_file)
     
             # Analyze the system
             system_info = self.analyze_system(data_file)
@@ -247,7 +247,7 @@ class LAMMPSSimulationAgent:
     
             # Generate LAMMPS script
             script_text = self._generate_script(
-                data_filename=os.path.basename(local_data_file),
+                data_filename=os.path.basename(data_file),
                 research_goal=research_goal,
                 system_description=system_description,
                 system_info=system_info,
@@ -278,7 +278,7 @@ class LAMMPSSimulationAgent:
             return {
                 "script_path": str(script_path),
                 "readme_path": readme_path,
-                "data_path": str(local_data_file),
+                "data_path": str(data_file),
                 "system_info": system_info,
                 "simulation_parameters": simulation_params
             }
