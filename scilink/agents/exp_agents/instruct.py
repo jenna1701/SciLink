@@ -2577,11 +2577,6 @@ analysis is always preferred over a complex one with marginal benefit.
   disk r=3 to separate touching grains").
 - If the image quality is good, skip unnecessary preprocessing.
 
-**Domain Skill Rules (when provided):** If a "MANDATORY Domain Skill Rules" section appears \
-below, its rules are MANDATORY constraints on your analysis plan. These rules encode validated \
-domain expertise and override general-purpose defaults. Violations of skill rules are treated \
-as errors, not style preferences.
-
 **Common Analysis Approaches** (for reference):
 - Segmentation (Otsu, adaptive threshold, watershed, morphological)
 - Edge/boundary detection (Canny, Sobel, Laplacian of Gaussian)
@@ -2674,16 +2669,10 @@ IMAGE_ANALYSIS_SCRIPT_INSTRUCTIONS = """Write a Python script for image analysis
 - Pipeline: {processing_pipeline}
 - Features to extract: {features_to_extract}
 
-**CONFORMANCE REQUIREMENT:** Your script MUST implement exactly what the plan specifies:
-- Use the exact processing pipeline described (e.g., if the plan says "Otsu thresholding", \
-implement Otsu — not adaptive thresholding)
-- Apply operations in the specified order
-- Extract the listed features
-- If the Context section below contains "MANDATORY Domain Skill Rules", those rules are \
-binding constraints that MUST be followed in your implementation.
-Deviations are acceptable ONLY when they are obvious from the image properties (e.g., \
-RGB image when grayscale was assumed). In such cases, implement the closest viable pipeline \
-and document the deviation and reasoning in the results "summary" field.
+**CONFORMANCE:** Your script should implement the plan's methods and extract the listed \
+features. You may adjust numerical parameters (thresholds, window sizes, sigma values) \
+to produce reasonable results — document adjustments in the "summary" field. Do not \
+change the analysis methods themselves (e.g., don't replace Otsu with adaptive thresholding).
 
 **Context:** {context}
 
@@ -2778,13 +2767,17 @@ Check:
 (e.g., if the plan says "Otsu thresholding", does the script use Otsu — not adaptive thresholding?)
 2. **Feature extraction**: Does the script compute and report the features the plan lists?
 3. **Preprocessing**: Does the script handle preprocessing as the plan describes?
-4. **Domain skill compliance**: If MANDATORY Domain Skill Rules are listed above, does \
-the script follow ALL of them?
+4. **Domain expertise**: Does the script follow the general approach recommended by \
+domain expertise (if provided)?
 
 Allow reasonable implementation-level variation (variable naming, library choice for the \
-same operation). A deviation is **justified** only if it is obvious from the image properties \
-that the plan cannot work as written. In that case the script's "summary" field should \
-explain the deviation.
+same operation). A deviation is **justified** in two cases:
+1. It is obvious from the image properties that the plan cannot work as written.
+2. The script adjusts numerical parameters (thresholds, sigma values, filter criteria) \
+to achieve reasonable results, while keeping the same methods and pipeline structure. \
+The script's "summary" field should explain the adjustment.
+Changing the analysis method (e.g., replacing LoG with Hough circles) is NOT a justified \
+deviation — that requires a new plan via the retry pipeline.
 
 Return JSON:
 {{"conformant": true/false, "justified_deviations": ["deviations with stated reasoning, if any"], "unjustified_deviations": ["deviations with no explanation"], "summary": "one sentence"}}
