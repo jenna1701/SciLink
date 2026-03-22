@@ -1,0 +1,823 @@
+"""
+ImageAnalysisAgent: General-Purpose Image Analysis Agent
+
+This module provides an LLM-driven image analysis agent that handles both
+single image analysis and image series analysis using the same unified
+architecture. The LLM observes the image, plans an analysis approach,
+writes custom Python code, executes it in a sandbox, and verifies quality.
+
+Quality control features:
+- LLM-driven quality assessment with task-specific criteria
+- Statistical outlier detection for series (may indicate interesting physics)
+- Adaptive refit of flagged images with independent approach selection
+- Consistency pass to align refitted approaches when a majority agrees
+- Human feedback integration for unresolved quality issues
+
+For series analysis:
+1. Carefully plan the analysis approach on a representative image
+2. Lock the analysis pipeline and strategy for remaining images
+3. Detect and flag images where the locked approach fails
+4. Adaptive refit: re-analyze flagged images independently with full QC,
+   injecting experimental context and series context into the refit prompt
+5. Consistency pass: if a majority of refitted images converge on the same
+   approach, re-refit outliers using the consensus approach as peer evidence
+6. Generate custom analysis code for feature trend visualization
+7. Synthesize findings across the series, including refit analysis
+"""
+
+import os
+import json
+import logging
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Union
+import numpy as np
+
+from .base_agent import BaseAnalysisAgent, AnalysisInput
+from .human_feedback import SimpleFeedbackMixin
+from ...executors import ScriptExecutor, require_sandbox_approval
+from ..lit_agents.literature_agent import FittingModelLiteratureAgent
+from .pipelines.image_analysis_pipelines import create_unified_image_analysis_pipeline
+from ...tools.image_analysis_tools import (
+    load_image_data,
+    image_to_thumbnail_bytes,
+    create_image_montage,
+)
+from ._deprecation import normalize_params
+from ...skills.loader import load_skill
+
+from .instruct import (
+    IMAGE_ANALYSIS_INTERPRETATION_INSTRUCTIONS,
+    IMAGE_ANALYSIS_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
+    """
+    Unified Image Analysis Agent for general-purpose scientific image analysis.
+
+    ALL analysis follows the series processing pattern:
+    - Single image analysis = series of 1
+    - Multiple images = standard series processing
+    - Numpy array stack = series processing
+
+    The LLM plans the analysis approach, writes custom Python code using
+    scikit-image, OpenCV, scipy, scikit-learn, etc., executes it in a
+    sandboxed environment, and verifies quality through visual inspection
+    and quantitative metrics.
+
+    Quality control:
+    - LLM verification loop (n iterations) to catch and fix issues automatically
+    - Human feedback for additional refinement (if enabled)
+    - Automatic approach retry when quality is inadequate
+    - Statistical outlier detection for series (may indicate interesting physics)
+    - Adaptive refit of flagged images with independent approach selection
+    - Consistency pass to align refitted approaches when a majority agrees
+
+    For series analysis, the analysis approach is carefully selected on a
+    representative image and then LOCKED for consistent analysis across all
+    images. When the locked approach fails on some images, the adaptive
+    refit step re-analyzes those images independently.
+
+    Security:
+    - This agent executes LLM-generated Python code for image analysis
+    - A sandbox check is performed at initialization
+    - If no sandbox (Docker/VM/Colab) is detected, user is prompted to confirm
+    - Use UNSAFE_EXECUTION_OK=true environment variable to bypass in CI/CD
+
+    Args:
+        api_key: LLM API key
+        model_name: LLM model name
+        base_url: LLM API base URL
+        output_dir: Output directory
+        futurehouse_api_key: FutureHouse API key for literature
+        use_literature: Enable literature search (default: False)
+        enable_human_feedback: Enable feedback loop
+        executor_timeout: Script timeout in seconds
+        max_approach_retries: Max alternative approaches to try (default: 3)
+        outlier_sigma: Sigma threshold for outlier detection (default: 2.0)
+        max_verification_iterations: Max LLM verification iterations (default: 5)
+
+    Example:
+        agent = ImageAnalysisAgent(api_key="...")
+
+        # Single image
+        result = agent.analyze("image.tif")
+
+        # Multiple images (series)
+        result = agent.analyze(["img1.tif", "img2.tif", "img3.tif"])
+
+        # Numpy stack
+        result = agent.analyze(my_image_stack)
+
+        # With metadata and hints
+        result = agent.analyze(
+            "image.tif",
+            system_info={"sample": "steel alloy", "instrument": "SEM"},
+            hints="Focus on grain boundaries"
+        )
+
+        # Series with metadata
+        result = agent.analyze(
+            image_paths,
+            series_metadata={
+                "variable": "temperature",
+                "values": [300, 350, 400, 450, 500],
+                "unit": "K"
+            }
+        )
+
+        # With auxiliary data for context
+        result = agent.analyze(
+            "sem_image.tif",
+            auxiliary_data="eds_spectrum.csv",
+            auxiliary_label="EDS spectrum from same region"
+        )
+
+        # With domain skill
+        result = agent.analyze("image.tif", skill="my_skill.md")
+
+        # Custom quality settings
+        agent = ImageAnalysisAgent(
+            api_key="...",
+            max_approach_retries=5,         # Try more alternatives
+            outlier_sigma=3.0,              # Less aggressive outlier detection
+            max_verification_iterations=3   # Fewer verification passes
+        )
+
+        # Get measurement recommendations
+        recommendations = agent.recommend_measurements(analysis_result=result)
+
+    Raises:
+        RuntimeError: If sandbox check fails and user declines to proceed.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model_name: str = "gemini-3.1-pro-preview",
+        base_url: str | None = None,
+        output_dir: str = "image_analysis_output",
+        # Deprecated parameters
+        google_api_key: str | None = None,
+        local_model: str | None = None,
+        # Agent configuration
+        futurehouse_api_key: str | None = None,
+        use_literature: bool = False,
+        enable_human_feedback: bool = True,
+        executor_timeout: int = 300,
+        max_wait_time: int = 1000,
+        # Quality control settings
+        max_approach_retries: int = 3,
+        outlier_sigma: float = 2.0,
+        max_verification_iterations: int = 5,
+        **kwargs,
+    ):
+        # ====================================================================
+        # SANDBOX CHECK - Must happen first, before any expensive operations
+        # ====================================================================
+        if not require_sandbox_approval(
+            context="ImageAnalysisAgent (image analysis)"
+        ):
+            raise RuntimeError(
+                "ImageAnalysisAgent requires code execution but user declined. "
+                "Run in Docker, VM, or Colab for safe execution."
+            )
+
+        self.api_key, self.base_url = normalize_params(
+            api_key, google_api_key, base_url, local_model, source="ImageAnalysisAgent"
+        )
+
+        super().__init__(
+            api_key=self.api_key,
+            model_name=model_name,
+            base_url=self.base_url,
+            output_dir=output_dir,
+            enable_human_feedback=enable_human_feedback,
+        )
+
+        self.agent_type = "image_analysis"
+        self.use_literature = use_literature
+        self.output_dir = Path(self.output_dir).resolve()
+
+        # Quality control settings
+        self.max_approach_retries = max_approach_retries
+        self.outlier_sigma = outlier_sigma
+        self.max_verification_iterations = max_verification_iterations
+
+        self.executor = ScriptExecutor(timeout=executor_timeout)
+
+        # Optional literature agent
+        self.literature_agent = None
+        if use_literature:
+            lit_key = futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY")
+            if lit_key:
+                try:
+                    self.literature_agent = FittingModelLiteratureAgent(
+                        api_key=lit_key, max_wait_time=max_wait_time
+                    )
+                    logger.info("Literature agent initialized")
+                except Exception as e:
+                    logger.error(f"Literature agent failed: {e}")
+            else:
+                logger.warning("use_literature=True but no API key provided")
+
+    def _get_initial_state_fields(self) -> dict:
+        """Return initial state fields for the agent."""
+        return {
+            "current_image": None,
+            "pipeline_type": "image_analysis_unified",
+            "is_series": False,
+        }
+
+    def analyze(
+        self,
+        data: AnalysisInput,
+        system_info: Dict[str, Any] | str | None = None,
+        objective: str | None = None,
+        hints: str | None = None,
+        series_metadata: Optional[dict] = None,
+        auxiliary_data: Optional[str] = None,
+        auxiliary_label: Optional[str] = None,
+        skill: Optional[str] = None,
+        prior_knowledge: Optional[List[Dict[str, Any]]] = None,
+        # Quality control overrides
+        max_approach_retries: Optional[int] = None,
+        outlier_sigma: Optional[float] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """
+        Unified analysis method — handles single images and series identically.
+
+        Single image analysis is internally converted to a series of 1.
+        For series, the analysis approach is locked after planning.
+
+        Args:
+            data: Input data. Can be:
+                - str: Single image path (.npy, .png, .tif, .jpg)
+                - List[str]: Multiple image paths (series)
+                - np.ndarray: 2D (single grayscale), 3D (single RGB or
+                  grayscale stack), or 4D (RGB stack) array
+            system_info: Sample/experiment metadata
+            objective: High-level scientific objective
+            hints: Tactical guidance for analysis
+            series_metadata: Metadata about the series::
+
+                    {
+                        "variable": "temperature",
+                        "values": [300, 350, 400],
+                        "unit": "K"
+                    }
+
+            auxiliary_data: Path to auxiliary reference data
+            auxiliary_label: Description of auxiliary data
+            skill: Domain skill name or path to .md skill file
+            prior_knowledge: Reference findings from previous analyses
+            max_approach_retries: Override default max retries
+            outlier_sigma: Override default outlier sigma
+
+        Returns:
+            Dict with status, detailed_analysis, scientific_claims,
+            analysis_approach, extracted_features, output_directory,
+            and for series: individual_results, trend_analysis,
+            flagged_images
+        """
+        # Use provided overrides or fall back to instance defaults
+        effective_max_retries = (
+            max_approach_retries
+            if max_approach_retries is not None
+            else self.max_approach_retries
+        )
+        effective_outlier_sigma = (
+            outlier_sigma if outlier_sigma is not None else self.outlier_sigma
+        )
+
+        # Parse input
+        data_path, data_paths, data_array, error = self._parse_data_input(data)
+
+        if error:
+            return {
+                "status": "error",
+                "error": error,
+                "output_directory": str(self.output_dir),
+            }
+
+        # Normalize to internal variables
+        image_path = data_path
+        image_paths = data_paths
+        image_stack = data_array
+
+        # Convert single image to series of 1
+        if image_path is not None:
+            image_paths = [image_path]
+            self.logger.info("Single image mode: treating as series of 1")
+
+        # Determine input type and count
+        if image_stack is not None:
+            # Handle numpy array input
+            if image_stack.ndim == 2:
+                # 2D: single grayscale image
+                image_stack = image_stack[np.newaxis, :, :]
+                self.logger.info(
+                    f"2D array provided, converted to shape {image_stack.shape}"
+                )
+            elif image_stack.ndim == 3:
+                # 3D: could be single RGB (H, W, 3) or grayscale stack (N, H, W)
+                if image_stack.shape[2] in (3, 4):
+                    # Single RGB/RGBA image
+                    image_stack = image_stack[np.newaxis, :, :, :]
+                    self.logger.info(
+                        f"3D RGB array provided, converted to shape {image_stack.shape}"
+                    )
+                # else: grayscale stack (N, H, W) — already correct
+            elif image_stack.ndim == 4:
+                # 4D: RGB stack (N, H, W, C) — already correct
+                pass
+            else:
+                return {
+                    "status": "error",
+                    "error": {
+                        "error": "Invalid shape",
+                        "details": f"Array must be 2D, 3D, or 4D, got {image_stack.ndim}D",
+                    },
+                    "output_directory": str(self.output_dir),
+                }
+
+            num_images = image_stack.shape[0]
+            input_type = "numpy_array"
+        else:
+            num_images = len(image_paths)
+            input_type = "file_paths"
+
+        is_single_image = num_images == 1
+
+        self.logger.info("")
+        self.logger.info(
+            f"🖼️  IMAGE ANALYSIS - {num_images} image{'s' if num_images > 1 else ''}"
+        )
+        self.logger.info(
+            f"   Quality: max_retries={effective_max_retries}"
+        )
+        if not is_single_image:
+            self.logger.info(f"   Outlier detection: {effective_outlier_sigma}σ")
+
+        # Load first image for initial analysis
+        if image_stack is not None:
+            first_image = image_stack[0]
+            first_image_name = "image_0000"
+        else:
+            try:
+                first_image = load_image_data(image_paths[0])
+                first_image_name = Path(image_paths[0]).stem
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "error": {"error": "Failed to load image", "details": str(e)},
+                    "output_directory": str(self.output_dir),
+                }
+
+        # Generate thumbnail for LLM
+        original_image_bytes = image_to_thumbnail_bytes(first_image)
+
+        # Compute statistics
+        image_statistics = self._compute_image_statistics(first_image)
+
+        # Load auxiliary data if provided
+        aux_state = {
+            "auxiliary_plot_bytes": None,
+            "auxiliary_label": None,
+            "auxiliary_summary": None,
+            "auxiliary_mime_type": None,
+        }
+        if auxiliary_data:
+            aux_state = self._load_auxiliary_data(auxiliary_data, auxiliary_label)
+            if aux_state.get("auxiliary_plot_bytes"):
+                self.logger.info(
+                    f"   Auxiliary data loaded: {aux_state['auxiliary_label']}"
+                )
+
+        # Load skill if provided
+        skill_state = {"skill_name": None, "skill_sections": None}
+        if skill:
+            try:
+                parsed = load_skill(skill, domain="image_analysis")
+                skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
+                self.logger.info(f"   Skill loaded: {parsed['name']}")
+            except FileNotFoundError:
+                self.logger.warning(
+                    f"   Skill '{skill}' not found — proceeding without domain skill"
+                )
+
+        # Extract series metadata from system_info if not provided explicitly
+        handled_system_info = self._handle_system_info(system_info)
+        handled_system_info, series_metadata = self._extract_series_metadata(
+            handled_system_info, series_metadata
+        )
+
+        # Build initial state
+        state = {
+            # Input data
+            "image_paths": image_paths,
+            "image_stack": image_stack,
+            "input_type": input_type,
+            "num_images": num_images,
+            "is_single_image": is_single_image,
+            # System info
+            "system_info": handled_system_info,
+            "series_metadata": series_metadata or {},
+            "analysis_hints": hints,
+            "analysis_objective": objective,
+            # Auxiliary reference data
+            **aux_state,
+            # Domain skill
+            **skill_state,
+            # Prior knowledge
+            "prior_knowledge": prior_knowledge or [],
+            # First image (for planning)
+            "image_path": (
+                image_paths[0] if image_paths else first_image_name
+            ),
+            "image_data": first_image,
+            "original_image_bytes": original_image_bytes,
+            "image_statistics": image_statistics,
+            # Pipeline state
+            "analysis_images": [
+                {"label": "Original Image", "data": original_image_bytes}
+            ],
+            "result_json": {},
+            "error_dict": None,
+        }
+
+        # Create unified pipeline
+        pipeline = create_unified_image_analysis_pipeline(
+            model=self.model,
+            logger=self.logger,
+            generation_config=self.generation_config,
+            safety_settings=self.safety_settings,
+            parse_fn=self._parse_llm_response,
+            store_fn=self._store_analysis_images,
+            image_to_bytes_fn=image_to_thumbnail_bytes,
+            montage_fn=create_image_montage,
+            executor=self.executor,
+            output_dir=str(self.output_dir),
+            literature_agent=self.literature_agent,
+            enable_human_feedback=self.enable_human_feedback,
+            max_approach_retries=effective_max_retries,
+            outlier_sigma=effective_outlier_sigma,
+            max_verification_iterations=self.max_verification_iterations,
+        )
+
+        # Execute pipeline
+        for i, controller in enumerate(pipeline, 1):
+            step_name = controller.__class__.__name__
+            self.logger.info(f"\n--- STEP {i}: {step_name} ---\n")
+
+            try:
+                state = controller.execute(state)
+
+                if state.get("error_dict"):
+                    self.logger.error(
+                        f"Pipeline failed at {step_name}: {state['error_dict']}"
+                    )
+                    break
+
+            except Exception as e:
+                self.logger.error(
+                    f"Pipeline step {step_name} raised exception: {e}"
+                )
+                state["error_dict"] = {
+                    "error": f"Pipeline step failed: {step_name}",
+                    "details": str(e),
+                }
+                break
+
+        # Handle errors
+        if state.get("error_dict"):
+            return {
+                "status": "error",
+                "error": state["error_dict"],
+                "output_directory": str(self.output_dir),
+            }
+
+        # Compile results
+        final_results = self._compile_results(state)
+
+        # Save final results
+        results_path = self.output_dir / "analysis_results.json"
+        with open(results_path, "w") as f:
+            serializable = self._make_serializable(final_results)
+            json.dump(serializable, f, indent=2, default=str)
+
+        # Save analysis scripts for reproducibility
+        self._save_analysis_scripts(state)
+
+        self.logger.info("")
+        self.logger.info("ANALYSIS COMPLETE")
+        self.logger.info(f"   Results: {results_path}")
+        if state.get("report_path"):
+            self.logger.info(f"   Report: {state['report_path']}")
+
+        flagged = final_results.get("flagged_images", [])
+        if flagged:
+            self.logger.warning(f"   {len(flagged)} images flagged for review")
+
+        # Log action
+        self._log_action(
+            action="image_analysis",
+            input_ctx={
+                "num_images": num_images,
+                "input_type": input_type,
+                "series_metadata": series_metadata,
+            },
+            result=(
+                final_results.get("summary")
+                if not is_single_image
+                else final_results
+            ),
+            rationale=f"Approach: {final_results.get('analysis_approach', 'unknown')}",
+        )
+
+        return final_results
+
+    def _compute_image_statistics(self, image: np.ndarray) -> dict:
+        """Compute statistics for an image."""
+        stats = {
+            "shape": list(image.shape),
+            "dtype": str(image.dtype),
+            "has_nans": bool(np.any(np.isnan(image))) if np.issubdtype(image.dtype, np.floating) else False,
+        }
+
+        if image.ndim == 2:
+            stats["channels"] = 1
+            h, w = image.shape
+        elif image.ndim == 3:
+            h, w = image.shape[:2]
+            stats["channels"] = image.shape[2]
+        else:
+            h, w = image.shape[:2]
+            stats["channels"] = image.shape[2] if image.ndim > 2 else 1
+
+        stats["aspect_ratio"] = round(w / h, 3) if h > 0 else 0
+
+        arr = image.astype(np.float64)
+        stats["intensity_range"] = [float(np.nanmin(arr)), float(np.nanmax(arr))]
+        stats["intensity_mean"] = float(np.nanmean(arr))
+        stats["intensity_std"] = float(np.nanstd(arr))
+
+        return stats
+
+    def _load_auxiliary_data(
+        self, auxiliary_data: str, auxiliary_label: Optional[str]
+    ) -> dict:
+        """Load auxiliary data and return state fields for pipeline injection."""
+        result = {
+            "auxiliary_plot_bytes": None,
+            "auxiliary_label": auxiliary_label or Path(auxiliary_data).stem,
+            "auxiliary_summary": None,
+            "auxiliary_mime_type": None,
+        }
+
+        if not os.path.exists(auxiliary_data):
+            self.logger.warning(f"Auxiliary data file not found: {auxiliary_data}")
+            return result
+
+        ext = Path(auxiliary_data).suffix.lower()
+        image_extensions = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+        curve_extensions = {".csv", ".txt", ".dat", ".tsv"}
+
+        try:
+            if ext in image_extensions or ext == ".npy":
+                img = load_image_data(auxiliary_data)
+                result["auxiliary_summary"] = (
+                    f"Image with shape {img.shape} (dtype: {img.dtype})."
+                )
+                result["auxiliary_plot_bytes"] = image_to_thumbnail_bytes(img)
+                result["auxiliary_mime_type"] = "image/jpeg"
+
+            elif ext in curve_extensions:
+                from ...tools.curve_fitting_tools import (
+                    load_curve_data,
+                    plot_curve_to_bytes,
+                )
+
+                curve = load_curve_data(auxiliary_data)
+                if curve.ndim == 2 and curve.shape[0] == 2:
+                    curve = curve.T
+
+                if curve.ndim == 2 and curve.shape[1] == 2:
+                    x, y = curve[:, 0], curve[:, 1]
+                else:
+                    x = np.arange(curve.shape[-1])
+                    y = curve.flatten()
+
+                result["auxiliary_summary"] = (
+                    f"1D curve with {len(x)} points. "
+                    f"X: [{float(np.nanmin(x)):.4g}, {float(np.nanmax(x)):.4g}]. "
+                    f"Y: [{float(np.nanmin(y)):.4g}, {float(np.nanmax(y)):.4g}]."
+                )
+
+                plot_info = {"title": result["auxiliary_label"]}
+                plot_data = np.column_stack([x, y])
+                result["auxiliary_plot_bytes"] = plot_curve_to_bytes(
+                    plot_data, plot_info
+                )
+                result["auxiliary_mime_type"] = "image/png"
+            else:
+                self.logger.warning(
+                    f"Unrecognized auxiliary file extension: {ext}"
+                )
+
+        except Exception as e:
+            self.logger.warning(f"Failed to load auxiliary data: {e}")
+
+        return result
+
+    def _save_analysis_scripts(self, state: dict) -> None:
+        """Save LLM-generated analysis scripts to disk for reproducibility."""
+        scripts_dir = self.output_dir / "scripts"
+        saved = []
+
+        if state.get("is_single_image", True):
+            script = state.get("final_script")
+            if script:
+                scripts_dir.mkdir(parents=True, exist_ok=True)
+                path = scripts_dir / "analysis_script.py"
+                path.write_text(script, encoding="utf-8")
+                saved.append(str(path))
+        else:
+            series_results = state.get("series_results", [])
+            for r in series_results:
+                script = r.get("script")
+                if script and r.get("success"):
+                    scripts_dir.mkdir(parents=True, exist_ok=True)
+                    safe_name = "".join(
+                        c if c.isalnum() or c in ("_", "-") else "_"
+                        for c in str(r.get("name", f"image_{r['index']}"))
+                    )
+                    path = scripts_dir / f"{safe_name}.py"
+                    path.write_text(script, encoding="utf-8")
+                    saved.append(str(path))
+
+        if saved:
+            self.logger.info(f"   Scripts: {scripts_dir} ({len(saved)} file(s))")
+
+    def _compile_results(self, state: dict) -> Dict[str, Any]:
+        """Compile results into a consistent output structure."""
+        is_single = state.get("is_single_image", True)
+        num_images = state.get("num_images", 1)
+        series_results = state.get("series_results", [])
+        synthesis = state.get("synthesis_result", {})
+        flagged_images = state.get("flagged_images", [])
+
+        results = {
+            "status": "success",
+            "output_directory": str(self.output_dir),
+        }
+
+        if is_single:
+            # Single image: compact structure
+            analysis_result = state.get("analysis_result", {})
+
+            results["detailed_analysis"] = synthesis.get("detailed_analysis")
+            results["scientific_claims"] = self._validate_scientific_claims(
+                synthesis.get("scientific_claims", [])
+            )
+            results["analysis_approach"] = state.get(
+                "locked_analysis_config", {}
+            ).get("analysis_approach")
+            results["extracted_features"] = analysis_result.get(
+                "extracted_features", {}
+            )
+            results["quality_metrics"] = analysis_result.get("quality_metrics", {})
+            results["literature_files"] = state.get("literature_files")
+
+            if series_results and series_results[0].get("quality_warning"):
+                results["quality_warning"] = series_results[0]["quality_warning"]
+
+        else:
+            # Series: full structure with trends and flagged images
+            successful = sum(
+                1 for r in series_results if r.get("success", False)
+            )
+
+            refit_summary = state.get("refit_summary", [])
+            results["summary"] = {
+                "total_images": num_images,
+                "successful_analyses": successful,
+                "flagged_count": len(flagged_images),
+                "refitted_count": sum(
+                    1 for r in refit_summary if r.get("improved")
+                ),
+                "input_type": state.get("input_type"),
+                "locked_approach": state.get(
+                    "locked_analysis_config", {}
+                ).get("analysis_approach"),
+                "is_single_image": False,
+            }
+
+            results["detailed_analysis"] = synthesis.get("detailed_analysis", "")
+            results["scientific_claims"] = self._validate_scientific_claims(
+                synthesis.get("scientific_claims", [])
+            )
+
+            results["individual_results"] = [
+                {
+                    "index": r["index"],
+                    "name": r["name"],
+                    "success": r["success"],
+                    "analysis_type": r.get("analysis_type"),
+                    "extracted_features": r.get("extracted_features", {}),
+                    "quality_metrics": r.get("quality_metrics", {}),
+                    "visualization_path": r.get("visualization_path"),
+                    "error": r.get("error"),
+                    "flagged": r.get("flagged", False),
+                    "flag_reason": r.get("flag_reason"),
+                    "adaptively_refitted": r.get("adaptively_refitted", False),
+                }
+                for r in series_results
+            ]
+
+            results["flagged_images"] = flagged_images
+            results["flagged_images_analysis"] = synthesis.get(
+                "flagged_images_analysis", {}
+            )
+            results["refit_summary"] = refit_summary
+            results["refit_analysis"] = synthesis.get("refit_analysis", {})
+            results["trend_analysis"] = state.get("trend_analysis_results", {})
+            results["feature_trends"] = synthesis.get("feature_trends", {})
+            results["caveats"] = synthesis.get("caveats", "")
+            results["literature_files"] = state.get("literature_files")
+            results["locked_analysis_config"] = state.get(
+                "locked_analysis_config"
+            )
+
+        return results
+
+    def _make_serializable(self, obj: Any) -> Any:
+        """Convert object to JSON-serializable form."""
+        if isinstance(obj, dict):
+            return {k: self._make_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._make_serializable(v) for v in obj]
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (np.integer, np.floating)):
+            return obj.item()
+        elif isinstance(obj, bytes):
+            return None
+        elif isinstance(obj, Path):
+            return str(obj)
+        else:
+            return obj
+
+    # =========================================================================
+    # BACKWARD COMPATIBLE METHODS
+    # =========================================================================
+
+    def analyze_image_series(
+        self,
+        image_paths: Optional[List[str]] = None,
+        image_stack: Optional[np.ndarray] = None,
+        system_info: Optional[Union[dict, str]] = None,
+        series_metadata: Optional[dict] = None,
+        objective: str | None = None,
+        hints: str | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Analyze a series of images.
+
+        BACKWARD COMPATIBLE: Delegates to unified analyze() method.
+        """
+        if image_paths is not None:
+            return self.analyze(
+                image_paths,
+                system_info=system_info,
+                series_metadata=series_metadata,
+                hints=hints,
+                objective=objective,
+            )
+        elif image_stack is not None:
+            return self.analyze(
+                image_stack,
+                system_info=system_info,
+                series_metadata=series_metadata,
+                hints=hints,
+                objective=objective,
+            )
+        else:
+            return {
+                "status": "error",
+                "error": {
+                    "error": "No input",
+                    "details": "Must provide image_paths or image_stack",
+                },
+                "output_directory": str(self.output_dir),
+            }
+
+    def _get_claims_instruction_prompt(self) -> str:
+        return IMAGE_ANALYSIS_INTERPRETATION_INSTRUCTIONS
+
+    def _get_measurement_recommendations_prompt(self) -> str:
+        return IMAGE_ANALYSIS_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS

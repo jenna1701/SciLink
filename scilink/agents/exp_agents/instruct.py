@@ -2547,3 +2547,332 @@ Output ONLY the updated skill document content in markdown, starting with `# ove
 
 # Backwards compatibility
 FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS = FITTING_INTERPRETATION_INSTRUCTIONS
+
+
+# ──────────────────────────────────────────────────────────────
+#  Image Analysis Agent Instructions
+# ──────────────────────────────────────────────────────────────
+
+IMAGE_ANALYSIS_PLANNING_INSTRUCTIONS = """You are an expert image analyst working with scientific microscopy and imaging data.
+
+You are provided with:
+1. **Image**: A 2D image (microscopy, SEM, TEM, AFM, optical, etc.)
+2. **Metadata**: Information about the sample, technique, and measurement conditions
+3. **Image Statistics**: Numerical summary (shape, dtype, intensity distribution)
+
+**Your Task:**
+Examine the image and determine the appropriate analysis approach. Consider:
+- What features are visible (grains, defects, phases, textures, boundaries, particles)?
+- What measurements can be extracted?
+- What image processing pipeline is needed?
+- Are preprocessing steps required (denoising, contrast enhancement, background subtraction)?
+
+**Physics-First Analysis (CRITICAL):**
+Every processing step MUST serve a physically motivated purpose. Do NOT apply arbitrary
+filters or complex pipelines solely to produce "interesting" outputs. A simple, well-justified
+analysis is always preferred over a complex one with marginal benefit.
+- Start with the minimum processing pipeline that the physics demands.
+- Only add processing steps if you can justify their physical purpose (e.g., "Gaussian blur
+  with sigma=2 to suppress shot noise before thresholding" or "morphological opening with
+  disk r=3 to separate touching grains").
+- If the image quality is good, skip unnecessary preprocessing.
+
+**Domain Skill Rules (when provided):** If a "MANDATORY Domain Skill Rules" section appears \
+below, its rules are MANDATORY constraints on your analysis plan. These rules encode validated \
+domain expertise and override general-purpose defaults. Violations of skill rules are treated \
+as errors, not style preferences.
+
+**Common Analysis Approaches** (for reference):
+- Segmentation (Otsu, adaptive threshold, watershed, morphological)
+- Edge/boundary detection (Canny, Sobel, Laplacian of Gaussian)
+- Feature extraction (connected components, region properties, contour analysis)
+- Texture analysis (GLCM, local binary patterns, Gabor filters)
+- Morphological measurements (area, perimeter, circularity, aspect ratio, solidity)
+- Phase identification (intensity clustering, color-space segmentation)
+- Defect detection (template matching, anomaly detection, local contrast)
+- Spatial statistics (nearest-neighbor distances, pair correlation, Voronoi tessellation)
+- Frequency analysis (FFT, bandpass filtering)
+
+**Commit to specific choices — do NOT hedge:**
+- State ONE segmentation method, not alternatives (write "Otsu thresholding" not "Otsu or adaptive")
+- Specify exact parameters where possible (write "Gaussian blur sigma=2" not "some smoothing")
+- State the exact pipeline sequence, not options
+- If you are unsure between options, pick the one best supported by the image characteristics —
+  the user can refine before the plan is locked
+- This plan will be translated directly into code; any ambiguity forces the code generator to guess
+
+**Output Format:**
+```json
+{{
+    "observations": "What you see in the image — describe visible features, contrast, noise level, structures",
+    "analysis_approach": "Overall strategy in one sentence",
+    "processing_pipeline": "Step-by-step sequence: e.g., 'Gaussian blur (sigma=2) -> Otsu threshold -> morphological opening (disk r=3) -> connected component labeling -> region property extraction'",
+    "features_to_extract": ["feature1", "feature2"],
+    "quality_criteria": "How to verify the analysis worked — specific, measurable where possible (e.g., 'segmentation should capture >90% of visible grains', 'detected edge map should trace visible boundaries')",
+    "expected_outputs": ["output_visualization_1.png", "output_visualization_2.png"],
+    "literature_query": "Question for literature search to help with analysis, or null if not needed"
+}}
+```
+"""
+
+
+IMAGE_ANALYSIS_SERIES_REGIME_SUPPLEMENT = """
+## Series Analysis Planning
+
+You are analyzing a series of {num_images} images. Representative images from across
+the series are shown above so you can see how the data evolves.
+
+**If the images appear UNIFORM** across the series (same features, similar contrast/structure):
+Return the standard response format with a single analysis approach for all images.
+
+**If the images change SIGNIFICANTLY** across the series (new features appearing,
+structural transitions, major contrast changes, or features indicating different regimes):
+Add a `"series_analysis_plan"` field to your JSON response:
+
+```json
+{{{{
+    "observations": "...",
+    "analysis_approach": "...",
+    "processing_pipeline": "primary pipeline (for the first/majority regime)",
+    "features_to_extract": ["feature1", "feature2"],
+    "quality_criteria": "...",
+    "expected_outputs": ["..."],
+    "literature_query": "...",
+    "series_analysis_plan": {{{{
+        "rationale": "Why multiple analysis regimes are needed",
+        "regimes": [
+            {{{{
+                "name": "descriptive regime name",
+                "image_indices": [0, 1, 2, 3],
+                "processing_pipeline": "pipeline for this regime",
+                "features_to_extract": ["feature1", "feature2"]
+            }}}}
+        ],
+        "transition_points": [
+            {{{{
+                "between_indices": [3, 4],
+                "variable_value": null,
+                "description": "Description of what changes at this transition"
+            }}}}
+        ]
+    }}}}
+}}}}
+```
+
+**Rules:**
+- Every image index (0 through {num_images_minus_1}) must appear in exactly ONE regime.
+- Each regime must have at least one image.
+- Only use multiple regimes when you can clearly see different image character.
+- When in doubt, use a single approach — the adaptive refit step can recover individual failures later.
+"""
+
+
+IMAGE_ANALYSIS_SCRIPT_INSTRUCTIONS = """Write a Python script for image analysis.
+
+**Your Plan:**
+- Approach: {analysis_approach}
+- Pipeline: {processing_pipeline}
+- Features to extract: {features_to_extract}
+
+**CONFORMANCE REQUIREMENT:** Your script MUST implement exactly what the plan specifies:
+- Use the exact processing pipeline described (e.g., if the plan says "Otsu thresholding", \
+implement Otsu — not adaptive thresholding)
+- Apply operations in the specified order
+- Extract the listed features
+- If the Context section below contains "MANDATORY Domain Skill Rules", those rules are \
+binding constraints that MUST be followed in your implementation.
+Deviations are acceptable ONLY when they are obvious from the image properties (e.g., \
+RGB image when grayscale was assumed). In such cases, implement the closest viable pipeline \
+and document the deviation and reasoning in the results "summary" field.
+
+**Context:** {context}
+
+**Data:**
+- Path: `{data_path}`
+- Shape: {shape}
+- dtype: {dtype}
+- Intensity range: [{intensity_min}, {intensity_max}]
+
+**Available Libraries:** numpy, scipy (ndimage, signal, optimize), scikit-image (skimage), \
+opencv-python (cv2), matplotlib, Pillow (PIL), scikit-learn (sklearn), pandas, json
+
+**Available Tool: Sliding FFT + NMF decomposition** (for detecting local structural variations):
+```python
+from scilink.tools.fft_nmf import SlidingFFTNMF
+fft_nmf = SlidingFFTNMF(n_components=3)
+components, abundances = fft_nmf.fit_transform(image_2d)
+# components: (n_components, fft_h, fft_w) — local FFT patterns
+# abundances: (1, n_components, grid_y, grid_x) — spatial maps of each pattern
+```
+Use this when you need to detect spatially varying periodicity, domain boundaries, \
+local lattice distortions, or structural phase changes across the image. Each NMF \
+component represents a distinct local diffraction pattern, and its abundance map \
+shows where that pattern is dominant. Save components and abundances as .npy files. \
+Include FFT/NMF results in the visualization and JSON output only if they reveal \
+meaningful structural variation — omit if the image is structurally uniform.
+
+**Requirements:**
+1. Load image: use `np.load(path)` for .npy, or `cv2.imread(path, cv2.IMREAD_UNCHANGED)` \
+for standard formats (remember cv2 loads BGR — convert to RGB if color)
+2. Implement the analysis pipeline
+3. Save visualization(s): `analysis_visualization.png` showing original image alongside \
+analysis results (e.g., segmentation overlay, detected features, extracted measurements). \
+Use subplots with clear labels. All visualizations must be saved to the current working \
+directory. Use `dpi=100` and limit to 6 subplots max to keep file size manageable.
+4. Print results as JSON:
+```python
+results = {{{{
+    "analysis_type": "description of what was done",
+    "extracted_features": {{{{"feature_name": value, ...}}}},
+    "quality_metrics": {{{{"metric_name": value, ...}}}},
+    "summary": "Key finding in one sentence"
+}}}}
+print(f"IMAGE_ANALYSIS_RESULTS_JSON:{{{{json.dumps(results)}}}}")
+```
+
+**Response:** Return only `{{"script": "..."}}`
+"""
+
+
+IMAGE_ANALYSIS_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed image analysis script.
+
+**Plan:** {analysis_approach} | **Pipeline:** {processing_pipeline}
+
+**Failed Script:**
+```python
+{failed_script}
+```
+
+**Error:**
+```
+{error_message}
+```
+
+**Available Libraries:** numpy, scipy (ndimage, signal, optimize), scikit-image (skimage), \
+opencv-python (cv2), matplotlib, Pillow (PIL), scikit-learn (sklearn), pandas, json
+
+**CRITICAL:** Fix only the execution error. Do NOT change the analysis pipeline, feature \
+extraction approach, or the overall analysis strategy. The approach is locked for series consistency.
+
+**Response:** Return only `{{"diagnosis": "...", "script": "..."}}`
+"""
+
+
+IMAGE_ANALYSIS_PLAN_CONFORMANCE_CHECK_INSTRUCTIONS = """You are verifying that a Python script correctly implements a scientific image analysis plan.
+
+**ANALYSIS PLAN (authoritative specification):**
+- Approach: {analysis_approach}
+- Pipeline: {processing_pipeline}
+- Features to extract: {features_to_extract}
+{skill_rules}
+**GENERATED SCRIPT:**
+```python
+{script}
+```
+
+Compare the script against the plan and determine if the script faithfully implements \
+what the plan describes.
+
+Check:
+1. **Processing pipeline**: Does the script implement the same operations in the same order? \
+(e.g., if the plan says "Otsu thresholding", does the script use Otsu — not adaptive thresholding?)
+2. **Feature extraction**: Does the script compute and report the features the plan lists?
+3. **Preprocessing**: Does the script handle preprocessing as the plan describes?
+4. **Domain skill compliance**: If MANDATORY Domain Skill Rules are listed above, does \
+the script follow ALL of them?
+
+Allow reasonable implementation-level variation (variable naming, library choice for the \
+same operation). A deviation is **justified** only if it is obvious from the image properties \
+that the plan cannot work as written. In that case the script's "summary" field should \
+explain the deviation.
+
+Return JSON:
+{{"conformant": true/false, "justified_deviations": ["deviations with stated reasoning, if any"], "unjustified_deviations": ["deviations with no explanation"], "summary": "one sentence"}}
+"""
+
+
+IMAGE_ANALYSIS_QUALITY_ASSESSMENT_INSTRUCTIONS = """Evaluate this image analysis result.
+
+**Approach:** {analysis_approach}
+**Pipeline:** {processing_pipeline}
+**Quality Criteria:** {quality_criteria}
+**Metrics:** {metrics}
+
+Images show: (1) Original image, (2) Analysis visualization (segmentation overlay, \
+detected features, etc.)
+
+**Assessment Guidelines:**
+- Does the analysis correctly identify the features visible in the original image?
+- Are there obvious false positives (artifacts incorrectly identified as features)?
+- Are there obvious misses (visible features not captured)?
+- Do the quantitative metrics seem physically reasonable?
+- Does the visualization match what you see in the original image?
+
+**Response:**
+```json
+{{
+    "is_acceptable": true/false,
+    "quality_score": 0.0-1.0,
+    "strengths": "What the analysis did well",
+    "issues": "Problems found, if any",
+    "missed_features": "Features visible in the original but not captured",
+    "false_positives": "Artifacts incorrectly identified as features",
+    "suggestion": "Specific fix if unacceptable, or 'none'"
+}}
+```
+"""
+
+
+IMAGE_ANALYSIS_INTERPRETATION_INSTRUCTIONS = """Interpret these image analysis results.
+
+**Analysis Type:** {analysis_type}
+**Summary:** {summary}
+
+You have: original image, analysis visualization, extracted features with values, sample metadata.
+
+**Task:** Explain what the extracted features mean physically. What do they reveal about the sample?
+
+**Response:**
+```json
+{{
+    "detailed_analysis": "Physical interpretation of results — what the features, \
+measurements, and patterns reveal about the sample's structure, composition, or properties",
+    "scientific_claims": [
+        {{
+            "claim": "Finding with quantitative value",
+            "scientific_impact": "Why this finding is significant",
+            "has_anyone_question": "Has anyone observed [reformulate claim as research question]?",
+            "keywords": ["keyword1", "keyword2", "keyword3"]
+        }}
+    ],
+    "caveats": "Limitations of the analysis",
+    "suggested_followup": "Next steps"
+}}
+```
+"""
+
+
+IMAGE_ANALYSIS_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS = """Recommend follow-up measurements based on image analysis results.
+
+**Analysis Type:** {analysis_type}
+**Findings:** {summary}
+
+You have: analysis visualization, extracted features, sample metadata.
+
+**Task:** Recommend 2-4 follow-up measurements to validate or extend these findings.
+
+**Response:**
+```json
+{{
+    "analysis_integration": "How current results inform recommendations",
+    "measurement_recommendations": [
+        {{
+            "description": "Specific measurement",
+            "scientific_justification": "Why it matters",
+            "expected_outcomes": "What you expect to learn",
+            "priority": 1-5
+        }}
+    ]
+}}
+```
+"""

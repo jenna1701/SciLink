@@ -6,6 +6,7 @@ Coordinates multi-modal experimental analysis using specialized sub-agents:
 - SAMMicroscopyAnalysisAgent: For particle/object segmentation and statistics
 - HyperspectralAnalysisAgent: For spectroscopic data analysis
 - CurveFittingAgent: For 1D curve/spectrum fitting
+- ImageAnalysisAgent: For general-purpose image analysis (texture, defects, morphology)
 
 Follows the same design patterns as PlanningOrchestratorAgent for consistent UX.
 """
@@ -50,6 +51,12 @@ _BUILTIN_AGENTS = {
         "name": "CurveFittingAgent",
         "description": "1D data: DSC, TGA, XRD, UV-Vis, Raman, PL, IV curves, kinetics. Handles single files or series.",
         "short_name": "CurveFit",
+    },
+    4: {
+        "class_path": "scilink.agents.exp_agents.image_analysis_agent.ImageAnalysisAgent",
+        "name": "ImageAnalysisAgent",
+        "description": "Images: general-purpose analysis, texture, defects, grain boundaries, morphology, custom filtering. Handles single images or image series.",
+        "short_name": "ImageAnalysis",
     },
 }
 
@@ -215,12 +222,13 @@ examine_data returns data_type:
 │
 ├── microscopy / image_series
 │   ├── Metadata: "particles", "count", "segment" → Agent 1 (SAM)
-│   ├── Metadata: "grains", "phases", "atomic" → Agent 0 (FFT)
-│   └── Unclear? → preview_image, then decide
+│   ├── Metadata: "grains", "phases", "atomic", "FFT", "frequency" → Agent 0 (FFT)
+│   ├── Metadata: "texture", "defects", "morphology", "custom", "grain boundary", "measurement" → Agent 4 (ImageAnalysis)
+│   └── Unclear? → preview_image, then decide (Agent 4 for general-purpose analysis)
 │
 └── 2d_data_ambiguous (disambiguation_needed=true)
     ├── Check metadata technique:
-    │   ├── Microscopy (SEM, TEM, AFM) → preview_image → Agent 0 or 1
+    │   ├── Microscopy (SEM, TEM, AFM) → preview_image → Agent 0, 1, or 4
     │   ├── Spectroscopy (DSC, XRD, Raman) → Agent 3
     │   └── Spectral imaging → Agent 2
     ├── If still unclear, ASK USER:
@@ -286,6 +294,7 @@ def get_system_prompt(
             "     * 1: SAMMicroscopyAnalysisAgent - Images: particle counting, segmentation",
             "     * 2: HyperspectralAnalysisAgent - 3D datacubes: EELS-SI, EDS, Raman imaging",
             "     * 3: CurveFittingAgent - 1D data: DSC, TGA, XRD, UV-Vis, Raman, PL, IV curves, kinetics",
+            "     * 4: ImageAnalysisAgent - Images: general-purpose analysis, texture, defects, grain boundaries, morphology, custom filtering",
         ])
     body = _SYSTEM_PROMPT_BODY_PRE + agent_list + _SYSTEM_PROMPT_BODY_POST
     if external_tools:
