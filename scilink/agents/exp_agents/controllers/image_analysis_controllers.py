@@ -107,22 +107,18 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     if not content:
         return
 
-    prompt.append(f"\n## MANDATORY Domain Skill Rules: {skill_name} ({stage})")
+    prompt.append(f"\n## Domain Expertise: {skill_name} ({stage})")
     prompt.append(
-        "The following rules are MANDATORY. Your analysis plan and implementation "
-        "MUST conform to these domain-specific requirements. These rules encode "
-        "validated domain expertise and take precedence over general-purpose defaults. "
-        "Do NOT substitute your own preferences where these rules specify a method, "
-        "treatment, or constraint."
+        "The following guidance is from validated domain expertise. "
+        "Use it to inform your approach."
     )
     prompt.append(content)
 
     # Include validation rules during planning and interpretation
-    # so the LLM knows quality criteria upfront
     if stage in ("planning", "interpretation"):
         validation = sections.get("validation", "")
         if validation:
-            prompt.append(f"\n## MANDATORY Domain Validation Rules ({skill_name})")
+            prompt.append(f"\n## Domain Validation Guidance: {skill_name}")
             prompt.append(validation)
 
 
@@ -986,9 +982,9 @@ Your guidance: '''
         skill_sections = state.get("skill_sections")
         if skill_sections and skill_sections.get("analysis"):
             context_parts.append(
-                f"## MANDATORY Domain Skill Rules ({state.get('skill_name', 'skill')})\n"
-                "The following domain rules are MANDATORY and must be implemented exactly "
-                "as specified. They take precedence over general-purpose defaults.\n\n"
+                f"## Domain Expertise ({state.get('skill_name', 'skill')})\n"
+                "The following guidance is from validated domain expertise. "
+                "Use it to inform your implementation.\n\n"
                 + skill_sections["analysis"]
             )
 
@@ -1024,9 +1020,9 @@ Your guidance: '''
         skill_sections = state.get("skill_sections")
         if skill_sections and skill_sections.get("analysis"):
             prompt += (
-                f"\n\n## MANDATORY Domain Skill Rules ({state.get('skill_name', 'skill')})\n"
-                "While fixing the error, you MUST continue to follow these domain rules. "
-                "Do not change the analysis pipeline or workflow to deviate from these rules.\n\n"
+                f"\n\n## Domain Expertise ({state.get('skill_name', 'skill')})\n"
+                "The following guidance is from validated domain expertise. "
+                "Use it to inform your implementation.\n\n"
                 + skill_sections["analysis"]
             )
 
@@ -1066,7 +1062,7 @@ Your guidance: '''
                     rules_parts.append(f"### {stage.title()} rules\n{content}")
             if rules_parts:
                 skill_rules_text = (
-                    f"\n**MANDATORY Domain Skill Rules ({skill_name}):**\n"
+                    f"\n**Domain Expertise ({skill_name}):**\n"
                     + "\n".join(rules_parts)
                     + "\n"
                 )

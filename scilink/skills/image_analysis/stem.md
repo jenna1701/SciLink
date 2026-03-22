@@ -32,28 +32,21 @@ column size in the specific image. To estimate column width:
 Set `min_sigma` and `max_sigma` to bracket the estimated column FWHM.
 Do not hardcode sigma values.
 
-**Sub-pixel refinement:** Always refine LoG-detected positions with
-2D Gaussian fitting in a local window around each peak. This gives
-~0.1-0.5 pixel position precision. Record the fit uncertainty
-(standard error of the center position) for each column — this is
-needed for strain analysis.
+**Sub-pixel refinement:** Refine LoG-detected positions with 2D
+Gaussian fitting. Record fit uncertainty when strain analysis is
+relevant.
 
 **Background subtraction:** When intensity varies across the field of
-view (thickness gradient, bent sample, detector non-uniformity), apply
-background subtraction before LoG detection. A Gaussian blur with
-large sigma (10-30x the column spacing) or rolling-ball filter extracts
-the slowly varying background.
+view, apply background subtraction before detection. A large-sigma
+Gaussian blur or rolling-ball filter removes slowly varying background.
 
 **Sublattice separation:** For multi-element compounds with distinct
 Z-contrast, separate sublattices by intensity-based clustering (k-means
-or GMM on fitted peak amplitudes). The number of clusters should match
-the number of crystallographically distinct atomic sites expected for
-the material and zone axis — this can be 2 (e.g., h-BN), 3 (e.g.,
-YBCO along [010]: Ba, Y, Cu/O), or more. If the number of sublattices
-is unknown, use a cluster validity metric (silhouette score, BIC) to
-determine k. Do NOT use geometric offset computation from lattice
-vectors — this approach fails in the majority of cases due to offset
-ambiguity.
+or GMM on fitted peak amplitudes). Determine the number of clusters
+from the known crystal structure and zone axis (if available from
+metadata), or use a cluster validity metric (silhouette score, BIC)
+if unknown. Don't use geometric offset computation from lattice
+vectors — it fails most of the time.
 
 **Sliding FFT + NMF for structural variation:** When the image contains
 a sufficient number of atoms to produce a clear FFT signal, run the
@@ -87,35 +80,28 @@ like; the abundance map shows *where* it occurs.
 
 ## analysis
 
-**Analysis pipeline:**
-1. Convert to float64 and normalize to [0, 1].
-2. Background subtraction if intensity varies across the field of view.
-3. If the image has sufficient atoms, run sliding FFT + NMF to identify
-   any structural domains or inhomogeneities before column detection.
-   Use NMF findings to guide subsequent analysis (e.g., separate
-   domains, adjust parameters per region).
-4. LoG blob detection with sigma range adapted to column size.
-5. 2D Gaussian fitting in a local window around each detected peak.
-   Extract: sub-pixel center (x, y), amplitude, sigma_x, sigma_y,
-   and fit uncertainty for each parameter.
-5. Filter detections: reject peaks with amplitude below a physically
-   motivated threshold (e.g., below 10% of median amplitude) or with
-   poor Gaussian fit quality.
+Column detection typically involves: normalization, background
+subtraction (when needed), LoG blob detection, and 2D Gaussian
+refinement for sub-pixel precision. Lattice parameters can be extracted
+from nearest-neighbor distances of detected positions. Filter
+detections by rejecting peaks with low amplitude or poor Gaussian fit
+quality. If using sliding FFT + NMF, run it early so findings can
+inform column detection (e.g., separate domains, adjust parameters
+per region).
 
 **Lattice fitting:**
 Use the median nearest-neighbor distance (not mean — robust to
 outliers) to estimate the lattice constant. Fit two lattice vectors
 using the pairwise displacement vectors between detected columns.
-For hexagonal lattices, expect an angle of ~60 degrees between vectors;
-for square lattices, ~90 degrees.
+The angle between vectors should be consistent with the expected
+crystal symmetry.
 
 **Sublattice separation:**
 Apply k-means or GMM (k = number of expected sublattices for the
 material and zone axis) on fitted peak amplitudes. If k is unknown,
 try k=2,3,4 and select using silhouette score or BIC. After clustering,
 verify that sublattice populations are reasonable for the crystal
-structure — e.g., for ABO3 perovskite along [001], expect roughly
-equal A and B-O populations.
+structure.
 
 **Defect identification:**
 - Vacancies: ideal lattice site with no detected column within 0.4x
@@ -178,9 +164,8 @@ If the ratio of ideal lattice sites to detected columns is outside
 0.85-1.15, the detection or lattice fit is unreliable.
 
 **Sublattice balance:** For compounds with equal-multiplicity sublattices
-(e.g., h-BN, NaCl-type), sublattice populations should be approximately
-equal. A ratio below 0.5 or above 2.0 indicates failed sublattice
-separation. Exception: heavy substitutional doping can shift column
+sublattice populations should be approximately equal. A ratio below
+0.5 or above 2.0 indicates failed sublattice separation. Exception: heavy substitutional doping can shift column
 intensities between sublattice clusters — if the sample metadata
 indicates significant doping, allow for less balanced populations and
 consider using more than 2 clusters to separate doped sites.
