@@ -798,8 +798,8 @@ class AnalysisOrchestratorTools:
                                 result["primary_suggestion"] = None  # No clear suggestion
                                 result["note"] = (
                                     f"Ambiguous 2D array ({data.shape[0]}x{data.shape[1]}). Could be:\n"
-                                    f"  - Microscopy image → Agent 0 (FFTMicroscopyAnalysisAgent)\n"
-                                    f"  - Series of 1D data (rows or columns) → Agent 3 (CurveFittingAgent)\n"
+                                    f"  - Microscopy image → Agent 1 (ImageAnalysisAgent)\n"
+                                    f"  - Series of 1D data (rows or columns) → Agent 0 (CurveFittingAgent)\n"
                                     f"  - 2D spectral slice → Agent 2 (HyperspectralAnalysisAgent)\n"
                                     f"Check metadata or ask user to clarify."
                                 )
@@ -1295,10 +1295,9 @@ class AnalysisOrchestratorTools:
             based on data type, metadata, and image preview (if applicable).
             
             Agent IDs:
-                0: FFTMicroscopyAnalysisAgent - microstructure, grains, phases, atomic-resolution
-                1: SAMMicroscopyAnalysisAgent - particle counting, segmentation
+                0: CurveFittingAgent - 1D curves, spectra
+                1: ImageAnalysisAgent - all image types
                 2: HyperspectralAnalysisAgent - spectral datacubes
-                3: CurveFittingAgent - 1D curves, spectra
             """
             print(f"  ⚡ Tool: Setting agent to {agent_id}...")
             
@@ -1323,14 +1322,12 @@ class AnalysisOrchestratorTools:
             name="select_agent",
             description=(
                 "Set the analysis agent to use. Call this after examining data and metadata. "
-                "For microscopy images, use preview_image first to see the image and decide between "
-                "FFTMicroscopyAnalysisAgent (0) for microstructure/atomic vs SAMMicroscopyAnalysisAgent (1) for particles. "
-                "Agent IDs: 0=FFT/microstructure, 1=SAM/particles, 2=Hyperspectral, 3=CurveFitting"
+                "Agent IDs: 0=CurveFitting (1D data), 1=ImageAnalysis (all images), 2=Hyperspectral (3D datacubes)"
             ),
             parameters={
                 "agent_id": {
                     "type": "integer",
-                    "description": "Agent ID to use (0=FFT, 1=SAM, 2=Hyperspectral, 3=CurveFitting)"
+                    "description": "Agent ID to use (0=CurveFitting, 1=ImageAnalysis, 2=Hyperspectral)"
                 },
                 "reasoning": {
                     "type": "string",
@@ -1346,8 +1343,7 @@ class AnalysisOrchestratorTools:
         def preview_image(image_path: str = None) -> str:
             """
             Load and return a preview of a microscopy image for the LLM to analyze.
-            Use this to decide between FFTMicroscopyAnalysisAgent (microstructure) 
-            and SAMMicroscopyAnalysisAgent (particles).
+            Use this to visually inspect the image before analysis.
             """
             print(f"  ⚡ Tool: Loading image preview...")
             
@@ -1414,11 +1410,8 @@ class AnalysisOrchestratorTools:
                     "preview_size": list(pil_img.size),
                     "image_base64": img_base64,
                     "guidance": (
-                        "Examine this image to decide the appropriate agent:\n"
-                        "- FFTMicroscopyAnalysisAgent (ID: 0): For microstructure with grains, phases, "
-                        "domains, periodic patterns, or atomic-resolution lattices\n"
-                        "- SAMMicroscopyAnalysisAgent (ID: 1): For discrete particles, nanoparticles, "
-                        "cells, or objects that need to be counted/segmented"
+                        "Examine this image. For any microscopy/image data, use "
+                        "ImageAnalysisAgent (ID: 1)."
                     )
                 })
                 
@@ -1433,9 +1426,7 @@ class AnalysisOrchestratorTools:
             func=preview_image,
             name="preview_image",
             description=(
-                "Load a microscopy image preview for visual analysis. "
-                "Use this when you need to decide between FFTMicroscopyAnalysisAgent (microstructure, "
-                "grains, atomic-resolution) and SAMMicroscopyAnalysisAgent (particles, segmentation). "
+                "Load a microscopy image preview for visual inspection. "
                 "Returns the image as base64 for you to examine."
             ),
             parameters={
