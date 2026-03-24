@@ -728,6 +728,21 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 )
 
         if run_tier2:
+            # Preserve Tier 1 outputs before Tier 2 overwrites them
+            import shutil
+            tier1_dir = self.output_dir / "tier1"
+            tier1_dir.mkdir(exist_ok=True)
+            for item in self.output_dir.iterdir():
+                if item.name in ("tier1", "tier2") or item.name.startswith("."):
+                    continue
+                dst = tier1_dir / item.name
+                if item.is_dir():
+                    if dst.exists():
+                        shutil.rmtree(dst)
+                    shutil.copytree(item, dst)
+                elif item.is_file():
+                    shutil.copy2(item, dst)
+            self.logger.info(f"   Tier 1 outputs preserved in {tier1_dir}")
             tier2_state = self._build_tier2_state(
                 tier1_state, tier1_results,
                 first_image, original_image_bytes, image_statistics,
