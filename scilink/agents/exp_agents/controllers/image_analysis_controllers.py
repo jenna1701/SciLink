@@ -2090,13 +2090,12 @@ Return JSON with:
                         )
 
                         if verified_result["success"]:
-                            # Provisional score — will be updated by next
-                            # verification iteration's LLM assessment
+                            # Score will be set by the next verification
+                            # iteration's LLM assessment
                             verified_score = best_score
                             verified_result["_quality_score"] = verified_score
                             self.logger.info(
-                                f"   Re-analysis score = {verified_score:.2f} "
-                                f"(was {best_score:.2f})"
+                                "   Re-analysis complete, awaiting verification..."
                             )
 
                             best_score = verified_score
