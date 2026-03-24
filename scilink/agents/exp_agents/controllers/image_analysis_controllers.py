@@ -487,29 +487,34 @@ class ImagePlanningController:
 
         print("\n" + "=" * 60)
         mode_str = "SINGLE IMAGE" if is_single else f"SERIES ({num_images} images)"
-        print(f"PROPOSED ANALYSIS PLAN - {mode_str}")
+        print(f"📋 PROPOSED ANALYSIS PLAN - {mode_str}")
         print("=" * 60)
 
         if state.get("observations"):
-            print(f"\nObservations:\n   {state['observations']}")
+            print(f"\n🔍 Observations:\n   {state['observations']}")
 
-        print(f"\nApproach:\n   {state.get('analysis_approach', 'N/A')}")
-        print(f"\nPipeline:\n   {state.get('processing_pipeline', 'N/A')}")
-        print(f"\nFeatures to Extract:\n   {', '.join(state.get('features_to_extract', [])) or 'N/A'}")
-        print(f"\nQuality Criteria:\n   {state.get('quality_criteria', 'N/A')}")
+        print(f"\n📊 Approach:\n   {state.get('analysis_approach', 'N/A')}")
+
+        import re as _re
+        _pipeline = state.get("processing_pipeline", "N/A")
+        _pipeline = _re.sub(r"\. (\d+)\. ", r".\n   \1. ", _pipeline)
+        print(f"\n⚙️  Pipeline:\n   {_pipeline}")
+
+        print(f"\n🎯 Features to Extract:\n   {', '.join(state.get('features_to_extract', [])) or 'N/A'}")
+        print(f"\n✅ Quality Criteria:\n   {state.get('quality_criteria', 'N/A')}")
 
         if state.get("expected_outputs"):
-            print(f"\nExpected Outputs:\n   {', '.join(state.get('expected_outputs', []))}")
+            print(f"\n📄 Expected Outputs:\n   {', '.join(state.get('expected_outputs', []))}")
 
         if state.get("literature_query"):
-            print(f"\nLiterature Query:\n   {state['literature_query']}")
+            print(f"\n📚 Literature Query:\n   {state['literature_query']}")
 
         # Display regime plan if present
         series_plan = state.get("series_analysis_plan")
         if series_plan and series_plan.get("regimes") and not is_single:
             regimes = series_plan["regimes"]
             print(f"\n{'=' * 60}")
-            print(f"IMAGE ANALYSIS REGIMES ({len(regimes)} regimes)")
+            print(f"📦 IMAGE ANALYSIS REGIMES ({len(regimes)} regimes)")
             print(f"{'=' * 60}")
             if series_plan.get("rationale"):
                 print(f"\nRationale: {series_plan['rationale']}")
@@ -537,7 +542,7 @@ class ImagePlanningController:
                     print(f"    Between indices {t.get('between_indices', '?')}: "
                           f"{t.get('description', 'N/A')}")
         elif not is_single:
-            print(f"\nNote: This analysis pipeline will be LOCKED and applied to all {num_images} images.")
+            print(f"\n📦 **Note:** This analysis pipeline will be LOCKED and applied to all {num_images} images.")
 
         print("\n" + "=" * 60)
 

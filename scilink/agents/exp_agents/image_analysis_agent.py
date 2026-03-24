@@ -339,12 +339,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         is_single_image = num_images == 1
 
         self.logger.info("")
-        self.logger.info(
-            f"🖼️  IMAGE ANALYSIS - {num_images} image{'s' if num_images > 1 else ''}"
-        )
-        self.logger.info(
-            f"   Quality: max_retries={effective_max_retries}"
-        )
+        self.logger.info(f"🖼️  IMAGE ANALYSIS - {num_images} image{'s' if num_images > 1 else ''}")
+        self.logger.info(f"   Quality: max_retries={effective_max_retries}, depth={self.analysis_depth}")
         if not is_single_image:
             self.logger.info(f"   Outlier detection: {effective_outlier_sigma}σ")
 
@@ -380,7 +376,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             aux_state = self._load_auxiliary_data(auxiliary_data, auxiliary_label)
             if aux_state.get("auxiliary_plot_bytes"):
                 self.logger.info(
-                    f"   Auxiliary data loaded: {aux_state['auxiliary_label']}"
+                    f"   📎 Auxiliary data loaded: {aux_state['auxiliary_label']}"
                 )
 
         # Load skill if provided
@@ -389,7 +385,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             try:
                 parsed = load_skill(skill, domain="image_analysis")
                 skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
-                self.logger.info(f"   Skill loaded: {parsed['name']}")
+                self.logger.info(f"   📖 Skill loaded: {parsed['name']}")
             except FileNotFoundError:
                 self.logger.warning(
                     f"   Skill '{skill}' not found — proceeding without domain skill"
@@ -466,20 +462,20 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Execute pipeline
         for i, controller in enumerate(pipeline, 1):
             step_name = controller.__class__.__name__
-            self.logger.info(f"\n--- STEP {i}: {step_name} ---\n")
+            self.logger.info(f"\n📍 STEP {i}: {step_name}\n")
 
             try:
                 state = controller.execute(state)
 
                 if state.get("error_dict"):
                     self.logger.error(
-                        f"Pipeline failed at {step_name}: {state['error_dict']}"
+                        f"❌ Pipeline failed at {step_name}: {state['error_dict']}"
                     )
                     break
 
             except Exception as e:
                 self.logger.error(
-                    f"Pipeline step {step_name} raised exception: {e}"
+                    f"❌ Pipeline step {step_name} raised exception: {e}"
                 )
                 state["error_dict"] = {
                     "error": f"Pipeline step failed: {step_name}",
@@ -510,7 +506,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         if self.analysis_depth == "deep":
             run_tier2 = True
-            self.logger.info("\n--- TIER 2: Forced (analysis_depth='deep') ---")
+            self.logger.info("\n🔬 TIER 2: Forced (analysis_depth='deep')")
         elif self.analysis_depth == "auto" and tier1_results["status"] == "success":
             tier2_decision = self._evaluate_tier2_needed(
                 tier1_results, objective
@@ -518,11 +514,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if tier2_decision and tier2_decision.get("tier2_needed"):
                 run_tier2 = True
                 self.logger.info(
-                    f"\n--- TIER 2: {tier2_decision.get('suggested_focus', 'deeper analysis')} ---"
+                    f"\n🔬 TIER 2: {tier2_decision.get('suggested_focus', 'deeper analysis')}"
                 )
             else:
                 self.logger.info(
-                    "\n--- TIER 2: Skipped (not warranted by Tier 1 findings) ---"
+                    "\n📊 TIER 2: Skipped (not warranted by Tier 1 findings)"
                 )
 
         if run_tier2:
@@ -540,7 +536,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     shutil.copytree(item, dst)
                 elif item.is_file():
                     shutil.copy2(item, dst)
-            self.logger.info(f"   Tier 1 outputs preserved in {tier1_dir}")
+            self.logger.info(f"   📂 Tier 1 outputs preserved in {tier1_dir}")
             tier2_state = self._build_tier2_state(
                 tier1_state, tier1_results,
                 first_image, original_image_bytes, image_statistics,
@@ -574,19 +570,19 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             for i, controller in enumerate(tier2_pipeline, 1):
                 step_name = controller.__class__.__name__
                 self.logger.info(
-                    f"\n--- TIER 2 STEP {i}: {step_name} ---\n"
+                    f"\n📍 TIER 2 STEP {i}: {step_name}\n"
                 )
                 try:
                     tier2_state = controller.execute(tier2_state)
                     if tier2_state.get("error_dict"):
                         self.logger.error(
-                            f"Tier 2 failed at {step_name}: "
+                            f"❌ Tier 2 failed at {step_name}: "
                             f"{tier2_state['error_dict']}"
                         )
                         break
                 except Exception as e:
                     self.logger.error(
-                        f"Tier 2 step {step_name} raised exception: {e}"
+                        f"❌ Tier 2 step {step_name} raised exception: {e}"
                     )
                     tier2_state["error_dict"] = {
                         "error": f"Tier 2 step failed: {step_name}",
@@ -613,16 +609,16 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             json.dump(serializable, f, indent=2, default=str)
 
         self.logger.info("")
-        self.logger.info("ANALYSIS COMPLETE")
-        self.logger.info(f"   Results: {results_path}")
+        self.logger.info("✅ ANALYSIS COMPLETE")
+        self.logger.info(f"   📄 Results: {results_path}")
         if tier2_results:
-            self.logger.info("   Tier 2 deep analysis: included")
+            self.logger.info("   🔬 Tier 2 deep analysis: included")
         if tier1_state.get("report_path"):
-            self.logger.info(f"   Report: {tier1_state['report_path']}")
+            self.logger.info(f"   📋 Report: {tier1_state['report_path']}")
 
         flagged = final_results.get("flagged_images", [])
         if flagged:
-            self.logger.warning(f"   {len(flagged)} images flagged for review")
+            self.logger.warning(f"   ⚠️ {len(flagged)} images flagged for review")
 
         # Log action
         self._log_action(
@@ -764,7 +760,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     saved.append(str(path))
 
         if saved:
-            self.logger.info(f"   Scripts: {scripts_dir} ({len(saved)} file(s))")
+            self.logger.info(f"   📝 Scripts: {scripts_dir} ({len(saved)} file(s))")
 
     def _evaluate_tier2_needed(
         self, tier1_results: dict, objective: Optional[str]
