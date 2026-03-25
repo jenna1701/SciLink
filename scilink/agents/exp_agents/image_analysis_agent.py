@@ -37,6 +37,7 @@ from .human_feedback import SimpleFeedbackMixin
 from ...executors import ScriptExecutor, require_sandbox_approval
 from ..lit_agents.literature_agent import FittingModelLiteratureAgent
 from .pipelines.image_analysis_pipelines import create_unified_image_analysis_pipeline
+from .controllers.image_analysis_controllers import compute_image_statistics
 from ...tools.image_analysis_tools import (
     load_image_data,
     image_to_thumbnail_bytes,
@@ -645,32 +646,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         return final_results
 
-    def _compute_image_statistics(self, image: np.ndarray) -> dict:
+    @staticmethod
+    def _compute_image_statistics(image: np.ndarray) -> dict:
         """Compute statistics for an image."""
-        stats = {
-            "shape": list(image.shape),
-            "dtype": str(image.dtype),
-            "has_nans": bool(np.any(np.isnan(image))) if np.issubdtype(image.dtype, np.floating) else False,
-        }
-
-        if image.ndim == 2:
-            stats["channels"] = 1
-            h, w = image.shape
-        elif image.ndim == 3:
-            h, w = image.shape[:2]
-            stats["channels"] = image.shape[2]
-        else:
-            h, w = image.shape[:2]
-            stats["channels"] = image.shape[2] if image.ndim > 2 else 1
-
-        stats["aspect_ratio"] = round(w / h, 3) if h > 0 else 0
-
-        arr = image.astype(np.float64)
-        stats["intensity_range"] = [float(np.nanmin(arr)), float(np.nanmax(arr))]
-        stats["intensity_mean"] = float(np.nanmean(arr))
-        stats["intensity_std"] = float(np.nanstd(arr))
-
-        return stats
+        return compute_image_statistics(image)
 
     def _load_auxiliary_data(
         self, auxiliary_data: str, auxiliary_label: Optional[str]
@@ -949,10 +928,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             results["analysis_approach"] = state.get(
                 "locked_analysis_config", {}
             ).get("analysis_approach")
-            results["extracted_features"] = analysis_result.get(
-                "extracted_features", {}
-            )
-            results["quality_metrics"] = analysis_result.get("quality_metrics", {})
             results["literature_files"] = state.get("literature_files")
 
             if series_results and series_results[0].get("quality_warning"):
@@ -990,8 +965,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "name": r["name"],
                     "success": r["success"],
                     "analysis_type": r.get("analysis_type"),
-                    "extracted_features": r.get("extracted_features", {}),
-                    "quality_metrics": r.get("quality_metrics", {}),
                     "visualization_path": r.get("visualization_path"),
                     "error": r.get("error"),
                     "flagged": r.get("flagged", False),

@@ -32,6 +32,84 @@ from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
 
+def load_image_file(image_path: str) -> np.ndarray:
+    """Load image data from file, handling various formats.
+
+    Shared helper used by multiple controllers.  Tries the canonical
+    ``load_image_data`` from tools first, then falls back to cv2/PIL.
+    """
+    try:
+        from ...tools.image_analysis_tools import load_image_data
+        return load_image_data(image_path)
+    except ImportError:
+        pass
+
+    if image_path.endswith('.npy'):
+        return np.load(image_path)
+    elif image_path.endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')):
+        try:
+            import cv2
+            img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                raise ValueError(f"Could not load image: {image_path}")
+            if img.ndim == 3 and img.shape[2] == 3:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            elif img.ndim == 3 and img.shape[2] == 4:
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
+            return img
+        except ImportError:
+            from PIL import Image as PILImage
+            img = PILImage.open(image_path)
+            return np.array(img)
+    else:
+        try:
+            return np.load(image_path)
+        except Exception:
+            try:
+                import cv2
+                img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+                if img is not None:
+                    if img.ndim == 3 and img.shape[2] == 3:
+                        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    return img
+            except ImportError:
+                pass
+            raise ValueError(f"Could not load image: {image_path}")
+
+
+def compute_image_statistics(image: np.ndarray) -> dict:
+    """Compute statistics for a single image.
+
+    Shared helper used by multiple controllers and the agent itself.
+    """
+    stats = {
+        "shape": list(image.shape),
+        "dtype": str(image.dtype),
+        "has_nans": (
+            bool(np.any(np.isnan(image)))
+            if np.issubdtype(image.dtype, np.floating)
+            else False
+        ),
+    }
+
+    if image.ndim == 2:
+        stats["channels"] = 1
+        h, w = image.shape
+    elif image.ndim == 3:
+        h, w = image.shape[:2]
+        stats["channels"] = image.shape[2]
+    else:
+        h, w = image.shape[:2]
+        stats["channels"] = image.shape[2] if image.ndim > 2 else 1
+
+    stats["aspect_ratio"] = round(w / h, 3) if h > 0 else 0
+    stats["intensity_range"] = [float(np.nanmin(image)), float(np.nanmax(image))]
+    stats["intensity_mean"] = float(np.nanmean(image))
+    stats["intensity_std"] = float(np.nanstd(image))
+
+    return stats
+
+
 def build_verification_prompt_with_history(
     current_result: dict,
     previous_iterations: List[dict],
@@ -271,26 +349,7 @@ class AnalyzeImageController:
         try:
             image = state["image_data"]
 
-            # Compute image statistics
-            if image.ndim == 2:
-                channels = 1
-            elif image.ndim == 3:
-                channels = image.shape[2]
-            else:
-                raise ValueError(f"Unexpected image dimensionality: {image.ndim}")
-
-            h, w = image.shape[:2]
-
-            state["image_statistics"] = {
-                "shape": list(image.shape),
-                "dtype": str(image.dtype),
-                "channels": channels,
-                "intensity_range": [float(np.nanmin(image)), float(np.nanmax(image))],
-                "intensity_mean": float(np.nanmean(image)),
-                "intensity_std": float(np.nanstd(image)),
-                "has_nans": bool(np.any(np.isnan(image.astype(float)))),
-                "aspect_ratio": float(w) / float(h) if h > 0 else 1.0,
-            }
+            state["image_statistics"] = compute_image_statistics(image)
 
             # Create thumbnail for LLM prompts
             thumbnail_bytes = self.image_to_bytes_fn(image)
@@ -347,42 +406,12 @@ class ImageSeriesScoutController:
         return sorted(indices)
 
     @staticmethod
-    def _compute_statistics(image: np.ndarray) -> dict:
-        if image.ndim == 2:
-            channels = 1
-        elif image.ndim == 3:
-            channels = image.shape[2]
-        else:
-            raise ValueError(f"Unexpected image dimensionality: {image.ndim}")
-
-        h, w = image.shape[:2]
-        return {
-            "shape": list(image.shape),
-            "dtype": str(image.dtype),
-            "channels": channels,
-            "intensity_range": [float(np.nanmin(image)), float(np.nanmax(image))],
-            "intensity_mean": float(np.nanmean(image)),
-            "intensity_std": float(np.nanstd(image)),
-            "has_nans": bool(np.any(np.isnan(image.astype(float)))),
-            "aspect_ratio": float(w) / float(h) if h > 0 else 1.0,
-        }
-
-    def _load_image(self, idx: int, state: dict) -> np.ndarray:
+    def _load_image(idx: int, state: dict) -> np.ndarray:
         image_stack = state.get("image_stack")
         if image_stack is not None:
             return image_stack[idx]
         image_path = state.get("image_paths", [])[idx]
-        try:
-            from ....tools.image_analysis_tools import load_image_data
-            return load_image_data(image_path)
-        except ImportError:
-            if image_path.endswith('.npy'):
-                return np.load(image_path)
-            import cv2
-            img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-            if img is not None and img.ndim == 3 and img.shape[2] == 3:
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            return img
+        return load_image_file(image_path)
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict") or state.get("is_single_image", True):
@@ -407,7 +436,7 @@ class ImageSeriesScoutController:
             try:
                 image = self._load_image(idx, state)
 
-                stats = self._compute_statistics(image)
+                stats = compute_image_statistics(image)
 
                 if idx < len(values):
                     label = f"{variable}={values[idx]} {unit}".strip()
@@ -495,9 +524,8 @@ class ImagePlanningController:
 
         print(f"\n📊 Approach:\n   {state.get('analysis_approach', 'N/A')}")
 
-        import re as _re
         _pipeline = state.get("processing_pipeline", "N/A")
-        _pipeline = _re.sub(r"\. (\d+)\. ", r".\n   \1. ", _pipeline)
+        _pipeline = re.sub(r"\. (\d+)\. ", r".\n   \1. ", _pipeline)
         print(f"\n⚙️  Pipeline:\n   {_pipeline}")
 
         print(f"\n🎯 Features to Extract:\n   {', '.join(state.get('features_to_extract', [])) or 'N/A'}")
@@ -1220,68 +1248,10 @@ Your guidance: '''
         adapted = re.sub(r'data_path\s*=\s*["\'"].*?["\'"]', f'data_path = "{data_path}"', adapted)
         return adapted
 
-    def _compute_statistics(self, image: np.ndarray) -> dict:
-        """Compute statistics for a single image."""
-        if image.ndim == 2:
-            channels = 1
-        elif image.ndim == 3:
-            channels = image.shape[2]
-        else:
-            raise ValueError(f"Unexpected image dimensionality: {image.ndim}")
-
-        h, w = image.shape[:2]
-        return {
-            "shape": list(image.shape),
-            "dtype": str(image.dtype),
-            "channels": channels,
-            "intensity_range": [float(np.nanmin(image)), float(np.nanmax(image))],
-            "intensity_mean": float(np.nanmean(image)),
-            "intensity_std": float(np.nanstd(image)),
-            "has_nans": bool(np.any(np.isnan(image.astype(float)))),
-            "aspect_ratio": float(w) / float(h) if h > 0 else 1.0,
-        }
-
-    def _load_image_data(self, image_path: str) -> np.ndarray:
+    @staticmethod
+    def _load_image_data(image_path: str) -> np.ndarray:
         """Load image data from file, handling various formats."""
-        try:
-            from ....tools.image_analysis_tools import load_image_data
-            return load_image_data(image_path)
-        except ImportError:
-            pass
-
-        # Fallback: handle common formats manually
-        if image_path.endswith('.npy'):
-            return np.load(image_path)
-        elif image_path.endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')):
-            try:
-                import cv2
-                img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-                if img is None:
-                    raise ValueError(f"Could not load image: {image_path}")
-                if img.ndim == 3 and img.shape[2] == 3:
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                elif img.ndim == 3 and img.shape[2] == 4:
-                    img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
-                return img
-            except ImportError:
-                from PIL import Image as PILImage
-                img = PILImage.open(image_path)
-                return np.array(img)
-        else:
-            # Generic attempt
-            try:
-                return np.load(image_path)
-            except Exception:
-                try:
-                    import cv2
-                    img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-                    if img is not None:
-                        if img.ndim == 3 and img.shape[2] == 3:
-                            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                        return img
-                except ImportError:
-                    pass
-                raise ValueError(f"Could not load image: {image_path}")
+        return load_image_file(image_path)
 
     def _sanitize_script(self, script: str) -> str:
         """Sanitize analysis script for non-interactive execution."""
@@ -1302,7 +1272,7 @@ Your guidance: '''
         base_script: Optional[str] = None,
     ) -> dict:
         """Execute analysis pipeline on a single image with retry logic."""
-        stats = self._compute_statistics(image_data)
+        stats = compute_image_statistics(image_data)
 
         # Create working directory for this image
         working_dir = self.output_dir / f"image_{image_idx:04d}"
@@ -2272,11 +2242,10 @@ Return JSON with:
             print("=" * 60)
             print(f"\n🔍 Diagnosis:\n   {alternative.get('diagnosis', 'N/A')}")
             print(f"\n📊 Approach:\n   {alternative.get('analysis_approach', 'N/A')}")
-            import re as _re
             _pipeline = alternative.get("alternative_pipeline", "N/A")
             if isinstance(_pipeline, list):
                 _pipeline = " -> ".join(str(s) for s in _pipeline)
-            _pipeline = _re.sub(r"\. (\d+)\. ", r".\n   \1. ", _pipeline)
+            _pipeline = re.sub(r"\. (\d+)\. ", r".\n   \1. ", _pipeline)
             print(f"\n⚙️  Pipeline:\n   {_pipeline}")
             print(f"\n🎯 Features:\n   {', '.join(alternative.get('features_to_extract', []))}")
             print("=" * 60)
@@ -2996,7 +2965,7 @@ Return JSON with:
                         state["original_image_bytes"] = anchor_bytes
                     except Exception:
                         pass
-                    state["image_statistics"] = self._compute_statistics(
+                    state["image_statistics"] = compute_image_statistics(
                         image_data
                     )
 
@@ -3486,7 +3455,7 @@ class ImageAdaptiveRefitController:
             else name
         )
 
-        stats = self._processing_helper._compute_statistics(image_data)
+        stats = compute_image_statistics(image_data)
         thumbnail_bytes = self.image_to_bytes_fn(image_data)
 
         return {
@@ -4592,8 +4561,6 @@ class GenerateImageReportController:
         )
         system_info = state.get("system_info", {})
         analysis_type = analysis_result.get("analysis_type", "N/A")
-        features = analysis_result.get("extracted_features", {})
-        quality_metrics = analysis_result.get("quality_metrics", {})
         caveats = synthesis_result.get("caveats", "")
 
         quality_warning = None
@@ -4610,11 +4577,6 @@ class GenerateImageReportController:
         file_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"ImageAnalysis_Report_{file_timestamp}.html"
         filepath = output_dir / filename
-
-        features_html = self._format_features(features)
-        quality_html = self._format_quality_metrics(
-            quality_metrics, quality_warning
-        )
 
         # Images section
         images_html = ""
@@ -4652,7 +4614,7 @@ class GenerateImageReportController:
         caveats_html = ""
         if caveats:
             caveats_html = f"""
-        <h2>5. Caveats & Limitations</h2>
+        <h2>4. Caveats & Limitations</h2>
         <div class="caveats">{caveats}</div>"""
 
         system_info_str = self._format_system_info(system_info)
@@ -4678,15 +4640,6 @@ class GenerateImageReportController:
         .image-card {{ background: white; border: 1px solid #ddd; padding: 15px; border-radius: 5px; text-align: center; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }}
         .image-card img {{ max-width: 100%; height: auto; border-radius: 3px; }}
         .image-label {{ margin-top: 12px; font-weight: bold; color: #444; font-size: 1em; border-top: 1px solid #eee; padding-top: 10px; }}
-        .params-table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
-        .params-table th, .params-table td {{ padding: 10px 15px; text-align: left; border-bottom: 1px solid #ddd; }}
-        .params-table th {{ background-color: #f8f9fa; font-weight: 600; color: #2c3e50; }}
-        .params-table tr:hover {{ background-color: #f5f5f5; }}
-        .quality-badge {{ display: inline-block; padding: 5px 12px; border-radius: 20px; font-weight: bold; margin-right: 10px; }}
-        .quality-good {{ background-color: #d4edda; color: #155724; }}
-        .quality-ok {{ background-color: #fff3cd; color: #856404; }}
-        .quality-poor {{ background-color: #f8d7da; color: #721c24; }}
-        .quality-warning-box {{ background-color: #fff3cd; border-left: 5px solid #ffc107; padding: 10px 15px; margin-top: 10px; border-radius: 0 5px 5px 0; font-size: 0.9em; }}
         .caveats {{ background-color: #fff8e6; border-left: 5px solid #f0ad4e; padding: 15px; margin-top: 20px; border-radius: 0 5px 5px 0; }}
         .footer {{ margin-top: 50px; text-align: center; color: #7f8c8d; font-size: 0.8em; }}
     </style>
@@ -4702,15 +4655,11 @@ class GenerateImageReportController:
         <h2>1. Scientific Analysis</h2>
         <h3>Analysis Type</h3>
         <div class="model-box">{analysis_type}</div>
-        <h3>Quality Metrics</h3>
-        {quality_html}
         <h3>Interpretation</h3>
         <div class="analysis-text">{detailed_analysis}</div>
         <h2>2. Visualizations</h2>
         <div class="image-grid">{images_html}</div>
-        <h2>3. Extracted Features</h2>
-        {features_html}
-        <h2>4. Scientific Claims</h2>
+        <h2>3. Scientific Claims</h2>
         {claims_html}
         {caveats_html}
         <div class="footer">Generated by SciLink Image Analysis Agent</div>
@@ -4912,90 +4861,6 @@ class GenerateImageReportController:
             return "N/A"
         parts = [f"{k}: {v}" for k, v in system_info.items() if v]
         return ", ".join(parts) if parts else "N/A"
-
-    def _format_features(self, features: dict) -> str:
-        if not features:
-            return "<p>No features extracted.</p>"
-
-        rows = ""
-        for name, value in features.items():
-            if isinstance(value, dict):
-                first_row = True
-                for sub_name, sub_value in value.items():
-                    if isinstance(sub_value, (int, float)):
-                        value_str = f"{sub_value:.4g}"
-                    else:
-                        value_str = str(sub_value)
-                    component_display = name if first_row else ""
-                    rows += (
-                        f"<tr><td><strong>{component_display}</strong></td>"
-                        f"<td>{sub_name}</td><td>{value_str}</td></tr>"
-                    )
-                    first_row = False
-            elif isinstance(value, (list, tuple)):
-                rows += (
-                    f"<tr><td><strong>{name}</strong></td>"
-                    f"<td>-</td><td>{value}</td></tr>"
-                )
-            else:
-                if isinstance(value, (int, float)):
-                    value_str = f"{value:.4g}"
-                else:
-                    value_str = str(value)
-                rows += (
-                    f"<tr><td><strong>{name}</strong></td>"
-                    f"<td>-</td><td>{value_str}</td></tr>"
-                )
-
-        return f"""<table class="params-table">
-            <thead><tr><th>Feature</th><th>Sub-feature</th><th>Value</th></tr></thead>
-            <tbody>{rows}</tbody>
-        </table>"""
-
-    def _format_quality_metrics(
-        self, quality_metrics: dict, quality_warning: str = None
-    ) -> str:
-        if not quality_metrics:
-            return "<p>No quality metrics available.</p>"
-
-        html = "<div>"
-        quality_score = quality_metrics.get("quality_score")
-        if quality_score is not None:
-            try:
-                score = float(quality_score)
-                if score >= 0.8:
-                    badge_class, label = "quality-good", "Good"
-                elif score >= 0.6:
-                    badge_class, label = "quality-ok", "Acceptable"
-                else:
-                    badge_class, label = "quality-poor", "Poor"
-                html += (
-                    f'<span class="quality-badge {badge_class}">'
-                    f'{label}</span>'
-                    f'<strong>Score = {score:.2f}</strong>'
-                )
-            except (ValueError, TypeError):
-                html += f"<strong>Quality score: {quality_score}</strong>"
-
-        # Display other metrics
-        for key, value in quality_metrics.items():
-            if key == "quality_score":
-                continue
-            if isinstance(value, float):
-                html += f" &nbsp;|&nbsp; <strong>{key} = {value:.4g}</strong>"
-            else:
-                html += f" &nbsp;|&nbsp; <strong>{key} = {value}</strong>"
-
-        html += "</div>"
-
-        if quality_warning:
-            html += (
-                f'<div class="quality-warning-box"><strong>Note:</strong> '
-                f'{quality_warning}. Alternative pipelines were attempted '
-                f'but could not improve analysis quality significantly.</div>'
-            )
-
-        return html
 
     def _generate_flagged_images_section(
         self,
