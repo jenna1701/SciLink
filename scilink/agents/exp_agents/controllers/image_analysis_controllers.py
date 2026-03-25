@@ -1809,9 +1809,15 @@ Return JSON with the refined analysis approach:
     def _get_user_feedback_on_result(
         self, state: dict, analysis_result: dict, quality_score: float
     ) -> Optional[str]:
-        """Show user the first image result and ask for optional feedback."""
+        """Show user the analysis result and ask for optional feedback."""
+        is_single = state.get("is_single_image", True)
+        num_images = state.get("num_images", 1)
+
         print("\n" + "=" * 70)
-        print("FIRST IMAGE RESULT - Review Before Processing Series")
+        if is_single:
+            print("ANALYSIS RESULT - Review Before Synthesis")
+        else:
+            print("FIRST IMAGE RESULT - Review Before Processing Series")
         print("=" * 70)
 
         review_viz_path = None
@@ -1833,11 +1839,15 @@ Return JSON with the refined analysis approach:
                 else:
                     print(f"   {k}: {v}")
 
-        num_images = state.get("num_images", 1)
-        print(f"\nThis analysis pipeline will be applied to all {num_images} images in the series.")
+        if not is_single:
+            print(f"\nThis analysis pipeline will be applied to all {num_images} images in the series.")
+
         print("\n" + "-" * 60)
         print("Options:")
-        print("  - Press Enter to accept this result and proceed with series")
+        if is_single:
+            print("  - Press Enter to accept and proceed to interpretation")
+        else:
+            print("  - Press Enter to accept this result and proceed with series")
         print("  - Type feedback to modify the analysis approach")
         print("-" * 60)
 
@@ -1850,7 +1860,10 @@ Return JSON with the refined analysis approach:
                 pass
 
         if not feedback:
-            print("Result accepted. Proceeding with series...")
+            if is_single:
+                print("Result accepted. Proceeding to interpretation...")
+            else:
+                print("Result accepted. Proceeding with series...")
             return None
 
         return feedback
@@ -2185,6 +2198,23 @@ Return JSON with:
                     f"Quality score = {best_score:.2f} (meets threshold "
                     f"{quality_threshold})"
                 )
+
+                # In CO_PILOT mode, show anchor result and ask for approval
+                if (
+                    _is_anchor
+                    and self.enable_human_feedback
+                    and best_result.get("visualization_bytes")
+                ):
+                    user_feedback = self._get_user_feedback_on_result(
+                        state, best_result, best_score
+                    )
+                    if user_feedback:
+                        best_result, best_score = self._apply_user_feedback(
+                            state, user_feedback, best_result, best_score,
+                            image_data, data_path, image_name,
+                            image_idx, all_attempts,
+                        )
+
                 return best_result
             else:
                 self.logger.warning(

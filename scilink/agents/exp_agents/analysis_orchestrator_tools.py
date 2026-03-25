@@ -790,16 +790,32 @@ class AnalysisOrchestratorTools:
                                 result["series_count"] = data.shape[1]
                                 result["n_points"] = data.shape[0]
                                 result["note"] = f"Series of {data.shape[1]} datasets, each with {data.shape[0]} points (may need transpose)"
+                            elif (
+                                min(data.shape) >= 64
+                                and max(data.shape) / min(data.shape) <= 4
+                                and data.dtype in (
+                                    np.uint8, np.uint16, np.int16,
+                                    np.float32, np.float64,
+                                )
+                            ):
+                                # Large, roughly-square array — almost certainly an image
+                                result["data_type"] = "image"
+                                result["suggested_agents"] = [1]
+                                result["primary_suggestion"] = 1
+                                result["note"] = (
+                                    f"2D array ({data.shape[0]}x{data.shape[1]}, "
+                                    f"{data.dtype}) — detected as image"
+                                )
                             else:
                                 # Ambiguous - could be image or data matrix
                                 # Try to infer from metadata if available
                                 result["data_type"] = "2d_data_ambiguous"
-                                result["suggested_agents"] = [0, 3]  # Most likely FFT (image) or CurveFitting (data matrix)
+                                result["suggested_agents"] = [1, 3]
                                 result["primary_suggestion"] = None  # No clear suggestion
                                 result["note"] = (
                                     f"Ambiguous 2D array ({data.shape[0]}x{data.shape[1]}). Could be:\n"
                                     f"  - Microscopy image → Agent 1 (ImageAnalysisAgent)\n"
-                                    f"  - Series of 1D data (rows or columns) → Agent 0 (CurveFittingAgent)\n"
+                                    f"  - Series of 1D data (rows or columns) → Agent 3 (CurveFittingAgent)\n"
                                     f"  - 2D spectral slice → Agent 2 (HyperspectralAnalysisAgent)\n"
                                     f"Check metadata or ask user to clarify."
                                 )
