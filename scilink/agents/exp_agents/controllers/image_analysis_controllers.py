@@ -2267,13 +2267,19 @@ Return JSON with:
                 )
                 break
 
-            self.logger.info(
-                f"   Diagnosis: {alternative.get('diagnosis', 'N/A')[:80]}"
-            )
-            self.logger.info(
-                f"   Trying: "
-                f"{alternative.get('alternative_pipeline', 'N/A')[:60]}"
-            )
+            print("\n" + "=" * 60)
+            print(f"📋 ALTERNATIVE APPROACH {retry + 1}/{self.max_approach_retries}")
+            print("=" * 60)
+            print(f"\n🔍 Diagnosis:\n   {alternative.get('diagnosis', 'N/A')}")
+            print(f"\n📊 Approach:\n   {alternative.get('analysis_approach', 'N/A')}")
+            import re as _re
+            _pipeline = alternative.get("alternative_pipeline", "N/A")
+            if isinstance(_pipeline, list):
+                _pipeline = " -> ".join(str(s) for s in _pipeline)
+            _pipeline = _re.sub(r"\. (\d+)\. ", r".\n   \1. ", _pipeline)
+            print(f"\n⚙️  Pipeline:\n   {_pipeline}")
+            print(f"\n🎯 Features:\n   {', '.join(alternative.get('features_to_extract', []))}")
+            print("=" * 60)
 
             temp_config = current_config.copy()
             temp_config["processing_pipeline"] = alternative.get(
@@ -2300,7 +2306,7 @@ Return JSON with:
             state["locked_analysis_config"] = original_config
 
             if alt_result["success"]:
-                # Use LLM verification as authoritative score
+                # Verify and allow one re-analysis if fixable
                 alt_verification = self._verify_quality(state, alt_result)
                 if alt_verification:
                     alt_score = alt_verification.get("quality_score", 0.0)
@@ -2309,6 +2315,44 @@ Return JSON with:
                             alt_score = float(alt_score)
                         except (ValueError, TypeError):
                             alt_score = 0.0
+
+                    # One re-analysis chance if below threshold
+                    if alt_score < quality_threshold and not alt_verification.get("is_acceptable"):
+                        self.logger.info(
+                            f"   Score = {alt_score:.2f}, attempting one re-analysis..."
+                        )
+                        refined = self._apply_verification_feedback(
+                            state, alt_verification
+                        )
+                        if refined != temp_config:
+                            state["locked_analysis_config"] = refined
+                            reanalysis = self._process_single_image(
+                                state=state, image_data=image_data,
+                                data_path=data_path,
+                                image_name=image_name,
+                                image_idx=image_idx, base_script=None,
+                            )
+                            state["locked_analysis_config"] = original_config
+                            if reanalysis["success"]:
+                                re_verif = self._verify_quality(
+                                    state, reanalysis
+                                )
+                                if re_verif:
+                                    re_score = re_verif.get(
+                                        "quality_score", 0.0
+                                    )
+                                    if isinstance(re_score, str):
+                                        try:
+                                            re_score = float(re_score)
+                                        except (ValueError, TypeError):
+                                            re_score = 0.0
+                                    if re_score > alt_score:
+                                        alt_score = re_score
+                                        alt_result = reanalysis
+                                        temp_config = refined
+                                        self.logger.info(
+                                            f"   Re-analysis improved: {re_score:.2f}"
+                                        )
                 else:
                     alt_score = 0.0
                 alt_result["_quality_score"] = alt_score
@@ -2430,6 +2474,43 @@ Return JSON with:
                 else:
                     state["locked_analysis_config"] = original_config
 
+        # --- Summarize plan history ---
+        used_alternative = best_result and best_result.get("_winning_config")
+        if used_alternative or len(all_attempts) > 1:
+            summary_lines = []
+            summary_lines.append(
+                f"Original plan: {initial_pipeline[:100]}"
+            )
+            if len(all_attempts) > 1:
+                summary_lines.append(
+                    f"Original plan score: "
+                    f"{all_attempts[0].get('score', 'N/A')}"
+                )
+                for i, a in enumerate(all_attempts[1:], 1):
+                    summary_lines.append(
+                        f"Alternative {i}: "
+                        f"{a.get('pipeline', 'N/A')[:80]} "
+                        f"(score: {a.get('score', 'N/A')})"
+                    )
+            if used_alternative:
+                winning = best_result["_winning_config"]
+                summary_lines.append(
+                    f"Selected: {winning.get('processing_pipeline', 'N/A')[:80]}"
+                )
+            else:
+                summary_lines.append(
+                    f"Selected: original plan (best available)"
+                )
+
+            plan_summary = "\n".join(summary_lines)
+
+            print("\n" + "=" * 60)
+            print("📋 PLAN DEVIATION SUMMARY")
+            print("=" * 60)
+            for line in summary_lines:
+                print(f"   {line}")
+            print("=" * 60)
+
         # --- Return best available result ---
         if best_result:
             best_result["quality_warning"] = (
@@ -2439,6 +2520,8 @@ Return JSON with:
             best_result["attempted_pipelines"] = [
                 a["pipeline"] for a in all_attempts
             ]
+            if used_alternative or len(all_attempts) > 1:
+                best_result["plan_deviation_summary"] = plan_summary
             self.logger.warning(
                 f"Proceeding with best available result "
                 f"(score = {best_score:.2f})"
