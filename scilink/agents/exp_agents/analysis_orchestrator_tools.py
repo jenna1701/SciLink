@@ -790,15 +790,31 @@ class AnalysisOrchestratorTools:
                                 result["series_count"] = data.shape[1]
                                 result["n_points"] = data.shape[0]
                                 result["note"] = f"Series of {data.shape[1]} datasets, each with {data.shape[0]} points (may need transpose)"
+                            elif (
+                                min(data.shape) >= 64
+                                and max(data.shape) / min(data.shape) <= 4
+                                and data.dtype in (
+                                    np.uint8, np.uint16, np.int16,
+                                    np.float32, np.float64,
+                                )
+                            ):
+                                # Large, roughly-square array — almost certainly an image
+                                result["data_type"] = "image"
+                                result["suggested_agents"] = [1]
+                                result["primary_suggestion"] = 1
+                                result["note"] = (
+                                    f"2D array ({data.shape[0]}x{data.shape[1]}, "
+                                    f"{data.dtype}) — detected as image"
+                                )
                             else:
                                 # Ambiguous - could be image or data matrix
                                 # Try to infer from metadata if available
                                 result["data_type"] = "2d_data_ambiguous"
-                                result["suggested_agents"] = [0, 3]  # Most likely FFT (image) or CurveFitting (data matrix)
+                                result["suggested_agents"] = [1, 3]
                                 result["primary_suggestion"] = None  # No clear suggestion
                                 result["note"] = (
                                     f"Ambiguous 2D array ({data.shape[0]}x{data.shape[1]}). Could be:\n"
-                                    f"  - Microscopy image → Agent 0 (FFTMicroscopyAnalysisAgent)\n"
+                                    f"  - Microscopy image → Agent 1 (ImageAnalysisAgent)\n"
                                     f"  - Series of 1D data (rows or columns) → Agent 3 (CurveFittingAgent)\n"
                                     f"  - 2D spectral slice → Agent 2 (HyperspectralAnalysisAgent)\n"
                                     f"Check metadata or ask user to clarify."
@@ -1295,10 +1311,9 @@ class AnalysisOrchestratorTools:
             based on data type, metadata, and image preview (if applicable).
             
             Agent IDs:
-                0: FFTMicroscopyAnalysisAgent - microstructure, grains, phases, atomic-resolution
-                1: SAMMicroscopyAnalysisAgent - particle counting, segmentation
+                0: CurveFittingAgent - 1D curves, spectra
+                1: ImageAnalysisAgent - all image types
                 2: HyperspectralAnalysisAgent - spectral datacubes
-                3: CurveFittingAgent - 1D curves, spectra
             """
             print(f"  ⚡ Tool: Setting agent to {agent_id}...")
             
@@ -1323,14 +1338,12 @@ class AnalysisOrchestratorTools:
             name="select_agent",
             description=(
                 "Set the analysis agent to use. Call this after examining data and metadata. "
-                "For microscopy images, use preview_image first to see the image and decide between "
-                "FFTMicroscopyAnalysisAgent (0) for microstructure/atomic vs SAMMicroscopyAnalysisAgent (1) for particles. "
-                "Agent IDs: 0=FFT/microstructure, 1=SAM/particles, 2=Hyperspectral, 3=CurveFitting"
+                "Agent IDs: 0=CurveFitting (1D data), 1=ImageAnalysis (all images), 2=Hyperspectral (3D datacubes)"
             ),
             parameters={
                 "agent_id": {
                     "type": "integer",
-                    "description": "Agent ID to use (0=FFT, 1=SAM, 2=Hyperspectral, 3=CurveFitting)"
+                    "description": "Agent ID to use (0=CurveFitting, 1=ImageAnalysis, 2=Hyperspectral)"
                 },
                 "reasoning": {
                     "type": "string",
@@ -1346,8 +1359,7 @@ class AnalysisOrchestratorTools:
         def preview_image(image_path: str = None) -> str:
             """
             Load and return a preview of a microscopy image for the LLM to analyze.
-            Use this to decide between FFTMicroscopyAnalysisAgent (microstructure) 
-            and SAMMicroscopyAnalysisAgent (particles).
+            Use this to visually inspect the image before analysis.
             """
             print(f"  ⚡ Tool: Loading image preview...")
             
@@ -1414,11 +1426,8 @@ class AnalysisOrchestratorTools:
                     "preview_size": list(pil_img.size),
                     "image_base64": img_base64,
                     "guidance": (
-                        "Examine this image to decide the appropriate agent:\n"
-                        "- FFTMicroscopyAnalysisAgent (ID: 0): For microstructure with grains, phases, "
-                        "domains, periodic patterns, or atomic-resolution lattices\n"
-                        "- SAMMicroscopyAnalysisAgent (ID: 1): For discrete particles, nanoparticles, "
-                        "cells, or objects that need to be counted/segmented"
+                        "Examine this image. For any microscopy/image data, use "
+                        "ImageAnalysisAgent (ID: 1)."
                     )
                 })
                 
@@ -1433,9 +1442,7 @@ class AnalysisOrchestratorTools:
             func=preview_image,
             name="preview_image",
             description=(
-                "Load a microscopy image preview for visual analysis. "
-                "Use this when you need to decide between FFTMicroscopyAnalysisAgent (microstructure, "
-                "grains, atomic-resolution) and SAMMicroscopyAnalysisAgent (particles, segmentation). "
+                "Load a microscopy image preview for visual inspection. "
                 "Returns the image as base64 for you to examine."
             ),
             parameters={
@@ -1938,7 +1945,18 @@ class AnalysisOrchestratorTools:
                 
                 # === Format response ===
                 if result.get("status") == "success":
-                    return json.dumps({
+                    # Find main visualization
+                    viz_path = None
+                    for candidate in analysis_output_dir.rglob("*_analysis.png"):
+                        viz_path = str(candidate)
+                        break
+                    if not viz_path:
+                        for candidate in analysis_output_dir.rglob("*.png"):
+                            if "report" not in candidate.name.lower():
+                                viz_path = str(candidate)
+                                break
+
+                    response = {
                         "status": "success",
                         "analysis_id": analysis_id,
                         "agent_used": self.AGENT_NAMES.get(agent_id),
@@ -1947,8 +1965,22 @@ class AnalysisOrchestratorTools:
                         "claims_count": len(result.get("scientific_claims", [])),
                         "full_result_available": True,
                         "note": f"All outputs saved to: {analysis_output_dir}",
-                        "next_steps": "Use assess_novelty to check literature for these claims, or get_recommendations for follow-up experiments."
-                    })
+                        "next_steps": "Use assess_novelty to check literature for these claims, or get_recommendations for follow-up experiments.",
+                    }
+                    if viz_path:
+                        response["visualization_path"] = viz_path
+                    if result.get("tier2_suggested"):
+                        response["tier2_suggested"] = True
+                        response["tier2_suggested_focus"] = result.get(
+                            "tier2_suggested_focus", "deeper analysis"
+                        )
+                        response["next_steps"] = (
+                            f"Deeper analysis recommended: {result.get('tier2_suggested_focus', '')}. "
+                            "Ask the user whether to proceed with Tier 2 analysis, skip it, or provide guidance. "
+                            "To run Tier 2, call run_analysis again on the same data with the Tier 1 findings "
+                            "as prior_knowledge and the output directory path in hints."
+                        )
+                    return json.dumps(response)
                 else:
                     return json.dumps({
                         "status": "error",

@@ -2,10 +2,9 @@
 Analysis Orchestrator Agent for Experimental Data Analysis
 
 Coordinates multi-modal experimental analysis using specialized sub-agents:
-- FFTMicroscopyAnalysisAgent: For microstructure analysis via FFT/NMF
-- SAMMicroscopyAnalysisAgent: For particle/object segmentation and statistics
-- HyperspectralAnalysisAgent: For spectroscopic data analysis
 - CurveFittingAgent: For 1D curve/spectrum fitting
+- ImageAnalysisAgent: For all image types (microscopy, SEM, TEM, AFM, optical)
+- HyperspectralAnalysisAgent: For 3D spectroscopic datacubes
 
 Follows the same design patterns as PlanningOrchestratorAgent for consistent UX.
 """
@@ -28,28 +27,22 @@ from ._deprecation import normalize_params
 # Built-in agent registry seed — classes are lazy-loaded on first use.
 _BUILTIN_AGENTS = {
     0: {
-        "class_path": "scilink.agents.exp_agents.fft_microscopy_agent.FFTMicroscopyAnalysisAgent",
-        "name": "FFTMicroscopyAnalysisAgent",
-        "description": "Images: microstructure, grains, phases, atomic-resolution. Handles single images or image series.",
-        "short_name": "FFT",
+        "class_path": "scilink.agents.exp_agents.curve_fitting_agent.CurveFittingAgent",
+        "name": "CurveFittingAgent",
+        "description": "1D data: DSC, TGA, XRD, UV-Vis, Raman, PL, IV curves, kinetics. Handles single files or series.",
+        "short_name": "CurveFit",
     },
     1: {
-        "class_path": "scilink.agents.exp_agents.sam_microscopy_agent.SAMMicroscopyAnalysisAgent",
-        "name": "SAMMicroscopyAnalysisAgent",
-        "description": "Images: particle counting, segmentation. Handles single images or image series.",
-        "short_name": "SAM",
+        "class_path": "scilink.agents.exp_agents.image_analysis_agent.ImageAnalysisAgent",
+        "name": "ImageAnalysisAgent",
+        "description": "Images: general-purpose analysis (microscopy, SEM, TEM, AFM, optical). Handles atomic resolution, grains, particles, textures, defects, morphology. Single images or series.",
+        "short_name": "ImageAnalysis",
     },
     2: {
         "class_path": "scilink.agents.exp_agents.hyperspectral_analysis_agent.HyperspectralAnalysisAgent",
         "name": "HyperspectralAnalysisAgent",
         "description": "3D datacubes: EELS-SI, EDS, Raman imaging.",
         "short_name": "Hyperspectral",
-    },
-    3: {
-        "class_path": "scilink.agents.exp_agents.curve_fitting_agent.CurveFittingAgent",
-        "name": "CurveFittingAgent",
-        "description": "1D data: DSC, TGA, XRD, UV-Vis, Raman, PL, IV curves, kinetics. Handles single files or series.",
-        "short_name": "CurveFit",
     },
 }
 
@@ -80,6 +73,7 @@ _CO_PILOT_DIRECTIVE = """
 **SINGLE-TOOL EXECUTION RULE:**
 1. **EXECUTE ONE TOOL**: Call only ONE tool per response.
 2. **OBSERVE OUTPUT**: Wait for results before suggesting next steps.
+3. **Exception**: When data and metadata are both available, you may chain examine_data + load_metadata + select_agent in one response.
 
 **METADATA REQUIREMENT:**
 - ALWAYS ensure metadata is available before analysis
@@ -208,21 +202,19 @@ _SYSTEM_PROMPT_BODY_POST = """
 examine_data returns data_type:
 │
 ├── 1d_data / 1d_series / tabular / tabular_series
-│   └── Agent 3 (CurveFitting)
+│   └── Agent 0 (CurveFitting)
 │
 ├── hyperspectral / hyperspectral_series
 │   └── Agent 2 (Hyperspectral)
 │
 ├── microscopy / image_series
-│   ├── Metadata: "particles", "count", "segment" → Agent 1 (SAM)
-│   ├── Metadata: "grains", "phases", "atomic" → Agent 0 (FFT)
-│   └── Unclear? → preview_image, then decide
+│   └── Agent 1 (ImageAnalysis) — default for all image types
 │
 └── 2d_data_ambiguous (disambiguation_needed=true)
     ├── Check metadata technique:
-    │   ├── Microscopy (SEM, TEM, AFM) → preview_image → Agent 0 or 1
-    │   ├── Spectroscopy (DSC, XRD, Raman) → Agent 3
-    │   └── Spectral imaging → Agent 2
+    │   ├── Microscopy (SEM, TEM, AFM) → Agent 1 (ImageAnalysis)
+    │   ├── Spectroscopy (DSC, XRD, Raman) → Agent 0 (CurveFitting)
+    │   └── Spectral imaging → Agent 2 (Hyperspectral)
     ├── If still unclear, ASK USER:
     │   "Is this (a) an image, (b) a matrix of spectra/curves, or (c) something else?"
     └── Or use preview_image to check if it looks like an image
@@ -235,6 +227,12 @@ examine_data returns data_type:
 4. `select_agent`
 5. `run_analysis`
 6. Present results
+7. If `run_analysis` returns `tier2_suggested: true` (ImageAnalysisAgent only):
+   - Show the Tier 1 results and visualization to the user
+   - Ask: "Deeper analysis is recommended: [focus]. Proceed / Skip / Provide guidance?"
+   - If proceed: call `run_analysis` again with Tier 1 findings as `prior_knowledge`
+     and Tier 1 output directory path in `hints`
+   - If user provides guidance: include it in `hints` for the second call
 
 **BEHAVIOR:**
 - If disambiguation_needed=true in examine_data result, ASK the user before selecting agent
@@ -282,10 +280,9 @@ def get_system_prompt(
         agent_list = _build_agent_list_section(agent_registry)
     else:
         agent_list = "\n".join([
-            "     * 0: FFTMicroscopyAnalysisAgent - Images: microstructure, grains, phases, atomic-resolution",
-            "     * 1: SAMMicroscopyAnalysisAgent - Images: particle counting, segmentation",
+            "     * 0: CurveFittingAgent - 1D data: DSC, TGA, XRD, UV-Vis, Raman, PL, IV curves, kinetics",
+            "     * 1: ImageAnalysisAgent - Images: general-purpose analysis (microscopy, SEM, TEM, AFM, optical). Atomic resolution, grains, particles, textures, defects, morphology",
             "     * 2: HyperspectralAnalysisAgent - 3D datacubes: EELS-SI, EDS, Raman imaging",
-            "     * 3: CurveFittingAgent - 1D data: DSC, TGA, XRD, UV-Vis, Raman, PL, IV curves, kinetics",
         ])
     body = _SYSTEM_PROMPT_BODY_PRE + agent_list + _SYSTEM_PROMPT_BODY_POST
     if external_tools:
@@ -935,7 +932,7 @@ class AnalysisOrchestratorAgent:
         directory, ensuring outputs from different analyses don't collide.
         
         Args:
-            agent_id: The agent type ID (0-3)
+            agent_id: The agent type ID (0-2)
             output_dir: Unique output directory for this analysis run
             
         Returns:
