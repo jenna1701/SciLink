@@ -2581,6 +2581,9 @@ analysis is always preferred over a complex one with marginal benefit.
 - Segmentation (Otsu, adaptive threshold, watershed, morphological)
 - Edge/boundary detection (Canny, Sobel, Laplacian of Gaussian)
 - Feature extraction (connected components, region properties, contour analysis)
+  Note: connected component labeling cannot separate touching or overlapping objects —
+  they will be merged into single blobs. If objects touch or overlap, add a splitting
+  step (e.g., distance transform → watershed) after thresholding.
 - Texture analysis (GLCM, local binary patterns, Gabor filters)
 - Morphological measurements (area, perimeter, circularity, aspect ratio, solidity)
 - Phase identification (intensity clustering, color-space segmentation)
@@ -2747,8 +2750,88 @@ Add a `"series_analysis_plan"` field to your JSON response:
 **Rules:**
 - Every image index (0 through {num_images_minus_1}) must appear in exactly ONE regime.
 - Each regime must have at least one image.
-- If you identify a transition point where the image character changes significantly and you cannot design a single pipeline that handles all regimes well, use separate regimes with pipelines tailored to each.
-- When a single pipeline can handle the full series, prefer one regime even if parameters vary.
+- The pipeline is verified on the FIRST image of each regime and then locked — it is applied to all remaining images in that regime WITHOUT modification. If you identify a transition point, ask yourself: will the pipeline that works on the first image of this regime also work on the last? If not, split into separate regimes.
+- A single regime is appropriate only when the same locked pipeline will produce correct results on every image in that regime.
+"""
+
+
+IMAGE_ANALYSIS_PLAN_DIVERSITY_SUFFIX = """
+
+**IMPORTANT: PROPOSE A DIFFERENT APPROACH**
+The following analysis approaches have already been proposed for this image.
+You MUST propose a different analysis method. Do not reuse
+the same method with different parameters.
+
+Already proposed:
+{previous_approaches}
+"""
+
+IMAGE_ANALYSIS_PLAN_SELECTION_PROMPT = """You are selecting the best analysis plan for a scientific image.
+
+{num_candidates} candidate plans were generated, each using a different analysis approach.
+Select the plan that is most likely to produce correct, reliable results for this image.
+
+## Candidate Plans
+{candidates_formatted}
+
+## Selection Criteria
+1. **Physical appropriateness**: Does the pipeline match the features visible in the image(s)?
+2. **Robustness on challenging features**: Will the pipeline handle the most difficult features visible (e.g., overlapping or touching objects, mixed morphologies, low contrast regions, coalesced structures)?
+3. **Completeness**: Does it extract the most scientifically useful features?
+4. **Simplicity as tiebreaker**: Only prefer simpler pipelines when two approaches would produce equally reliable results.
+
+Return JSON:
+{{{{
+    "selected_index": <0-based index of the best plan>,
+    "reasoning": "Brief explanation of why this plan is best and what makes the alternatives less suitable"
+}}}}
+"""
+
+
+IMAGE_ANALYSIS_PLAN_VALIDATION_PROMPT = """You are validating an image analysis plan BEFORE it is executed.
+
+**Proposed Plan:**
+- Approach: {analysis_approach}
+- Pipeline: {processing_pipeline}
+- Features: {features_to_extract}
+- Quality Criteria: {quality_criteria}
+{regime_section}
+
+Examine the image(s) carefully. Will this pipeline produce correct results on what you see?
+
+Think about whether each step in the pipeline will work given the actual image content.
+For series: the pipeline is locked on the first image of each regime and applied unchanged
+to all images in that regime — will it also work on the most challenging image?
+
+If the plan is sound, return {{"valid": true}}.
+If you identify problems, return:
+{{{{
+    "valid": false,
+    "issues": ["list of specific problems you foresee"],
+    "processing_pipeline": "revised default pipeline",
+    "features_to_extract": ["revised features if needed"],
+    "quality_criteria": "revised criteria if needed",
+    "series_analysis_plan": {{{{
+        "rationale": "why regimes are needed",
+        "regimes": [
+            {{{{
+                "name": "regime name",
+                "image_indices": [0, 1],
+                "processing_pipeline": "revised pipeline for this regime",
+                "features_to_extract": ["features for this regime"]
+            }}}}
+        ],
+        "transition_points": [
+            {{{{
+                "between_indices": [1, 2],
+                "description": "what changes"
+            }}}}
+        ]
+    }}}}
+}}}}
+Include `series_analysis_plan` only if the image is part of a series with regimes.
+Each regime must have its own pipeline and features. Every image index must appear in exactly one regime.
+Only flag genuine problems that would cause incorrect results — do not redesign a reasonable plan.
 """
 
 

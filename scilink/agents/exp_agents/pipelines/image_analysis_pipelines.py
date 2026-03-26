@@ -59,6 +59,7 @@ def create_unified_image_analysis_pipeline(
     max_approach_retries: int = 3,
     outlier_sigma: float = 2.0,
     max_verification_iterations: int = 3,
+    num_plan_candidates: int = 1,
 ) -> List:
     """
     Factory function to create the unified image analysis pipeline.
@@ -148,6 +149,7 @@ def create_unified_image_analysis_pipeline(
             output_dir=output_dir,
             enable_human_feedback=enable_human_feedback,
             max_iterations=5,
+            num_plan_candidates=num_plan_candidates,
         )
     )
 

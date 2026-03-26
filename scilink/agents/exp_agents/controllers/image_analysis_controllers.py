@@ -494,7 +494,8 @@ class ImagePlanningController:
         instructions: str,
         output_dir: str,
         enable_human_feedback: bool = False,
-        max_iterations: int = 5
+        max_iterations: int = 5,
+        num_plan_candidates: int = 1,
     ):
         self.model = model
         self.logger = logger
@@ -505,6 +506,7 @@ class ImagePlanningController:
         self.output_dir = Path(output_dir)
         self.enable_human_feedback = enable_human_feedback
         self.max_iterations = max_iterations
+        self.num_plan_candidates = num_plan_candidates
 
     def _get_instructions(self, state: dict) -> str:
         """Return planning instructions, using state override if present."""
@@ -586,9 +588,14 @@ class ImagePlanningController:
             state["_refine_feedback"] = feedback
             return state
 
-    def _plan_analysis(self, state: dict) -> dict:
+    def _build_planning_prompt(self, state: dict, extra_suffix: str = "") -> list:
+        """Build the planning prompt, optionally with a diversity suffix."""
+        instructions = self._get_instructions(state)
+        if extra_suffix:
+            instructions = instructions + extra_suffix
+
         prompt = [
-            self._get_instructions(state),
+            instructions,
             "\n## Image",
             {"mime_type": "image/jpeg", "data": state["original_image_bytes"]},
             "\n## Image Statistics\n" + json.dumps(state["image_statistics"], indent=2),
@@ -616,27 +623,169 @@ class ImagePlanningController:
                 "The analysis pipeline you choose will be applied to ALL images in the series."
             )
 
+        return prompt
+
+    def _plan_analysis(self, state: dict, extra_suffix: str = "") -> dict:
+        """Generate a single analysis plan. Returns the plan as a dict."""
+        prompt = self._build_planning_prompt(state, extra_suffix)
         response = self.model.generate_content(prompt, generation_config=self.generation_config)
         result, error = self._parse(response)
 
         if error or not result:
             raise ValueError(f"Failed to parse: {error}")
 
-        state["observations"] = result.get("observations", "")
-        state["analysis_approach"] = result.get("analysis_approach", "Image analysis")
         pipeline = result.get("processing_pipeline", "Standard processing")
         if isinstance(pipeline, list):
             pipeline = " -> ".join(str(s) for s in pipeline)
-        state["processing_pipeline"] = pipeline
-        state["features_to_extract"] = result.get("features_to_extract", [])
-        state["quality_criteria"] = result.get("quality_criteria", "Visual inspection")
-        state["expected_outputs"] = result.get("expected_outputs", [])
-        state["literature_query"] = result.get("literature_query")
+
+        return {
+            "observations": result.get("observations", ""),
+            "analysis_approach": result.get("analysis_approach", "Image analysis"),
+            "processing_pipeline": pipeline,
+            "features_to_extract": result.get("features_to_extract", []),
+            "quality_criteria": result.get("quality_criteria", "Visual inspection"),
+            "expected_outputs": result.get("expected_outputs", []),
+            "literature_query": result.get("literature_query"),
+            "series_analysis_plan": result.get("series_analysis_plan"),
+        }
+
+    def _apply_plan_to_state(self, state: dict, plan: dict) -> dict:
+        """Apply a plan dict's fields to state and extract series plan."""
+        state["observations"] = plan["observations"]
+        state["analysis_approach"] = plan["analysis_approach"]
+        state["processing_pipeline"] = plan["processing_pipeline"]
+        state["features_to_extract"] = plan["features_to_extract"]
+        state["quality_criteria"] = plan["quality_criteria"]
+        state["expected_outputs"] = plan["expected_outputs"]
+        state["literature_query"] = plan["literature_query"]
 
         # Extract series analysis plan if present
-        self._extract_series_plan(state, result)
+        self._extract_series_plan(state, plan)
 
         return state
+
+    def _generate_candidate_plans(self, state: dict) -> dict:
+        """Generate N candidate plans with different approaches, select the best."""
+        from ..instruct import IMAGE_ANALYSIS_PLAN_DIVERSITY_SUFFIX
+
+        n = self.num_plan_candidates
+        candidates = []
+
+        for i in range(n):
+            self.logger.info(f"  Generating plan candidate {i + 1}/{n}...")
+
+            # Build diversity suffix from previously generated pipelines
+            if i == 0:
+                extra_suffix = ""
+            else:
+                prev_lines = []
+                for j, c in enumerate(candidates):
+                    prev_lines.append(
+                        f"- Plan {j + 1}: {c['analysis_approach']} | "
+                        f"Pipeline: {c['processing_pipeline']}"
+                    )
+                extra_suffix = IMAGE_ANALYSIS_PLAN_DIVERSITY_SUFFIX.format(
+                    previous_approaches="\n".join(prev_lines)
+                )
+
+            try:
+                plan = self._plan_analysis(state, extra_suffix=extra_suffix)
+                candidates.append(plan)
+                self.logger.info(
+                    f"    Approach: {plan['analysis_approach'][:80]}"
+                )
+                self.logger.info(
+                    f"    Pipeline: {plan['processing_pipeline'][:80]}..."
+                )
+            except Exception as e:
+                self.logger.warning(f"    Candidate {i + 1} failed: {e}")
+
+        if not candidates:
+            raise ValueError("All plan candidates failed to generate")
+
+        if len(candidates) == 1:
+            winner = candidates[0]
+        else:
+            winner = self._select_best_plan(candidates, state)
+
+        return self._apply_plan_to_state(state, winner)
+
+    def _select_best_plan(self, candidates: list, state: dict) -> dict:
+        """Use LLM to select the best plan from candidates."""
+        from ..instruct import IMAGE_ANALYSIS_PLAN_SELECTION_PROMPT
+
+        # Format candidates for the prompt
+        candidates_text = []
+        for i, c in enumerate(candidates):
+            regime_info = ""
+            sp = c.get("series_analysis_plan")
+            if sp and sp.get("regimes"):
+                regimes_str = "; ".join(
+                    f"{r.get('name', 'unnamed')}: indices {r.get('image_indices', [])}"
+                    for r in sp["regimes"]
+                )
+                regime_info = f"\n  Regimes: {regimes_str}"
+            candidates_text.append(
+                f"### Plan {i}\n"
+                f"  Observations: {c['observations'][:200]}\n"
+                f"  Approach: {c['analysis_approach']}\n"
+                f"  Pipeline: {c['processing_pipeline']}\n"
+                f"  Features: {', '.join(c['features_to_extract'])}\n"
+                f"  Quality Criteria: {c['quality_criteria']}"
+                f"{regime_info}"
+            )
+
+        prompt_text = IMAGE_ANALYSIS_PLAN_SELECTION_PROMPT.format(
+            num_candidates=len(candidates),
+            candidates_formatted="\n\n".join(candidates_text),
+        )
+
+        prompt_parts = [prompt_text]
+
+        # Include image for reference
+        prompt_parts.append("\n## Image for Reference")
+        prompt_parts.append({
+            "mime_type": "image/jpeg",
+            "data": state["original_image_bytes"],
+        })
+
+        # Include scout montage for series
+        montage = state.get("scout_montage_bytes")
+        if montage:
+            prompt_parts.append("\n## Series Montage")
+            prompt_parts.append({
+                "mime_type": "image/jpeg",
+                "data": montage,
+            })
+
+        try:
+            response = self.model.generate_content(
+                prompt_parts, generation_config=self.generation_config,
+            )
+            result, error = self._parse(response)
+
+            if error or not result:
+                self.logger.warning(
+                    f"  Plan selection failed: {error}. Using candidate 0."
+                )
+                return candidates[0]
+
+            idx = result.get("selected_index", 0)
+            if not isinstance(idx, int) or idx < 0 or idx >= len(candidates):
+                self.logger.warning(
+                    f"  Invalid selected_index {idx}. Using candidate 0."
+                )
+                return candidates[0]
+
+            reasoning = result.get("reasoning", "")
+            self.logger.info(f"  Selected plan {idx}: {reasoning[:120]}")
+            return candidates[idx]
+
+        except Exception as e:
+            self.logger.warning(
+                f"  Plan selection error: {e}. Using candidate 0."
+            )
+            return candidates[0]
 
     def _append_scout_context(self, prompt: list, state: dict, scout_data: list) -> None:
         """Append scout image thumbnails and series regime planning instructions."""
@@ -804,6 +953,120 @@ class ImagePlanningController:
 
         return state
 
+    def _validate_plan(self, state: dict) -> dict:
+        """Validate the selected plan against the actual images."""
+        from ..instruct import IMAGE_ANALYSIS_PLAN_VALIDATION_PROMPT
+
+        is_single = state.get("is_single_image", True)
+
+        # Build regime section
+        regime_section = ""
+        series_plan = state.get("series_analysis_plan")
+        if series_plan and series_plan.get("regimes"):
+            lines = ["\n**Regimes:**"]
+            for regime in series_plan["regimes"]:
+                lines.append(
+                    f"- {regime.get('name', 'Unnamed')}: "
+                    f"indices {regime.get('image_indices', [])}, "
+                    f"pipeline: {regime.get('processing_pipeline', 'N/A')}, "
+                    f"features: {', '.join(regime.get('features_to_extract', []))}"
+                )
+            regime_section = "\n".join(lines)
+
+        prompt_text = IMAGE_ANALYSIS_PLAN_VALIDATION_PROMPT.format(
+            analysis_approach=state.get("analysis_approach", "N/A"),
+            processing_pipeline=state.get("processing_pipeline", "N/A"),
+            features_to_extract=", ".join(
+                state.get("features_to_extract", [])
+            ),
+            quality_criteria=state.get("quality_criteria", "N/A"),
+            regime_section=regime_section,
+        )
+
+        prompt_parts = [prompt_text]
+
+        # Include skill context so validator understands domain guidance
+        _append_skill_context(prompt_parts, state, "planning")
+
+        # Show challenging images for validation
+        scout_data = state.get("scout_data", [])
+        if not is_single and scout_data:
+            if series_plan and series_plan.get("regimes"):
+                # Show last scouted image per regime (most challenging)
+                shown = set()
+                for regime in series_plan["regimes"]:
+                    indices = regime.get("image_indices", [])
+                    for scout in reversed(scout_data):
+                        if scout["index"] in indices and scout["index"] not in shown:
+                            prompt_parts.append(
+                                f"\n**{regime.get('name', 'Regime')} "
+                                f"— image at {scout['label']} "
+                                f"(index {scout['index']}):**"
+                            )
+                            prompt_parts.append({
+                                "mime_type": "image/jpeg",
+                                "data": scout["thumbnail_bytes"],
+                            })
+                            shown.add(scout["index"])
+                            break
+            else:
+                # Show last scout
+                last_scout = scout_data[-1]
+                prompt_parts.append(
+                    f"\n**Most challenging image "
+                    f"(index {last_scout['index']}, {last_scout['label']}):**"
+                )
+                prompt_parts.append({
+                    "mime_type": "image/jpeg",
+                    "data": last_scout["thumbnail_bytes"],
+                })
+        else:
+            prompt_parts.append("\n**Image:**")
+            prompt_parts.append({
+                "mime_type": "image/jpeg",
+                "data": state["original_image_bytes"],
+            })
+
+        try:
+            response = self.model.generate_content(
+                prompt_parts, generation_config=self.generation_config,
+            )
+            result, error = self._parse(response)
+
+            if error or not result:
+                self.logger.warning("  Plan validation parse failed, keeping plan")
+                return state
+
+            if result.get("valid", True):
+                self.logger.info("  Plan validation: approved")
+                return state
+
+            issues = result.get("issues", [])
+            self.logger.info(
+                f"  Plan validation: {len(issues)} issue(s) found, revising"
+            )
+            for issue in issues:
+                self.logger.info(f"    - {issue}")
+
+            if result.get("processing_pipeline"):
+                pipeline = result["processing_pipeline"]
+                if isinstance(pipeline, list):
+                    pipeline = " -> ".join(str(s) for s in pipeline)
+                state["processing_pipeline"] = pipeline
+            if result.get("features_to_extract"):
+                state["features_to_extract"] = result["features_to_extract"]
+            if result.get("quality_criteria"):
+                state["quality_criteria"] = result["quality_criteria"]
+
+            # Update series plan if revised
+            if result.get("series_analysis_plan"):
+                self._extract_series_plan(state, result)
+
+        except Exception as e:
+            self.logger.warning(f"  Plan validation failed: {e}, keeping plan")
+
+        return state
+
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"):
             return state
@@ -813,9 +1076,16 @@ class ImagePlanningController:
         self.logger.info(f"\n--- Planning Analysis ({mode_str}) ---\n")
 
         try:
-            state = self._plan_analysis(state)
+            if self.num_plan_candidates > 1:
+                state = self._generate_candidate_plans(state)
+            else:
+                plan = self._plan_analysis(state)
+                state = self._apply_plan_to_state(state, plan)
             self.logger.info(f"  Approach: {state['analysis_approach']}")
             self.logger.info(f"  Pipeline: {state['processing_pipeline']}")
+
+            # Validate plan against actual images
+            state = self._validate_plan(state)
 
             if self.enable_human_feedback:
                 iteration = 0
@@ -2000,6 +2270,7 @@ Return JSON with:
                     verification_attempts = []
                     verification_history = []
                     analysis_was_approved = False
+                    current_result = best_result  # track latest for verification
 
                     for verification_iter in range(self.max_verification_iterations):
                         self.logger.info(
@@ -2008,22 +2279,37 @@ Return JSON with:
                         )
 
                         verification = self._verify_quality(
-                            state, best_result, history=verification_history
+                            state, current_result, history=verification_history
                         )
 
                         if verification is None:
                             self.logger.warning("   Verification failed, skipping")
                             break
 
+                        # Extract score first
+                        v_score = verification.get("quality_score", 0.0)
+                        if not isinstance(v_score, (int, float)):
+                            v_score = 0.0
+                        current_result["_quality_score"] = v_score
+
+                        # Update score in all_attempts for this result
+                        if all_attempts:
+                            all_attempts[-1]["score"] = v_score
+
+                        # Track best result across all iterations
+                        if v_score > best_score:
+                            best_score = v_score
+                            best_result = current_result
+
                         verification_attempts.append({
-                            "result": best_result.copy() if best_result else {},
+                            "result": current_result.copy() if current_result else {},
                             "verification": verification,
                             "config": state.get("locked_analysis_config", {}).copy(),
-                            "score": best_score,
+                            "score": v_score,
                         })
 
                         verification_history.append({
-                            "quality_score": best_score,
+                            "quality_score": v_score,
                             "config_used": state.get("locked_analysis_config", {}),
                             "issues_found": verification.get("issues_found", []),
                             "overall_assessment": verification.get(
@@ -2033,12 +2319,6 @@ Return JSON with:
                                 "recommended_action", ""
                             ),
                         })
-
-                        # Always use the LLM verification score as authoritative
-                        v_score = verification.get("quality_score", best_score)
-                        if isinstance(v_score, (int, float)):
-                            best_result["_quality_score"] = v_score
-                            best_score = v_score
 
                         # Log sub-scores if available
                         c = verification.get("completeness")
@@ -2059,8 +2339,8 @@ Return JSON with:
 
                         # Log issues and save last recommended action
                         self._log_verification_issues(verification)
-                        if best_result:
-                            best_result["_last_recommended_action"] = (
+                        if current_result:
+                            current_result["_last_recommended_action"] = (
                                 verification.get("recommended_action", "")
                             )
 
@@ -2075,9 +2355,10 @@ Return JSON with:
                             )
                             break
 
-                        # Clean up old visualization
-                        old_viz_path = best_result.get("visualization_path")
-                        if old_viz_path and Path(old_viz_path).exists():
+                        # Clean up old visualization (but not the best result's viz)
+                        old_viz_path = current_result.get("visualization_path")
+                        if (old_viz_path and Path(old_viz_path).exists()
+                                and current_result is not best_result):
                             try:
                                 os.remove(old_viz_path)
                             except Exception:
@@ -2096,19 +2377,17 @@ Return JSON with:
                         )
 
                         if verified_result["success"]:
-                            # Score will be set by the next verification
-                            # iteration's LLM assessment
-                            verified_score = best_score
-                            verified_result["_quality_score"] = verified_score
+                            verified_result["_quality_score"] = 0.0
                             self.logger.info(
                                 "   Re-analysis complete, awaiting verification..."
                             )
 
-                            best_score = verified_score
-                            best_result = verified_result
+                            # Track as latest result for next verification,
+                            # but preserve best result/score separately
+                            current_result = verified_result
                             all_attempts.append({
                                 "pipeline": f"Verification-{verification_iter + 1}",
-                                "score": verified_score,
+                                "score": 0.0,  # will be updated by next verification
                                 "result": verified_result,
                             })
                         else:
@@ -2120,25 +2399,27 @@ Return JSON with:
                         # Loop exhausted without approval - verify final result
                         self.logger.info("   Verifying final re-analysis...")
                         final_verification = self._verify_quality(
-                            state, best_result
+                            state, current_result
                         )
 
                         if final_verification:
+                            v_score = final_verification.get(
+                                "quality_score", 0.0
+                            )
+                            if isinstance(v_score, (int, float)):
+                                current_result["_quality_score"] = v_score
+                                if v_score > best_score:
+                                    best_score = v_score
+                                    best_result = current_result
+
                             verification_attempts.append({
-                                "result": best_result.copy() if best_result else {},
+                                "result": current_result.copy() if current_result else {},
                                 "verification": final_verification,
                                 "config": state.get(
                                     "locked_analysis_config", {}
                                 ).copy(),
-                                "score": best_score,
+                                "score": v_score,
                             })
-
-                            v_score = final_verification.get(
-                                "quality_score", best_score
-                            )
-                            if isinstance(v_score, (int, float)):
-                                best_result["_quality_score"] = v_score
-                                best_score = v_score
 
                             if best_score >= quality_threshold:
                                 self.logger.info(

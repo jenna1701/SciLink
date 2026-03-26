@@ -156,6 +156,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         max_approach_retries: int = 3,
         outlier_sigma: float = 2.0,
         max_verification_iterations: int = 5,
+        # Planning settings
+        num_plan_candidates: int = 1,
         **kwargs,
     ):
         # ====================================================================
@@ -189,6 +191,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.max_approach_retries = max_approach_retries
         self.outlier_sigma = outlier_sigma
         self.max_verification_iterations = max_verification_iterations
+        self.num_plan_candidates = num_plan_candidates
 
         self.executor = ScriptExecutor(timeout=executor_timeout)
 
@@ -458,6 +461,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             max_approach_retries=effective_max_retries,
             outlier_sigma=effective_outlier_sigma,
             max_verification_iterations=self.max_verification_iterations,
+            num_plan_candidates=self.num_plan_candidates,
         )
 
         # Execute pipeline
@@ -571,6 +575,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 max_approach_retries=effective_max_retries,
                 outlier_sigma=effective_outlier_sigma,
                 max_verification_iterations=self.max_verification_iterations,
+                num_plan_candidates=self.num_plan_candidates,
             )
 
             for i, controller in enumerate(tier2_pipeline, 1):
