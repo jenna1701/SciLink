@@ -2596,11 +2596,12 @@ Access channels via `image[:,:,0]`, `image[:,:,1]`, etc.
 - SAM instance segmentation — for images with touching/overlapping objects.
   Use `from scilink.tools.sam import run_sam_analysis` in your script.
   SAM detects individual object instances directly, even when they overlap.
-  Usage: `result = run_sam_analysis(image_array, params={"sam_parameters": "sensitive",
+  Usage: `result = run_sam_analysis(image_array, params={"sam_parameters": "default",
     "min_area": 200, "max_area": 50000, "pruning_iou_threshold": 0.3})`
   First arg must be a 2D grayscale numpy array (not a file path, not RGB). \
 For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). Adjust parameter values as needed.
-  Parameters: sam_parameters ('default'/'sensitive'/'ultra-permissive' detection sensitivity),
+  Parameters: sam_parameters ('default' for first attempt, 'sensitive' if default misses objects,
+    'ultra-permissive' for maximum detection),
     min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False),
     pruning_iou_threshold (duplicate removal, lower = stricter, default 0.5).
   Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks".
@@ -2891,11 +2892,12 @@ change the analysis methods themselves (e.g., don't replace Otsu with adaptive t
 opencv-python (cv2), matplotlib, Pillow (PIL), scikit-learn (sklearn), pandas, json, \
 scilink.tools.sam — SAM instance segmentation for touching/overlapping objects. \
 `from scilink.tools.sam import run_sam_analysis`; \
-usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "sensitive", \
+usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "default", \
 "min_area": 200, "max_area": 50000, "pruning_iou_threshold": 0.3}})`. \
 First arg must be a 2D grayscale numpy array (not a file path, not RGB). \
 For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). Adjust parameter values as needed. \
-Parameters: sam_parameters ('default'/'sensitive'/'ultra-permissive' detection sensitivity), \
+Parameters: sam_parameters ('default' for first attempt, 'sensitive' if default misses objects, \
+'ultra-permissive' for maximum detection), \
 min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
 pruning_iou_threshold (duplicate removal, lower = stricter, default 0.5). \
 Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \
@@ -2948,11 +2950,12 @@ IMAGE_ANALYSIS_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed image analysi
 opencv-python (cv2), matplotlib, Pillow (PIL), scikit-learn (sklearn), pandas, json, \
 scilink.tools.sam — SAM instance segmentation for touching/overlapping objects. \
 `from scilink.tools.sam import run_sam_analysis`; \
-usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "sensitive", \
+usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "default", \
 "min_area": 200, "max_area": 50000, "pruning_iou_threshold": 0.3}})`. \
 First arg must be a 2D grayscale numpy array (not a file path, not RGB). \
 For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). Adjust parameter values as needed. \
-Parameters: sam_parameters ('default'/'sensitive'/'ultra-permissive' detection sensitivity), \
+Parameters: sam_parameters ('default' for first attempt, 'sensitive' if default misses objects, \
+'ultra-permissive' for maximum detection), \
 min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
 pruning_iou_threshold (duplicate removal, lower = stricter, default 0.5). \
 Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \

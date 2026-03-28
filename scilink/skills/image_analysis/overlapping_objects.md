@@ -60,7 +60,7 @@ the most informative channel (e.g., `image[:,:,0]`). Do not convert to RGB.
 ```
 from scilink.tools.sam import run_sam_analysis
 result = run_sam_analysis(image_array, params={
-    "sam_parameters": "sensitive",
+    "sam_parameters": "default",
     "min_area": 200, "max_area": 50000,
     "pruning_iou_threshold": 0.3
 })
