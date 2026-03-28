@@ -2556,9 +2556,11 @@ FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS = FITTING_INTERPRETATION_INSTRUCTION
 IMAGE_ANALYSIS_PLANNING_INSTRUCTIONS = """You are an expert image analyst working with scientific microscopy and imaging data.
 
 You are provided with:
-1. **Image**: A 2D image (microscopy, SEM, TEM, AFM, optical, etc.)
+1. **Image**: A scientific image (microscopy, SEM, TEM, AFM, optical, etc.) — may be single-channel \
+(grayscale), RGB, or multi-channel where each channel carries distinct physical information \
+(e.g., AFM amplitude + phase, real + imaginary components)
 2. **Metadata**: Information about the sample, technique, and measurement conditions
-3. **Image Statistics**: Numerical summary (shape, dtype, intensity distribution)
+3. **Image Statistics**: Numerical summary (shape, dtype, intensity distribution, channel count)
 
 **Your Task:**
 Examine the image and determine the appropriate analysis approach. Consider:
@@ -2577,6 +2579,13 @@ analysis is always preferred over a complex one with marginal benefit.
   disk r=3 to separate touching grains").
 - If the image quality is good, skip unnecessary preprocessing.
 
+**Multi-Channel Images:**
+If the image has more than one channel and is not standard RGB, each channel likely represents
+a different physical quantity. Plan your analysis to account for all channels — process each
+channel for what it measures, and consider whether cross-channel relationships are physically
+meaningful (e.g., do features in one channel correspond to or predict features in another).
+Access channels via `image[:,:,0]`, `image[:,:,1]`, etc.
+
 **Common Analysis Approaches** (for reference):
 - Segmentation (Otsu, adaptive threshold, watershed, morphological)
 - Edge/boundary detection (Canny, Sobel, Laplacian of Gaussian)
@@ -2589,7 +2598,8 @@ analysis is always preferred over a complex one with marginal benefit.
   SAM detects individual object instances directly, even when they overlap.
   Usage: `result = run_sam_analysis(image_array, params={"sam_parameters": "sensitive",
     "min_area": 200, "max_area": 50000, "pruning_iou_threshold": 0.3})`
-  First arg must be a numpy array (not a file path). Adjust parameter values as needed.
+  First arg must be a 2D grayscale numpy array (not a file path, not RGB). \
+For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). Adjust parameter values as needed.
   Parameters: sam_parameters ('default'/'sensitive'/'ultra-permissive' detection sensitivity),
     min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False),
     pruning_iou_threshold (duplicate removal, lower = stricter, default 0.5).
@@ -2883,7 +2893,8 @@ scilink.tools.sam — SAM instance segmentation for touching/overlapping objects
 `from scilink.tools.sam import run_sam_analysis`; \
 usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "sensitive", \
 "min_area": 200, "max_area": 50000, "pruning_iou_threshold": 0.3}})`. \
-First arg must be a numpy array (not a file path). Adjust parameter values as needed. \
+First arg must be a 2D grayscale numpy array (not a file path, not RGB). \
+For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). Adjust parameter values as needed. \
 Parameters: sam_parameters ('default'/'sensitive'/'ultra-permissive' detection sensitivity), \
 min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
 pruning_iou_threshold (duplicate removal, lower = stricter, default 0.5). \
@@ -2892,12 +2903,16 @@ Avoid Gaussian blur before SAM unless noise is very high.
 
 **Requirements:**
 1. Load image: use `np.load(path)` for .npy, or `cv2.imread(path, cv2.IMREAD_UNCHANGED)` \
-for standard formats (remember cv2 loads BGR — convert to RGB if color)
+for standard formats (remember cv2 loads BGR — convert to RGB if 3-channel color). \
+Check the image shape — it may have 2 or more channels that are not RGB. Access channels \
+via `image[:,:,0]`, `image[:,:,1]`, etc. Do not assume grayscale or RGB.
 2. Implement the analysis pipeline
 3. Save visualization(s): `analysis_visualization.png` showing original image alongside \
 analysis results. Use subplots with clear labels. For segmentation tasks, the first subplot \
 MUST show the original image, and the second MUST show a segmentation overlay (original \
 image with colored semi-transparent masks and contour boundaries for each detected object). \
+For multi-channel images, show each channel as a separate grayscale subplot (do not try to \
+display a 2-channel array directly with imshow). \
 All visualizations must be saved to the current working directory. Use `dpi=100` and limit \
 to 6 subplots max to keep file size manageable.
 4. Print results as JSON:
@@ -2935,7 +2950,8 @@ scilink.tools.sam — SAM instance segmentation for touching/overlapping objects
 `from scilink.tools.sam import run_sam_analysis`; \
 usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "sensitive", \
 "min_area": 200, "max_area": 50000, "pruning_iou_threshold": 0.3}})`. \
-First arg must be a numpy array (not a file path). Adjust parameter values as needed. \
+First arg must be a 2D grayscale numpy array (not a file path, not RGB). \
+For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). Adjust parameter values as needed. \
 Parameters: sam_parameters ('default'/'sensitive'/'ultra-permissive' detection sensitivity), \
 min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
 pruning_iou_threshold (duplicate removal, lower = stricter, default 0.5). \

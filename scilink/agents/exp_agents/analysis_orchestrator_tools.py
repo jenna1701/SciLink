@@ -45,9 +45,9 @@ def _build_skill_description(agent_registry: dict = None,
 
     parts = [
         "Domain skill name or path to a custom .md skill file. "
-        "For image series, omit this unless the user explicitly requests a "
-        "specific skill — the ImageAnalysisAgent will scout representative "
-        "images first and auto-select a skill if one is relevant."
+        "For ImageAnalysisAgent, omit this unless the user explicitly "
+        "requests a specific skill — the agent inspects the actual image "
+        "and auto-selects a skill if one is relevant."
     ]
 
     # Discover which agents support skills from their analyze() signature.
@@ -860,12 +860,29 @@ class AnalysisOrchestratorTools:
                                 ]
                             
                     elif data.ndim == 3:
-                        result["data_type"] = "hyperspectral"
-                        result["suggested_agents"] = [2]  # Hyperspectral
-                        result["primary_suggestion"] = 2
-                        result["spatial_shape"] = list(data.shape[:2])
-                        result["spectral_channels"] = data.shape[2]
-                        result["note"] = f"3D datacube: {data.shape[0]}x{data.shape[1]} spatial, {data.shape[2]} channels"
+                        n_channels = data.shape[2]
+                        if n_channels in (2, 3, 4):
+                            # Few channels: multi-channel image (2-ch AFM, RGB, RGBA)
+                            result["data_type"] = "image"
+                            result["suggested_agents"] = [1]  # ImageAnalysis
+                            result["primary_suggestion"] = 1
+                            result["channels"] = n_channels
+                            result["note"] = (
+                                f"3D array ({data.shape[0]}x{data.shape[1]}, "
+                                f"{n_channels} channels, {data.dtype}) — "
+                                f"detected as multi-channel image"
+                            )
+                        else:
+                            # Many channels: spectral datacube
+                            result["data_type"] = "hyperspectral"
+                            result["suggested_agents"] = [2]  # Hyperspectral
+                            result["primary_suggestion"] = 2
+                            result["spatial_shape"] = list(data.shape[:2])
+                            result["spectral_channels"] = n_channels
+                            result["note"] = (
+                                f"3D datacube: {data.shape[0]}x{data.shape[1]} "
+                                f"spatial, {n_channels} channels"
+                            )
                     
                     else:
                         result["data_type"] = "nd_data"

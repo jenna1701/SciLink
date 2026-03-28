@@ -52,6 +52,7 @@ def load_image_file(image_path: str) -> np.ndarray:
             img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
             if img is None:
                 raise ValueError(f"Could not load image: {image_path}")
+            # Convert BGR→RGB; 2-channel images need no conversion
             if img.ndim == 3 and img.shape[2] == 3:
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             elif img.ndim == 3 and img.shape[2] == 4:

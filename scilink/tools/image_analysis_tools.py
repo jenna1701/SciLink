@@ -33,11 +33,12 @@ def load_image_data(image_path: str) -> np.ndarray:
     if img is None:
         raise ValueError(f"Could not load image from {image_path}")
 
-    # Convert BGR→RGB for color images, leave grayscale as-is
+    # Convert BGR→RGB for color images; leave grayscale and 2-channel as-is
     if img.ndim == 3 and img.shape[2] == 3:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     elif img.ndim == 3 and img.shape[2] == 4:
         img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
+    # 2-channel images (e.g., AFM amplitude+phase) need no conversion
 
     return img
 
@@ -51,6 +52,30 @@ def image_to_thumbnail_bytes(
     Handles grayscale, RGB, and float arrays (auto-normalized to 0-255).
     """
     arr = image.copy()
+
+    # For multi-channel images that aren't standard RGB/RGBA (e.g., 2-channel),
+    # create a labeled subplot figure so the LLM sees each channel with its index.
+    if arr.ndim == 3 and arr.shape[2] not in (3, 4):
+        n_ch = arr.shape[2]
+        fig, axes = plt.subplots(1, n_ch, figsize=(3.5 * n_ch, 3.5))
+        if n_ch == 1:
+            axes = [axes]
+        for c in range(n_ch):
+            ch = arr[:, :, c].astype(np.float64)
+            mn, mx = np.nanmin(ch), np.nanmax(ch)
+            if mx - mn > 1e-6:
+                ch = (ch - mn) / (mx - mn)
+            else:
+                ch = np.zeros_like(ch)
+            axes[c].imshow(np.nan_to_num(ch, nan=0), cmap="gray", aspect="equal")
+            axes[c].set_title(f"Channel {c}", fontsize=10)
+            axes[c].axis("off")
+        plt.tight_layout()
+        buf = BytesIO()
+        plt.savefig(buf, format="jpeg", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        return buf.getvalue()
 
     # Normalize float arrays to uint8
     if arr.dtype != np.uint8:
@@ -120,6 +145,8 @@ def create_image_montage(
                 arr = np.zeros_like(arr)
             arr = np.nan_to_num(arr, nan=0)
 
+        if arr.ndim == 3 and arr.shape[2] not in (3, 4):
+            arr = arr[:, :, 0]  # show first channel for non-RGB multi-channel
         cmap = "gray" if arr.ndim == 2 else None
         axes[i].imshow(arr, cmap=cmap, aspect="equal")
         axes[i].set_title(label, fontsize=10)

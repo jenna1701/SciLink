@@ -55,6 +55,8 @@ boundaries follow real inter-object edges.
 
 ### foundational
 **SAM implementation (preferred):**
+Pass a 2D grayscale array (single channel). For multi-channel images, pass
+the most informative channel (e.g., `image[:,:,0]`). Do not convert to RGB.
 ```
 from scilink.tools.sam import run_sam_analysis
 result = run_sam_analysis(image_array, params={

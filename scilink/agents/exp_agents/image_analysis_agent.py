@@ -313,12 +313,13 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     f"2D array provided, converted to shape {image_stack.shape}"
                 )
             elif image_stack.ndim == 3:
-                # 3D: could be single RGB (H, W, 3) or grayscale stack (N, H, W)
-                if image_stack.shape[2] in (3, 4):
-                    # Single RGB/RGBA image
+                # 3D: could be single multi-channel (H, W, C) or grayscale stack (N, H, W)
+                if image_stack.shape[2] in (2, 3, 4):
+                    # Single multi-channel image (2-ch, RGB, or RGBA)
                     image_stack = image_stack[np.newaxis, :, :, :]
                     self.logger.info(
-                        f"3D RGB array provided, converted to shape {image_stack.shape}"
+                        f"3D {image_stack.shape[3]}-channel array provided, "
+                        f"converted to shape {image_stack.shape}"
                     )
                 # else: grayscale stack (N, H, W) — already correct
             elif image_stack.ndim == 4:
