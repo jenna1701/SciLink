@@ -511,102 +511,51 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # ================================================================
         tier2_results = None
 
+        # Common args for _run_tier2 (avoids repeating in both branches)
+        _tier2_ctx = dict(
+            tier1_state=state, tier1_results=tier1_results,
+            first_image=first_image,
+            original_image_bytes=original_image_bytes,
+            image_statistics=image_statistics,
+            handled_system_info=handled_system_info,
+            series_metadata=series_metadata, hints=hints,
+            objective=objective, skill_state=skill_state,
+            aux_state=aux_state, image_paths=image_paths,
+            image_stack=image_stack, input_type=input_type,
+            num_images=num_images, is_single_image=is_single_image,
+            first_image_name=first_image_name,
+            effective_max_retries=effective_max_retries,
+            effective_outlier_sigma=effective_outlier_sigma,
+        )
+
         if self.analysis_depth == "auto" and tier1_results["status"] == "success":
-            # Evaluate whether Tier 2 is recommended — return suggestion
-            # to the caller (orchestrator) without running Tier 2
             tier2_decision = self._evaluate_tier2_needed(
                 tier1_results, objective
             )
             if tier2_decision and tier2_decision.get("tier2_needed"):
-                tier1_results["tier2_suggested"] = True
-                tier1_results["tier2_suggested_focus"] = tier2_decision.get(
-                    "suggested_focus", "deeper analysis"
-                )
-                self.logger.info(
-                    f"\n🔬 Tier 2 recommended: "
-                    f"{tier1_results['tier2_suggested_focus']}"
-                )
+                run_tier2 = True
+                if self.enable_human_feedback:
+                    run_tier2, user_guidance = self._prompt_tier2_approval(
+                        tier1_results, tier2_decision
+                    )
+                    if user_guidance:
+                        state["tier2_user_guidance"] = user_guidance
+
+                if run_tier2:
+                    self.logger.info("\n🔬 TIER 2: Running (auto, approved)")
+                    tier2_results = self._run_tier2(
+                        **_tier2_ctx, tier2_decision=tier2_decision,
+                    )
+                else:
+                    self.logger.info("\n📊 Tier 2: skipped by user")
             else:
-                tier1_results["tier2_suggested"] = False
                 self.logger.info(
                     "\n📊 Tier 2: not warranted by Tier 1 findings"
                 )
 
         elif self.analysis_depth == "deep" and tier1_results["status"] == "success":
-            # Run both tiers internally (autonomous/batch mode)
             self.logger.info("\n🔬 TIER 2: Running (analysis_depth='deep')")
-
-            # Preserve Tier 1 outputs
-            import shutil
-            tier1_dir = self.output_dir / "tier1"
-            tier1_dir.mkdir(exist_ok=True)
-            for item in self.output_dir.iterdir():
-                if item.name in ("tier1", "tier2") or item.name.startswith("."):
-                    continue
-                dst = tier1_dir / item.name
-                if item.is_dir():
-                    if dst.exists():
-                        shutil.rmtree(dst)
-                    shutil.copytree(item, dst)
-                elif item.is_file():
-                    shutil.copy2(item, dst)
-            self.logger.info(f"   📂 Tier 1 outputs preserved in {tier1_dir}")
-
-            # Build Tier 2 state and run
-            tier2_state = self._build_tier2_state(
-                state, tier1_results,
-                first_image, original_image_bytes, image_statistics,
-                handled_system_info, series_metadata, hints, objective,
-                skill_state, aux_state,
-                image_paths, image_stack, input_type,
-                num_images, is_single_image, first_image_name,
-            )
-
-            tier2_pipeline = create_unified_image_analysis_pipeline(
-                model=self.model,
-                logger=self.logger,
-                generation_config=self.generation_config,
-                safety_settings=self.safety_settings,
-                parse_fn=self._parse_llm_response,
-                store_fn=self._store_analysis_images,
-                image_to_bytes_fn=image_to_thumbnail_bytes,
-                montage_fn=create_image_montage,
-                executor=self.executor,
-                output_dir=str(self.output_dir),
-                literature_agent=self.literature_agent,
-                enable_human_feedback=self.enable_human_feedback,
-                max_approach_retries=effective_max_retries,
-                outlier_sigma=effective_outlier_sigma,
-                max_verification_iterations=self.max_verification_iterations,
-                num_plan_candidates=self.num_plan_candidates,
-            )
-
-            for i, controller in enumerate(tier2_pipeline, 1):
-                step_name = controller.__class__.__name__
-                self.logger.info(
-                    f"\n📍 TIER 2 STEP {i}: {step_name}\n"
-                )
-                try:
-                    tier2_state = controller.execute(tier2_state)
-                    if tier2_state.get("error_dict"):
-                        self.logger.error(
-                            f"❌ Tier 2 failed at {step_name}: "
-                            f"{tier2_state['error_dict']}"
-                        )
-                        break
-                except Exception as e:
-                    self.logger.error(
-                        f"❌ Tier 2 step {step_name} raised exception: {e}"
-                    )
-                    tier2_state["error_dict"] = {
-                        "error": f"Tier 2 step failed: {step_name}",
-                        "details": str(e),
-                    }
-                    break
-
-            if not tier2_state.get("error_dict"):
-                tier2_results = self._compile_results(tier2_state)
-                self._save_analysis_scripts(tier2_state)
+            tier2_results = self._run_tier2(**_tier2_ctx)
 
         # Merge results
         if tier2_results and tier2_results["status"] == "success":
@@ -787,6 +736,146 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             self.logger.warning(f"Tier 2 decision error: {e}")
             return None
 
+    def _prompt_tier2_approval(
+        self, tier1_results: dict, tier2_decision: dict
+    ) -> tuple:
+        """Prompt the user for Tier 2 approval.
+
+        Returns:
+            (run_tier2, user_guidance) — *run_tier2* is True to proceed,
+            *user_guidance* is a string if the user provided guidance, else None.
+        """
+        focus = tier2_decision.get("suggested_focus", "deeper analysis")
+        reasoning = tier2_decision.get("reasoning", "")
+
+        print("\n" + "=" * 60)
+        print("TIER 2 ANALYSIS RECOMMENDATION")
+        print("=" * 60)
+
+        summary = tier1_results.get("detailed_analysis", "")
+        if summary:
+            lines = summary.strip().split("\n")[:10]
+            print(f"\nTier 1 Summary:\n   " + "\n   ".join(lines))
+
+        claims = tier1_results.get("scientific_claims", [])
+        if claims:
+            print(f"\nKey Claims:")
+            for c in claims[:5]:
+                print(f"   - {c.get('claim', '')}")
+
+        viz_paths = tier1_results.get("visualization_paths", [])
+        if viz_paths:
+            print(f"\nVisualizations:")
+            for p in viz_paths[:3]:
+                print(f"   {p}")
+
+        print(f"\nRecommendation: {focus}")
+        if reasoning:
+            print(f"   Reasoning: {reasoning}")
+
+        print("=" * 60)
+
+        try:
+            response = input(
+                "Proceed with deeper analysis? "
+                "(yes / skip / or provide guidance): "
+            ).strip()
+        except EOFError:
+            return True, None
+
+        if not response or response.lower() in ("yes", "y", "proceed"):
+            return True, None
+        if response.lower() in ("skip", "no", "n"):
+            return False, None
+        # Anything else is treated as guidance
+        return True, response
+
+    def _run_tier2(
+        self,
+        tier1_state, tier1_results,
+        first_image, original_image_bytes, image_statistics,
+        handled_system_info, series_metadata, hints, objective,
+        skill_state, aux_state,
+        image_paths, image_stack, input_type,
+        num_images, is_single_image, first_image_name,
+        effective_max_retries, effective_outlier_sigma,
+        tier2_decision=None,
+    ) -> Optional[dict]:
+        """Run Tier 2 pipeline and return compiled results, or None on failure."""
+        import shutil
+
+        # Preserve Tier 1 outputs
+        tier1_dir = self.output_dir / "tier1"
+        tier1_dir.mkdir(exist_ok=True)
+        for item in self.output_dir.iterdir():
+            if item.name in ("tier1", "tier2") or item.name.startswith("."):
+                continue
+            dst = tier1_dir / item.name
+            if item.is_dir():
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(item, dst)
+            elif item.is_file():
+                shutil.copy2(item, dst)
+        self.logger.info(f"   Tier 1 outputs preserved in {tier1_dir}")
+
+        tier2_state = self._build_tier2_state(
+            tier1_state, tier1_results,
+            first_image, original_image_bytes, image_statistics,
+            handled_system_info, series_metadata, hints, objective,
+            skill_state, aux_state,
+            image_paths, image_stack, input_type,
+            num_images, is_single_image, first_image_name,
+            tier2_decision=tier2_decision,
+        )
+
+        tier2_pipeline = create_unified_image_analysis_pipeline(
+            model=self.model,
+            logger=self.logger,
+            generation_config=self.generation_config,
+            safety_settings=self.safety_settings,
+            parse_fn=self._parse_llm_response,
+            store_fn=self._store_analysis_images,
+            image_to_bytes_fn=image_to_thumbnail_bytes,
+            montage_fn=create_image_montage,
+            executor=self.executor,
+            output_dir=str(self.output_dir),
+            literature_agent=self.literature_agent,
+            enable_human_feedback=self.enable_human_feedback,
+            max_approach_retries=effective_max_retries,
+            outlier_sigma=effective_outlier_sigma,
+            max_verification_iterations=self.max_verification_iterations,
+            num_plan_candidates=self.num_plan_candidates,
+        )
+
+        for i, controller in enumerate(tier2_pipeline, 1):
+            step_name = controller.__class__.__name__
+            self.logger.info(f"\n   TIER 2 STEP {i}: {step_name}\n")
+            try:
+                tier2_state = controller.execute(tier2_state)
+                if tier2_state.get("error_dict"):
+                    self.logger.error(
+                        f"Tier 2 failed at {step_name}: "
+                        f"{tier2_state['error_dict']}"
+                    )
+                    break
+            except Exception as e:
+                self.logger.error(
+                    f"Tier 2 step {step_name} raised exception: {e}"
+                )
+                tier2_state["error_dict"] = {
+                    "error": f"Tier 2 step failed: {step_name}",
+                    "details": str(e),
+                }
+                break
+
+        if not tier2_state.get("error_dict"):
+            tier2_results = self._compile_results(tier2_state)
+            self._save_analysis_scripts(tier2_state)
+            return tier2_results
+
+        return None
+
     def _build_tier2_state(
         self, tier1_state, tier1_results,
         first_image, original_image_bytes, image_statistics,
@@ -817,7 +906,24 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             f"- {c.get('claim', '')}" for c in claims[:5]
         ) or "No claims."
 
-        files_str = "\n".join(f"- {f}" for f in tier1_files[:20])
+        # Build file listing with array descriptions where available
+        saved_arrays = tier1_state.get("analysis_result", {}).get(
+            "saved_arrays", {}
+        )
+        file_lines = []
+        for f in tier1_files[:20]:
+            fname = Path(f).name
+            meta = saved_arrays.get(fname)
+            if meta:
+                desc = meta.get("description", "")
+                shape = meta.get("shape", "")
+                dtype = meta.get("dtype", "")
+                file_lines.append(
+                    f"- `{f}` — {desc} (shape={shape}, dtype={dtype})"
+                )
+            else:
+                file_lines.append(f"- {f}")
+        files_str = "\n".join(file_lines)
 
         # Build Tier 2 planning instructions
         tier2_instructions = IMAGE_ANALYSIS_TIER2_PLANNING_INSTRUCTIONS.format(
@@ -940,6 +1046,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
             if series_results and series_results[0].get("quality_warning"):
                 results["quality_warning"] = series_results[0]["quality_warning"]
+            if series_results and series_results[0].get("quality_history"):
+                results["quality_history"] = series_results[0]["quality_history"]
 
         else:
             # Series: full structure with trends and flagged images
@@ -978,6 +1086,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "flagged": r.get("flagged", False),
                     "flag_reason": r.get("flag_reason"),
                     "adaptively_refitted": r.get("adaptively_refitted", False),
+                    "verification_score": (
+                        r.get("quality_history", {}).get("final_score")
+                        if r.get("quality_history") else None
+                    ),
                 }
                 for r in series_results
             ]
@@ -995,6 +1107,29 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             results["locked_analysis_config"] = state.get(
                 "locked_analysis_config"
             )
+
+            # Aggregate verification summary
+            vh_entries = [
+                r.get("quality_history") for r in series_results
+                if r.get("quality_history")
+            ]
+            if vh_entries:
+                scores = [
+                    v["final_score"] for v in vh_entries
+                    if v.get("final_score") is not None
+                ]
+                results["verification_summary"] = {
+                    "verified_count": len(vh_entries),
+                    "approved_count": sum(
+                        1 for v in vh_entries if v.get("approved")
+                    ),
+                    "score_range": (
+                        [min(scores), max(scores)] if scores else None
+                    ),
+                    "mean_score": (
+                        sum(scores) / len(scores) if scores else None
+                    ),
+                }
 
         return results
 
