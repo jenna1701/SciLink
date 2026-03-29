@@ -2019,16 +2019,11 @@ class AnalysisOrchestratorTools:
                     }
                     if viz_path:
                         response["visualization_path"] = viz_path
-                    if result.get("tier2_suggested"):
-                        response["tier2_suggested"] = True
-                        response["tier2_suggested_focus"] = result.get(
-                            "tier2_suggested_focus", "deeper analysis"
-                        )
-                        response["next_steps"] = (
-                            f"Deeper analysis recommended: {result.get('tier2_suggested_focus', '')}. "
-                            "Ask the user whether to proceed with Tier 2 analysis, skip it, or provide guidance. "
-                            "To run Tier 2, call run_analysis again on the same data with the Tier 1 findings "
-                            "as prior_knowledge and the output directory path in hints."
+                    if result.get("tier2_results"):
+                        response["tier2_ran"] = True
+                        t2 = result["tier2_results"]
+                        response["tier2_focus"] = t2.get(
+                            "analysis_approach", "deeper analysis"
                         )
                     return json.dumps(response)
                 else:

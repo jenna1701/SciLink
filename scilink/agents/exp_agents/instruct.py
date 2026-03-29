@@ -2673,9 +2673,14 @@ interesting aspects of the data.
 **Available Tier 1 outputs in working directory:**
 {tier1_files}
 
-Your follow-up analysis can load and build on these outputs. Focus on
-the single most scientifically valuable analysis that the Tier 1
-results suggest — do not try to do everything.
+**CRITICAL: Re-use Tier 1 results.** Do NOT re-segment, re-detect, or
+re-measure features that Tier 1 already computed. Load the Tier 1
+output files listed above (masks, label maps, feature tables) and
+build on them. Tier 2 should perform *additional* analysis that Tier 1
+did not do — not repeat what it already did.
+
+Focus on the single most scientifically valuable follow-up analysis
+that the Tier 1 results suggest — do not try to do everything.
 
 **Output Format:**
 ```json
