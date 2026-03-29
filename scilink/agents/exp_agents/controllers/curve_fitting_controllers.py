@@ -1265,12 +1265,11 @@ Your guidance: '''
             context_parts.append(state["literature_context"])
         skill_sections = state.get("skill_sections")
         if skill_sections and skill_sections.get("analysis"):
-            context_parts.append(
-                f"## MANDATORY Domain Skill Rules ({state.get('skill_name', 'skill')})\n"
-                "The following domain rules are MANDATORY and must be implemented exactly "
-                "as specified. They take precedence over general-purpose fitting defaults.\n\n"
-                + skill_sections["analysis"]
-            )
+            level = state.get("_annealing_level", 0)
+            preamble = self._SKILL_STRICTNESS_SCHEDULE[
+                min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
+            ].format(name=state.get("skill_name", "skill"))
+            context_parts.append(preamble + skill_sections["analysis"])
 
         prompt = self.script_instructions.format(
             analysis_approach=config.get("analysis_approach", "Fit the data"),
@@ -1305,12 +1304,11 @@ Your guidance: '''
         )
         skill_sections = state.get("skill_sections")
         if skill_sections and skill_sections.get("analysis"):
-            prompt += (
-                f"\n\n## MANDATORY Domain Skill Rules ({state.get('skill_name', 'skill')})\n"
-                "While fixing the error, you MUST continue to follow these domain rules. "
-                "Do not change the fitting model or workflow to deviate from these rules.\n\n"
-                + skill_sections["analysis"]
-            )
+            level = state.get("_annealing_level", 0)
+            preamble = self._SKILL_STRICTNESS_SCHEDULE[
+                min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
+            ].format(name=state.get("skill_name", "skill"))
+            prompt += "\n\n" + preamble + skill_sections["analysis"]
 
         response = self.model.generate_content(prompt)
         result, error = self._parse(response)
@@ -1773,6 +1771,23 @@ Remember: Rejecting a good fit (R² > 0.98) to chase marginal improvements often
         "original plan based on what you observe in the data and residuals.\n",
     )
 
+    # Same annealing applied to domain skill strictness during fitting.
+    # Planning and interpretation stages always keep skills mandatory.
+    _SKILL_STRICTNESS_SCHEDULE = (
+        # T=0: mandatory
+        "## MANDATORY Domain Skill Rules ({name})\n"
+        "These rules encode validated domain expertise and take precedence "
+        "over defaults.\n\n",
+        # T=1: preferred
+        "## Domain Skill Guidance ({name})\n"
+        "Follow these rules unless the data clearly requires a different "
+        "approach. If you deviate, explain why.\n\n",
+        # T=2: reference
+        "## Domain Skill Reference ({name})\n"
+        "Use as context. Override any rule if the data warrants it — "
+        "explain the deviation.\n\n",
+    )
+
     def _verify_fit_with_llm(self, state: dict, fit_result: dict, history: List[dict] = None, verification_iter: int = 0) -> Optional[dict]:
         """
         Use LLM to verify fit quality by examining the visualization.
@@ -2096,7 +2111,8 @@ Return JSON with:
         # Anchor = first spectrum overall OR first in a regime; gets full QC
         _is_anchor = spectrum_idx == 0 or is_regime_anchor
 
-        # --- Initial fit ---
+        # --- Initial fit (skills mandatory at T=0) ---
+        state["_annealing_level"] = 0
         initial_model = state.get('locked_fitting_config', {}).get('physical_model', 'Initial model')
         self.logger.info(f"   Attempt 1: {initial_model[:80]}...")
 
@@ -2169,7 +2185,14 @@ Return JSON with:
                                 pass
                         
                         state["locked_fitting_config"] = refined_config
-                        
+
+                        # Sync skill strictness with annealing temperature
+                        n_levels = len(self._SKILL_STRICTNESS_SCHEDULE)
+                        max_iter = max(self.max_verification_iterations, 1)
+                        state["_annealing_level"] = min(
+                            verification_iter * n_levels // max_iter, n_levels - 1
+                        )
+
                         # Refit with refined config
                         self.logger.info(f"   Refitting with verification feedback...")
                         verified_result = self._fit_single_spectrum(
@@ -3937,7 +3960,13 @@ Return JSON with:
         
         if quality_warning:
             prompt_parts.append(f"\n## Quality Warning\n{quality_warning}\nNote: Alternative models were attempted but this was the best fit achieved.")
-        
+
+        if series_results and series_results[0].get("quality_history"):
+            prompt_parts.append(
+                "\n## Quality History (verification & retry context)\n"
+                + json.dumps(series_results[0]["quality_history"], indent=2)
+            )
+
         if state.get("literature_context"):
             prompt_parts.extend(["\n## Literature", state["literature_context"]])
 
@@ -3986,6 +4015,8 @@ Return JSON with:
                 summary["original_r2"] = r.get("original_r2")
                 summary["refit_model"] = r.get("refit_model_type")
                 summary["locked_model"] = r.get("locked_model_type")
+            if r.get("quality_history"):
+                summary["quality_history"] = r["quality_history"]
             fit_summaries.append(summary)
 
         flagged_summary = json.dumps(flagged_spectra, indent=2) if flagged_spectra else "No spectra were flagged."
