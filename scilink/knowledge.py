@@ -114,6 +114,56 @@ def synthesize_knowledge(
         if status:
             analysis_texts.append(f"### Status ({label}): {status}")
 
+        # Collect quality history for failure/method synthesis.
+        # For tiered results, also check tier2_results.
+        qh_entries = []
+        t2 = result.get("tier2_results") or {}
+        if result.get("quality_history"):
+            tier_label = "Tier 1" if t2 else ""
+            qh_entries.append((tier_label, result["quality_history"]))
+        if isinstance(t2, dict) and t2.get("quality_history"):
+            qh_entries.append(("Tier 2", t2["quality_history"]))
+
+        for qh_label, qh in qh_entries:
+            if not (qh and synthesis_type in ("failure", "method")):
+                continue
+            section_label = f" — {qh_label}" if qh_label else ""
+            qh_lines = [f"### Quality History ({label}{section_label})"]
+
+            for se in qh.get("script_errors", []):
+                qh_lines.append(f"- Script error: {se.get('error', '')}")
+                if se.get("fix"):
+                    qh_lines.append(f"  Fix: {se['fix']}")
+
+            iterations = qh.get("verification_iterations", [])
+            for j, it in enumerate(iterations):
+                issues = [x.get("problem", "") for x in it.get("issues", [])]
+                qh_lines.append(
+                    f"- Verification {j + 1} (score={it.get('score', 0):.2f})"
+                    f": issues={issues}"
+                )
+                fix = it.get("fix_applied")
+                if fix:
+                    qh_lines.append(f"  Fix applied: {fix}")
+                    if j + 1 < len(iterations):
+                        next_score = iterations[j + 1].get("score", 0)
+                        improved = next_score > it.get("score", 0)
+                        qh_lines.append(
+                            f"  Outcome: score "
+                            f"{'improved' if improved else 'worsened'}"
+                            f" to {next_score:.2f}"
+                        )
+
+            for alt in qh.get("alternative_approaches", []):
+                qh_lines.append(
+                    f"- Alternative pipeline "
+                    f"(score={alt.get('score', 0):.2f}): "
+                    f"{alt.get('diagnosis', '')}"
+                )
+
+            if len(qh_lines) > 1:
+                analysis_texts.append("\n".join(qh_lines))
+
         # Collect human feedback
         hf = result.get("human_feedback", {})
         if isinstance(hf, dict):

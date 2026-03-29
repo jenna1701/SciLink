@@ -1046,6 +1046,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
             if series_results and series_results[0].get("quality_warning"):
                 results["quality_warning"] = series_results[0]["quality_warning"]
+            if series_results and series_results[0].get("quality_history"):
+                results["quality_history"] = series_results[0]["quality_history"]
 
         else:
             # Series: full structure with trends and flagged images
@@ -1084,6 +1086,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "flagged": r.get("flagged", False),
                     "flag_reason": r.get("flag_reason"),
                     "adaptively_refitted": r.get("adaptively_refitted", False),
+                    "verification_score": (
+                        r.get("quality_history", {}).get("final_score")
+                        if r.get("quality_history") else None
+                    ),
                 }
                 for r in series_results
             ]
@@ -1101,6 +1107,29 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             results["locked_analysis_config"] = state.get(
                 "locked_analysis_config"
             )
+
+            # Aggregate verification summary
+            vh_entries = [
+                r.get("quality_history") for r in series_results
+                if r.get("quality_history")
+            ]
+            if vh_entries:
+                scores = [
+                    v["final_score"] for v in vh_entries
+                    if v.get("final_score") is not None
+                ]
+                results["verification_summary"] = {
+                    "verified_count": len(vh_entries),
+                    "approved_count": sum(
+                        1 for v in vh_entries if v.get("approved")
+                    ),
+                    "score_range": (
+                        [min(scores), max(scores)] if scores else None
+                    ),
+                    "mean_score": (
+                        sum(scores) / len(scores) if scores else None
+                    ),
+                }
 
         return results
 

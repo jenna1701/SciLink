@@ -1498,8 +1498,15 @@ Your guidance: '''
 
         return result["script"]
 
-    def _correct_script(self, state: dict, script: str, error_msg: str) -> str:
-        """Generate a corrected script after an execution failure."""
+    def _correct_script(
+        self, state: dict, script: str, error_msg: str
+    ) -> tuple:
+        """Generate a corrected script after an execution failure.
+
+        Returns:
+            (corrected_script, diagnosis) — *diagnosis* is the LLM's
+            explanation of what went wrong and how it was fixed, or None.
+        """
         config = state.get("locked_analysis_config", {})
         prompt = self.correction_instructions.format(
             analysis_approach=config.get("analysis_approach", ""),
@@ -1522,10 +1529,11 @@ Your guidance: '''
         if error or not result or "script" not in result:
             raise ValueError(f"Correction failed: {error or 'no script'}")
 
-        if "diagnosis" in result:
-            self.logger.info(f"    Diagnosis: {result['diagnosis']}")
+        diagnosis = result.get("diagnosis")
+        if diagnosis:
+            self.logger.info(f"    Diagnosis: {diagnosis}")
 
-        return result["script"]
+        return result["script"], diagnosis
 
     def _check_conformance(self, state: dict, script: str) -> dict | None:
         """Use the LLM to verify a generated script implements the locked plan.
@@ -1646,6 +1654,8 @@ Your guidance: '''
         script = None
         last_error = ""
         exec_result = None
+        script_errors = []
+        last_diagnosis = None
 
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
             try:
@@ -1680,7 +1690,9 @@ Your guidance: '''
                             "; ".join(conformance["justified_deviations"]),
                         )
                 else:
-                    script = self._correct_script(state, script, last_error)
+                    script, last_diagnosis = self._correct_script(
+                        state, script, last_error
+                    )
 
                 # Sanitize the script
                 script = self._sanitize_script(script)
@@ -1718,6 +1730,12 @@ Your guidance: '''
                             f"    Attempt {attempt}: Script ran but missing outputs: "
                             f"{', '.join(missing)}"
                         )
+                        script_errors.append({
+                            "attempt": attempt,
+                            "error": last_error[:300],
+                            "fix": (last_diagnosis or "")[:300] or None,
+                        })
+                        last_diagnosis = None
                         if attempt >= self.MAX_ATTEMPTS:
                             exec_result["status"] = "failed"
                             exec_result["message"] = last_error
@@ -1726,9 +1744,20 @@ Your guidance: '''
                     self.logger.warning(
                         f"    Attempt {attempt} failed: {last_error[:100]}"
                     )
+                    script_errors.append({
+                        "attempt": attempt,
+                        "error": last_error[:300],
+                        "fix": (last_diagnosis or "")[:300] or None,
+                    })
+                    last_diagnosis = None
             except Exception as e:
                 last_error = str(e)
                 self.logger.error(f"    Attempt {attempt} error: {e}")
+                script_errors.append({
+                    "attempt": attempt,
+                    "error": last_error[:300],
+                    "fix": None,
+                })
 
         # Clean up temp data file
         if temp_data_path.exists():
@@ -1746,6 +1775,7 @@ Your guidance: '''
                 "extracted_features": {},
                 "quality_metrics": {},
                 "script": script,
+                "script_errors": script_errors,
             }
 
         # Parse results from stdout
@@ -1789,6 +1819,7 @@ Your guidance: '''
             "visualization_bytes": viz_bytes,
             "statistics": stats,
             "script": script,
+            "script_errors": script_errors,
         }
 
     def _suggest_alternative_approach(
@@ -2315,6 +2346,8 @@ Return JSON with:
         4. If human feedback enabled: allow user to guide refinement
         """
         all_attempts = []
+        verification_history = []
+        judge_result = None
         best_result = None
         best_score = -1.0
         quality_threshold = self.quality_threshold
@@ -2357,7 +2390,6 @@ Return JSON with:
                     )
                 else:
                     verification_attempts = []
-                    verification_history = []
                     analysis_was_approved = False
                     current_result = best_result  # track latest for verification
 
@@ -2546,6 +2578,11 @@ Return JSON with:
                             image_idx, all_attempts,
                         )
 
+                best_result["quality_history"] = self._build_quality_history(
+                    best_score, quality_threshold, all_attempts,
+                    verification_history, judge_result,
+                    best_result.get("script_errors"),
+                )
                 return best_result
             else:
                 self.logger.warning(
@@ -2893,6 +2930,11 @@ Return JSON with:
             if _is_anchor and best_result.get("_winning_config"):
                 state["locked_analysis_config"] = best_result["_winning_config"]
 
+            best_result["quality_history"] = self._build_quality_history(
+                best_score, quality_threshold, all_attempts,
+                verification_history, judge_result,
+                best_result.get("script_errors"),
+            )
             return best_result
         else:
             return {
@@ -2949,6 +2991,52 @@ Return JSON with:
                 self.logger.info(f"      {line}")
 
         self.logger.info("")
+
+    @staticmethod
+    def _build_quality_history(
+        best_score: float,
+        quality_threshold: float,
+        all_attempts: list,
+        verification_history: list,
+        judge_result: dict | None,
+        script_errors: list | None = None,
+    ) -> dict:
+        """Build a compact quality history dict for the best result.
+
+        Captures problem→solution pairs at every level: script errors,
+        verification iterations, alternative approaches, and judge reasoning.
+        """
+        return {
+            "final_score": best_score,
+            "threshold": quality_threshold,
+            "approved": best_score >= quality_threshold,
+            "verification_iterations": [
+                {
+                    "score": entry["quality_score"],
+                    "issues": [
+                        {
+                            "location": iss.get("location", ""),
+                            "problem": iss.get("problem", ""),
+                        }
+                        for iss in entry.get("issues_found", [])
+                    ],
+                    "fix_applied": entry.get("recommended_action", ""),
+                }
+                for entry in verification_history
+            ],
+            "alternative_approaches": [
+                {
+                    "pipeline": a["pipeline"],
+                    "score": a["score"],
+                    "diagnosis": a.get("diagnosis", ""),
+                }
+                for a in all_attempts[1:]
+            ],
+            "script_errors": script_errors or [],
+            "judge_reasoning": (
+                (judge_result or {}).get("reasoning")
+            ),
+        }
 
     def _apply_user_feedback(
         self,
@@ -3470,6 +3558,7 @@ Return JSON with:
                 "quality_metrics": first_result.get("quality_metrics", {}),
                 "summary": first_result.get("summary"),
                 "saved_arrays": first_result.get("saved_arrays", {}),
+                "quality_history": first_result.get("quality_history"),
             }
             state["final_script"] = first_result.get("script")
             state["final_viz_bytes"] = first_result.get("visualization_bytes")
@@ -4729,6 +4818,44 @@ Return JSON with:
                 "the best result achieved."
             )
 
+        qh = analysis_result.get("quality_history")
+        if qh:
+            qh_lines = ["## Analysis Quality Context"]
+            approved = qh.get("approved", True)
+            qh_lines.append(
+                f"- Final score: {qh.get('final_score', 'N/A')} "
+                f"({'approved' if approved else 'best available, below threshold'})"
+            )
+            iters = qh.get("verification_iterations", [])
+            alts = qh.get("alternative_approaches", [])
+            if len(iters) > 1 or alts:
+                qh_lines.append(
+                    f"- Verification iterations: {len(iters)}, "
+                    f"alternative pipelines tried: {len(alts)}"
+                )
+            # Remaining issues from last verification (known limitations)
+            if iters:
+                last_issues = iters[-1].get("issues", [])
+                if last_issues:
+                    qh_lines.append("- Known limitations in this result:")
+                    for iss in last_issues[:5]:
+                        qh_lines.append(
+                            f"  - {iss.get('location', '')}: "
+                            f"{iss.get('problem', '')}"
+                        )
+            # Script errors
+            se = qh.get("script_errors", [])
+            if se:
+                qh_lines.append(
+                    f"- {len(se)} script correction(s) needed: "
+                    + "; ".join(e["error"][:80] for e in se[:3])
+                )
+            qh_lines.append(
+                "\nNote these known limitations where relevant "
+                "in your interpretation."
+            )
+            prompt_parts.append("\n".join(qh_lines))
+
         if state.get("literature_context"):
             prompt_parts.extend([
                 "\n## Literature", state["literature_context"]
@@ -4781,6 +4908,10 @@ Return JSON with:
                 "key_features": r.get("extracted_features", {}),
                 "quality_metrics": r.get("quality_metrics", {}),
             }
+            vh = r.get("quality_history")
+            if vh:
+                summary["quality_score"] = vh.get("final_score")
+                summary["quality_approved"] = vh.get("approved")
             if r.get("flagged"):
                 summary["flagged"] = True
                 summary["flag_reason"] = r.get("flag_reason")
@@ -4843,6 +4974,32 @@ Return JSON with:
         )
 
         prompt_parts = [prompt]
+
+        # Aggregate quality verification summary
+        verified = [
+            r for r in successful_analyses
+            if r.get("quality_history")
+        ]
+        if verified:
+            scores = [
+                r["quality_history"]["final_score"]
+                for r in verified
+                if r["quality_history"].get("final_score") is not None
+            ]
+            approved_n = sum(
+                1 for r in verified if r["quality_history"].get("approved")
+            )
+            qv_lines = [
+                "\n**QUALITY VERIFICATION SUMMARY:**",
+                f"- Verified images: {len(verified)}/{len(successful_analyses)}",
+                f"- Approved: {approved_n}/{len(verified)}",
+            ]
+            if scores:
+                qv_lines.append(
+                    f"- Score range: {min(scores):.2f} - {max(scores):.2f} "
+                    f"(mean: {sum(scores)/len(scores):.2f})"
+                )
+            prompt_parts.append("\n".join(qv_lines))
 
         if flagged_images:
             prompt_parts.append("\n\n**FLAGGED IMAGE VISUALIZATIONS:**")
