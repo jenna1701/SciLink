@@ -1319,8 +1319,53 @@ class UnifiedImageProcessingController:
     MAX_ATTEMPTS = 5
     DEFAULT_MAX_APPROACH_RETRIES = 3
     DEFAULT_OUTLIER_SIGMA = 2.0
-    DEFAULT_MAX_VERIFICATION_ITERATIONS = 3
+    DEFAULT_MAX_VERIFICATION_ITERATIONS = 5
     DEFAULT_QUALITY_THRESHOLD = 0.7
+
+    # Constraint annealing: gradually raise the "temperature" so the
+    # verifier can explore more of the pipeline space when early iterations
+    # fail to produce an adequate result.  Like simulated annealing
+    # (P ∝ exp(−ΔE/kT)), low T keeps the system near the locked plan
+    # while high T lets it explore freely.
+    #
+    # NOTE: Image analysis starts softer than curve fitting — the baseline
+    # (T=0) is "guidance", not "mandatory", because image analysis pipelines
+    # are inherently more flexible than parametric curve models.
+    _CONSTRAINT_ANNEALING_SCHEDULE = (
+        # T=0  guidance: prefer the locked pipeline, suggest parameter tweaks.
+        "\n**Plan-aware constraint:**\n"
+        "The processing pipeline listed above is the analysis plan. "
+        "Your suggested fixes should work within the planned method — recommend "
+        "parameter adjustments, preprocessing improvements, or cleanup steps. "
+        "Do not recommend replacing the core analysis method with a different one.\n",
+        # T=1  warm: allow pipeline modifications if justified.
+        "\n**Plan-aware constraint (eased — earlier fixes did not resolve the issues):**\n"
+        "Prefer the smallest change that could fix the remaining issues. "
+        "If you believe a pipeline change is necessary, suggest it, but explain "
+        "why a parameter-level fix is insufficient.\n",
+        # T=2  hot: full freedom, justify from what you see in the images.
+        "\n**Plan constraint (open — previous iterations could not fix the analysis):**\n"
+        "You have full freedom to suggest any pipeline or method change the data "
+        "warrants. The only requirement is that you justify every deviation from "
+        "the original plan based on what you observe in the images.\n",
+    )
+
+    # Same annealing applied to domain skill strictness during analysis.
+    # Planning and interpretation stages always keep skills at T=0 (guidance).
+    _SKILL_STRICTNESS_SCHEDULE = (
+        # T=0: guidance (default for image analysis — softer than curve fitting's "mandatory")
+        "## Domain Expertise Guidance ({name})\n"
+        "The following guidance is from validated domain expertise. "
+        "Use it to inform your implementation.\n\n",
+        # T=1: light reference
+        "## Domain Expertise Reference ({name})\n"
+        "Use as reference. If the data clearly requires a different approach, "
+        "deviate and explain why.\n\n",
+        # T=2: context only
+        "## Domain Expertise Context ({name})\n"
+        "Use as background context only. Override any guidance if the data "
+        "warrants it — explain the deviation.\n\n",
+    )
 
     JUDGE_PROMPT = '''You are a scientific image analysis expert acting as a judge.
 
@@ -1459,12 +1504,11 @@ Your guidance: '''
             context_parts.append(state["literature_context"])
         skill_sections = state.get("skill_sections")
         if skill_sections and skill_sections.get("analysis"):
-            context_parts.append(
-                f"## Domain Expertise ({state.get('skill_name', 'skill')})\n"
-                "The following guidance is from validated domain expertise. "
-                "Use it to inform your implementation.\n\n"
-                + skill_sections["analysis"]
-            )
+            level = state.get("_annealing_level", 0)
+            preamble = self._SKILL_STRICTNESS_SCHEDULE[
+                min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
+            ].format(name=state.get("skill_name", "skill"))
+            context_parts.append(preamble + skill_sections["analysis"])
 
         # Add sub-agent preprocessing array paths
         for key in ("fft_preprocessing", "sam_preprocessing"):
@@ -1516,12 +1560,11 @@ Your guidance: '''
         )
         skill_sections = state.get("skill_sections")
         if skill_sections and skill_sections.get("analysis"):
-            prompt += (
-                f"\n\n## Domain Expertise ({state.get('skill_name', 'skill')})\n"
-                "The following guidance is from validated domain expertise. "
-                "Use it to inform your implementation.\n\n"
-                + skill_sections["analysis"]
-            )
+            level = state.get("_annealing_level", 0)
+            preamble = self._SKILL_STRICTNESS_SCHEDULE[
+                min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
+            ].format(name=state.get("skill_name", "skill"))
+            prompt += "\n\n" + preamble + skill_sections["analysis"]
 
         response = self.model.generate_content(prompt)
         result, error = self._parse(response)
@@ -1975,12 +2018,7 @@ Estimate Completeness, Precision, and Plausibility separately, then average.
 
 ---
 
-## PLAN AWARENESS
-
-The processing pipeline listed above is the LOCKED analysis plan. \
-Your suggested fixes should work within the planned method — recommend \
-parameter adjustments, preprocessing improvements, or cleanup steps. \
-Do not recommend replacing the core analysis method with a different one.
+{plan_constraint}
 
 ---
 
@@ -2013,6 +2051,7 @@ Return JSON:
         state: dict,
         result: dict,
         history: List[dict] = None,
+        verification_iter: int = 0,
     ) -> Optional[dict]:
         """Use LLM to verify analysis quality by examining the visualization.
 
@@ -2030,6 +2069,13 @@ Return JSON:
         features_str = json.dumps(features, indent=2) if features else "No features extracted"
         metrics_str = json.dumps(metrics, indent=2) if metrics else "No metrics available"
 
+        # Constraint annealing: spread temperature levels evenly across iterations.
+        schedule = self._CONSTRAINT_ANNEALING_SCHEDULE
+        n_levels = len(schedule)
+        max_iter = max(self.max_verification_iterations, 1)
+        level = min(verification_iter * n_levels // max_iter, n_levels - 1)
+        plan_constraint = schedule[level]
+
         prompt_text = self.QUALITY_VERIFICATION_PROMPT.format(
             analysis_approach=config.get("analysis_approach", "Unknown"),
             processing_pipeline=config.get("processing_pipeline", "Unknown"),
@@ -2037,6 +2083,7 @@ Return JSON:
             features=features_str,
             metrics=metrics_str,
             quality_threshold=self.quality_threshold,
+            plan_constraint=plan_constraint,
         )
 
         # Add history context
@@ -2165,21 +2212,37 @@ Return JSON with the refined analysis approach:
         self, state: dict, best_result: dict, all_attempts: List[dict]
     ) -> Optional[dict]:
         """Ask user for guidance when automated quality is poor."""
-        pipelines_tried = "\n".join([
-            f"  - {a['pipeline']}: score = {a['score']:.2f}"
-            for a in all_attempts
-        ])
+        # Build concise summary grouped by attempt type
+        lines = []
+        initial = [a for a in all_attempts if not str(a["pipeline"]).startswith(("Verification", "Alternative", "User"))]
+        verifications = [a for a in all_attempts if str(a["pipeline"]).startswith("Verification")]
+        alternatives = [a for a in all_attempts if not str(a["pipeline"]).startswith(("Verification", "User")) and a not in initial]
+        user_guided = [a for a in all_attempts if str(a["pipeline"]).startswith("User")]
 
-        print("")
-        print("=" * 60)
-        print("ANALYSIS QUALITY BELOW THRESHOLD")
-        print("=" * 60)
+        if initial:
+            lines.append(f"  Initial pipeline: score = {initial[0]['score']:.2f}")
+        if verifications:
+            scores = [f"{v['score']:.2f}" for v in verifications]
+            lines.append(f"  Verification refinements ({len(verifications)}): scores = {', '.join(scores)}")
+        for i, a in enumerate(alternatives, 1):
+            lines.append(f"  Alternative {i}: score = {a['score']:.2f}")
+        for a in user_guided:
+            lines.append(f"  User-guided: score = {a['score']:.2f}")
+
+        pipelines_tried = "\n".join(lines)
+
+        print("\n\n")
+        print("─" * 60)
+        print()
+        print("⚠️  ANALYSIS QUALITY BELOW THRESHOLD")
+        print()
+        print("─" * 60)
 
         if best_result.get("visualization_bytes"):
             viz_path = self.output_dir / "quality_review_analysis.png"
             with open(viz_path, 'wb') as f:
                 f.write(best_result["visualization_bytes"])
-            print(f"[Best result visualization saved to: {viz_path}]")
+            print(f"\n📊 [Best result saved to: {viz_path}]")
 
         prompt = self.HUMAN_FEEDBACK_PROMPT.format(
             best_score=best_result.get("_quality_score", 0.0),
@@ -2355,6 +2418,9 @@ Return JSON with:
         # Anchor = first image overall OR first in a regime; gets full QC
         _is_anchor = image_idx == 0 or is_regime_anchor
 
+        # --- Initial analysis (skills at T=0 — guidance) ---
+        state["_annealing_level"] = 0
+
         # --- Initial analysis ---
         initial_pipeline = state.get(
             'locked_analysis_config', {}
@@ -2400,7 +2466,8 @@ Return JSON with:
                         )
 
                         verification = self._verify_quality(
-                            state, current_result, history=verification_history
+                            state, current_result, history=verification_history,
+                            verification_iter=verification_iter,
                         )
 
                         if verification is None:
@@ -2429,6 +2496,15 @@ Return JSON with:
                             "score": v_score,
                         })
 
+                        # Compute the annealing level that was actually used
+                        # by _verify_quality for this iteration (not the stale
+                        # state value, which is updated after re-analysis).
+                        _n_lvl = len(self._CONSTRAINT_ANNEALING_SCHEDULE)
+                        _max_it = max(self.max_verification_iterations, 1)
+                        _cur_level = min(
+                            verification_iter * _n_lvl // _max_it, _n_lvl - 1
+                        )
+
                         verification_history.append({
                             "quality_score": v_score,
                             "config_used": state.get("locked_analysis_config", {}),
@@ -2439,6 +2515,7 @@ Return JSON with:
                             "recommended_action": verification.get(
                                 "recommended_action", ""
                             ),
+                            "annealing_level": _cur_level,
                         })
 
                         # Log sub-scores if available
@@ -2487,6 +2564,14 @@ Return JSON with:
 
                         state["locked_analysis_config"] = refined_config
 
+                        # Sync skill strictness with annealing temperature
+                        n_levels = len(self._SKILL_STRICTNESS_SCHEDULE)
+                        max_iter = max(self.max_verification_iterations, 1)
+                        state["_annealing_level"] = min(
+                            verification_iter * n_levels // max_iter,
+                            n_levels - 1,
+                        )
+
                         # Re-analyze with refined config
                         self.logger.info(
                             "   Re-analyzing with verification feedback..."
@@ -2520,7 +2605,8 @@ Return JSON with:
                         # Loop exhausted without approval - verify final result
                         self.logger.info("   Verifying final re-analysis...")
                         final_verification = self._verify_quality(
-                            state, current_result
+                            state, current_result,
+                            verification_iter=self.max_verification_iterations,
                         )
 
                         if final_verification:
@@ -3013,6 +3099,7 @@ Return JSON with:
             "verification_iterations": [
                 {
                     "score": entry["quality_score"],
+                    "annealing_level": entry.get("annealing_level", 0),
                     "issues": [
                         {
                             "location": iss.get("location", ""),
@@ -3038,6 +3125,30 @@ Return JSON with:
             ),
         }
 
+    USER_FEEDBACK_SCRIPT_PROMPT = '''You have a working image analysis script and user feedback requesting changes.
+
+**USER FEEDBACK:** {user_feedback}
+
+**CURRENT WORKING SCRIPT:**
+```python
+{current_script}
+```
+
+**CURRENT ANALYSIS CONFIG:**
+- Approach: {analysis_approach}
+- Pipeline: {processing_pipeline}
+
+Decide how to address the user's feedback:
+- If the feedback is about visualization, colormaps, labels, fonts, or display only → modify the relevant plotting sections of the existing script. Keep all analysis logic untouched.
+- If the feedback requires minor analysis changes (parameters, thresholds, filters) → modify the relevant parts of the existing script.
+- If the feedback requires a fundamentally different analysis approach → write a new script from scratch.
+
+In all cases, preserve the output contract: the script must print \
+'IMAGE_ANALYSIS_RESULTS_JSON:{{...}}' and save a visualization PNG.
+
+Return JSON: {{"diagnosis": "what you changed and why", "script": "full Python script"}}
+'''
+
     def _apply_user_feedback(
         self,
         state: dict,
@@ -3052,11 +3163,158 @@ Return JSON with:
     ) -> tuple:
         """Apply user feedback to refine the analysis.
 
+        Gives the LLM the existing script and lets it decide whether to
+        patch it or rewrite from scratch based on the feedback.
+
         Returns:
             Tuple of (best_result, best_score) after applying feedback
         """
+        existing_script = best_result.get("script", "")
+        original_config = state.get("locked_analysis_config", {})
+
+        if existing_script:
+            # Let the LLM decide: patch existing script or rewrite
+            self.logger.info("   Applying user feedback to existing script...")
+            config = state.get("locked_analysis_config", {})
+            prompt = self.USER_FEEDBACK_SCRIPT_PROMPT.format(
+                user_feedback=user_feedback,
+                current_script=existing_script,
+                analysis_approach=config.get("analysis_approach", ""),
+                processing_pipeline=config.get("processing_pipeline", ""),
+            )
+
+            try:
+                response = self.model.generate_content(prompt)
+                result, error = self._parse(response)
+
+                if not error and result and result.get("script"):
+                    diagnosis = result.get("diagnosis", "")
+                    if diagnosis:
+                        self.logger.info(f"    Diagnosis: {diagnosis}")
+                    patched_script = result["script"]
+
+                    # Execute the patched script
+                    working_dir = self.output_dir / f"image_{image_idx:04d}"
+                    working_dir.mkdir(parents=True, exist_ok=True)
+                    temp_data_path = working_dir / f"temp_image_{image_idx}.npy"
+                    np.save(temp_data_path, image_data)
+                    output_prefix = f"image_{image_idx:04d}"
+
+                    patched_script = self._sanitize_script(patched_script)
+                    exec_result = self.executor.execute_script(
+                        patched_script, working_dir=str(working_dir)
+                    )
+
+                    if temp_data_path.exists():
+                        try:
+                            os.remove(temp_data_path)
+                        except Exception:
+                            pass
+
+                    if exec_result.get("status") == "success":
+                        stdout = exec_result.get("stdout", "")
+                        analysis_results = {}
+                        for line in stdout.splitlines():
+                            if line.startswith("IMAGE_ANALYSIS_RESULTS_JSON:"):
+                                try:
+                                    analysis_results = json.loads(
+                                        line.replace(
+                                            "IMAGE_ANALYSIS_RESULTS_JSON:", ""
+                                        ).strip()
+                                    )
+                                except json.JSONDecodeError:
+                                    pass
+                                break
+
+                        viz_path = working_dir / f"{output_prefix}_analysis.png"
+                        if not viz_path.exists():
+                            viz_path = working_dir / "analysis_visualization.png"
+
+                        viz_bytes = None
+                        if viz_path.exists():
+                            with open(viz_path, "rb") as f:
+                                viz_bytes = f.read()
+
+                        if analysis_results and viz_bytes:
+                            # Verify the user-guided result with the LLM
+                            user_guided_result = {
+                                "index": image_idx,
+                                "name": image_name,
+                                "data_path": data_path,
+                                "success": True,
+                                "error": None,
+                                "analysis_type": analysis_results.get(
+                                    "analysis_type"
+                                ),
+                                "extracted_features": analysis_results.get(
+                                    "extracted_features", {}
+                                ),
+                                "quality_metrics": analysis_results.get(
+                                    "quality_metrics", {}
+                                ),
+                                "summary": analysis_results.get("summary"),
+                                "visualization_bytes": viz_bytes,
+                                "visualization_path": str(viz_path),
+                                "script": patched_script,
+                                "script_errors": [],
+                            }
+
+                            verification = self._verify_quality(
+                                state, user_guided_result
+                            )
+                            if verification:
+                                user_score = verification.get(
+                                    "quality_score", 0.5
+                                )
+                                if not isinstance(user_score, (int, float)):
+                                    user_score = 0.5
+                            else:
+                                user_score = user_guided_result.get(
+                                    "quality_metrics", {}
+                                ).get("quality_score", 0.5)
+                                if isinstance(user_score, str):
+                                    try:
+                                        user_score = float(user_score)
+                                    except (ValueError, TypeError):
+                                        user_score = 0.5
+
+                            user_guided_result["_quality_score"] = user_score
+                            self.logger.info(
+                                f"   User-guided result: score = {user_score:.2f}"
+                            )
+                            all_attempts.append({
+                                "pipeline": "User-guided",
+                                "score": user_score,
+                                "result": user_guided_result,
+                            })
+
+                            if user_score >= best_score:
+                                return user_guided_result, user_score
+                            else:
+                                if viz_bytes:
+                                    review_path = (
+                                        self.output_dir
+                                        / "first_image_analysis_review.png"
+                                    )
+                                    with open(review_path, "wb") as f:
+                                        f.write(viz_bytes)
+                                keep = self._ask_keep_user_guided_result(
+                                    user_score, best_score
+                                )
+                                if keep:
+                                    return user_guided_result, user_score
+                                return best_result, best_score
+
+                    self.logger.warning(
+                        "   Patched script failed, falling back to full re-analysis"
+                    )
+            except Exception as e:
+                self.logger.warning(
+                    f"   Script patching failed ({e}), falling back to full re-analysis"
+                )
+
+        # Fallback: full re-analysis (original behavior)
         refined_config = self._refine_config_from_feedback(state, user_feedback)
-        original_config = state.get("locked_analysis_config")
         state["locked_analysis_config"] = refined_config
 
         # Clean up old visualization
@@ -3074,14 +3332,20 @@ Return JSON with:
         )
 
         if user_guided_result["success"]:
-            user_score = user_guided_result.get(
-                "quality_metrics", {}
-            ).get("quality_score", 0.5)
-            if isinstance(user_score, str):
-                try:
-                    user_score = float(user_score)
-                except (ValueError, TypeError):
+            verification = self._verify_quality(state, user_guided_result)
+            if verification:
+                user_score = verification.get("quality_score", 0.5)
+                if not isinstance(user_score, (int, float)):
                     user_score = 0.5
+            else:
+                user_score = user_guided_result.get(
+                    "quality_metrics", {}
+                ).get("quality_score", 0.5)
+                if isinstance(user_score, str):
+                    try:
+                        user_score = float(user_score)
+                    except (ValueError, TypeError):
+                        user_score = 0.5
             user_guided_result["_quality_score"] = user_score
             self.logger.info(f"   User-guided result: score = {user_score:.2f}")
             all_attempts.append({
@@ -3090,12 +3354,14 @@ Return JSON with:
                 "result": user_guided_result,
             })
 
-            if user_score > best_score:
+            if user_score >= best_score:
                 return user_guided_result, user_score
             else:
                 if user_guided_result.get("visualization_bytes"):
-                    review_viz_path = self.output_dir / "first_image_analysis_review.png"
-                    with open(review_viz_path, 'wb') as f:
+                    review_viz_path = (
+                        self.output_dir / "first_image_analysis_review.png"
+                    )
+                    with open(review_viz_path, "wb") as f:
                         f.write(user_guided_result["visualization_bytes"])
                 keep_user = self._ask_keep_user_guided_result(
                     user_score, best_score

@@ -2224,6 +2224,14 @@ Return JSON with:
                             self.logger.warning(f"   Verification failed, skipping")
                             break
                         
+                        # Compute the annealing level actually used by the
+                        # verification prompt (not the stale state value).
+                        _n_lvl = len(self._CONSTRAINT_ANNEALING_SCHEDULE)
+                        _max_it = max(self.max_verification_iterations, 1)
+                        _cur_level = min(
+                            verification_iter * _n_lvl // _max_it, _n_lvl - 1
+                        )
+
                         # Store in history for next iteration's context
                         verification_history.append({
                             "r_squared": best_r2,
@@ -2231,6 +2239,7 @@ Return JSON with:
                             "issues_found": verification.get("issues_found", []),
                             "overall_assessment": verification.get("overall_assessment", ""),
                             "recommended_action": verification.get("recommended_action", ""),
+                            "annealing_level": _cur_level,
                         })
 
                         if verification.get("fit_acceptable", True):
@@ -3053,6 +3062,7 @@ Return JSON with:
             "verification_iterations": [
                 {
                     "r_squared": entry.get("r_squared"),
+                    "annealing_level": entry.get("annealing_level", 0),
                     "issues": [
                         {
                             "location": iss.get("location", ""),

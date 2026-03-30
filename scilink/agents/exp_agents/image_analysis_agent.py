@@ -748,32 +748,34 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         focus = tier2_decision.get("suggested_focus", "deeper analysis")
         reasoning = tier2_decision.get("reasoning", "")
 
-        print("\n" + "=" * 60)
-        print("TIER 2 ANALYSIS RECOMMENDATION")
-        print("=" * 60)
+        # Clear visual break so the recommendation starts fresh
+        print("\n\n")
+        print("─" * 60)
+        print()
+        print("🔬 TIER 2 — DEEP ANALYSIS RECOMMENDATION")
+        print()
+        print("─" * 60)
 
-        summary = tier1_results.get("detailed_analysis", "")
+        # Brief Tier 1 summary — first 3 lines only
+        summary = tier1_results.get("summary", "")
+        if not summary:
+            summary = tier1_results.get("detailed_analysis", "")
         if summary:
-            lines = summary.strip().split("\n")[:10]
-            print(f"\nTier 1 Summary:\n   " + "\n   ".join(lines))
+            lines = summary.strip().split("\n")[:3]
+            print(f"\n📋 Tier 1 summary:\n   "
+                  + " ".join(l.strip() for l in lines)[:300])
 
-        claims = tier1_results.get("scientific_claims", [])
-        if claims:
-            print(f"\nKey Claims:")
-            for c in claims[:5]:
-                print(f"   - {c.get('claim', '')}")
-
-        viz_paths = tier1_results.get("visualization_paths", [])
-        if viz_paths:
-            print(f"\nVisualizations:")
-            for p in viz_paths[:3]:
-                print(f"   {p}")
-
-        print(f"\nRecommendation: {focus}")
+        # Concise Tier 2 proposal
+        print(f"\n🎯 Proposed analysis:\n   {focus}")
         if reasoning:
-            print(f"   Reasoning: {reasoning}")
+            # Keep reasoning to first sentence or 200 chars
+            short_reason = reasoning.split(". ")[0].rstrip(".") + "."
+            if len(short_reason) > 200:
+                short_reason = short_reason[:200] + "..."
+            print(f"\n💡 Why: {short_reason}")
 
-        print("=" * 60)
+        print()
+        print("─" * 60)
 
         try:
             response = input(
@@ -804,7 +806,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         """Run Tier 2 pipeline and return compiled results, or None on failure."""
         import shutil
 
-        # Preserve Tier 1 outputs
+        # Preserve Tier 1 outputs — move to tier1/ subdirectory so the
+        # main output dir only contains Tier 2 results + the tier1/ archive.
         tier1_dir = self.output_dir / "tier1"
         tier1_dir.mkdir(exist_ok=True)
         for item in self.output_dir.iterdir():
@@ -814,9 +817,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if item.is_dir():
                 if dst.exists():
                     shutil.rmtree(dst)
-                shutil.copytree(item, dst)
+                shutil.move(str(item), str(dst))
             elif item.is_file():
-                shutil.copy2(item, dst)
+                shutil.move(str(item), str(dst))
         self.logger.info(f"   Tier 1 outputs preserved in {tier1_dir}")
 
         tier2_state = self._build_tier2_state(
@@ -850,7 +853,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         for i, controller in enumerate(tier2_pipeline, 1):
             step_name = controller.__class__.__name__
-            self.logger.info(f"\n   TIER 2 STEP {i}: {step_name}\n")
+            self.logger.info(f"\n📍 TIER 2 STEP {i}: {step_name}\n")
             try:
                 tier2_state = controller.execute(tier2_state)
                 if tier2_state.get("error_dict"):
