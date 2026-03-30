@@ -871,6 +871,77 @@ class HumanFeedbackRefinementController:
 
         return state
 
+    def _validate_plan(self, state: dict) -> dict:
+        """Validate the proposed fitting plan against data and skill rules.
+
+        Mirrors ImageAnalysisAgent's _validate_plan. Only runs when skill
+        rules are present — without skills there's nothing to enforce.
+        """
+        if not state.get("skill_sections"):
+            return state
+
+        from ..instruct import CURVE_FITTING_PLAN_VALIDATION_PROMPT
+
+        regime_section = ""
+        series_plan = state.get("series_analysis_plan")
+        if series_plan and series_plan.get("regimes"):
+            lines = ["\n**Regimes:**"]
+            for regime in series_plan["regimes"]:
+                lines.append(
+                    f"- {regime.get('name', 'Unnamed')}: "
+                    f"model={regime.get('physical_model', 'N/A')}, "
+                    f"params={', '.join(regime.get('parameters_to_extract', []))}"
+                )
+            regime_section = "\n".join(lines)
+
+        prompt_text = CURVE_FITTING_PLAN_VALIDATION_PROMPT.format(
+            analysis_approach=state.get("analysis_approach", "N/A"),
+            physical_model=state.get("physical_model", "N/A"),
+            parameters_to_extract=", ".join(state.get("parameters_to_extract", [])),
+            fitting_strategy=state.get("fitting_strategy", "N/A"),
+            regime_section=regime_section,
+        )
+
+        prompt_parts = [prompt_text]
+        _append_skill_context(prompt_parts, state, "planning")
+
+        if state.get("original_plot_bytes"):
+            prompt_parts.append("\n**Data:**")
+            prompt_parts.append({"mime_type": "image/png", "data": state["original_plot_bytes"]})
+
+        try:
+            response = self.model.generate_content(
+                prompt_parts, generation_config=self.generation_config,
+            )
+            result, error = self._parse(response)
+
+            if error or not result:
+                self.logger.warning("  Plan validation parse failed, keeping plan")
+                return state
+
+            if result.get("valid", True):
+                self.logger.info("  Plan validation: approved")
+                return state
+
+            issues = result.get("issues", [])
+            self.logger.info(f"  Plan validation: {len(issues)} issue(s) found, revising")
+            for issue in issues:
+                self.logger.info(f"    - {issue}")
+
+            if result.get("physical_model"):
+                state["physical_model"] = result["physical_model"]
+            if result.get("parameters_to_extract"):
+                state["parameters_to_extract"] = result["parameters_to_extract"]
+            if result.get("fitting_strategy"):
+                state["fitting_strategy"] = result["fitting_strategy"]
+            if result.get("series_analysis_plan"):
+                self._extract_series_plan(state, result)
+
+        except Exception as e:
+            self.logger.warning(f"  Plan validation failed: {e}, keeping plan")
+
+        return state
+
     def _append_scout_context(self, prompt: list, state: dict, scout_data: list) -> None:
         """Append scout spectrum plots and series regime planning instructions."""
         from ..instruct import SERIES_REGIME_PLANNING_SUPPLEMENT
@@ -1042,6 +1113,7 @@ class HumanFeedbackRefinementController:
 
         try:
             state = self._plan_analysis(state)
+            state = self._validate_plan(state)
             self.logger.info(f"  Approach: {state['analysis_approach']}")
             self.logger.info(f"  Model: {state['physical_model']}")
 
