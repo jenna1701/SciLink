@@ -2212,21 +2212,37 @@ Return JSON with the refined analysis approach:
         self, state: dict, best_result: dict, all_attempts: List[dict]
     ) -> Optional[dict]:
         """Ask user for guidance when automated quality is poor."""
-        pipelines_tried = "\n".join([
-            f"  - {a['pipeline']}: score = {a['score']:.2f}"
-            for a in all_attempts
-        ])
+        # Build concise summary grouped by attempt type
+        lines = []
+        initial = [a for a in all_attempts if not str(a["pipeline"]).startswith(("Verification", "Alternative", "User"))]
+        verifications = [a for a in all_attempts if str(a["pipeline"]).startswith("Verification")]
+        alternatives = [a for a in all_attempts if not str(a["pipeline"]).startswith(("Verification", "User")) and a not in initial]
+        user_guided = [a for a in all_attempts if str(a["pipeline"]).startswith("User")]
 
-        print("")
-        print("=" * 60)
-        print("ANALYSIS QUALITY BELOW THRESHOLD")
-        print("=" * 60)
+        if initial:
+            lines.append(f"  Initial pipeline: score = {initial[0]['score']:.2f}")
+        if verifications:
+            scores = [f"{v['score']:.2f}" for v in verifications]
+            lines.append(f"  Verification refinements ({len(verifications)}): scores = {', '.join(scores)}")
+        for i, a in enumerate(alternatives, 1):
+            lines.append(f"  Alternative {i}: score = {a['score']:.2f}")
+        for a in user_guided:
+            lines.append(f"  User-guided: score = {a['score']:.2f}")
+
+        pipelines_tried = "\n".join(lines)
+
+        print("\n\n")
+        print("─" * 60)
+        print()
+        print("⚠️  ANALYSIS QUALITY BELOW THRESHOLD")
+        print()
+        print("─" * 60)
 
         if best_result.get("visualization_bytes"):
             viz_path = self.output_dir / "quality_review_analysis.png"
             with open(viz_path, 'wb') as f:
                 f.write(best_result["visualization_bytes"])
-            print(f"[Best result visualization saved to: {viz_path}]")
+            print(f"\n📊 [Best result saved to: {viz_path}]")
 
         prompt = self.HUMAN_FEEDBACK_PROMPT.format(
             best_score=best_result.get("_quality_score", 0.0),
