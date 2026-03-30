@@ -2667,6 +2667,10 @@ For multi-channel images, pass a single channel (e.g., `image[:,:,0]`).
   Choose window_size and n_components based on the physics of the problem — the spatial
   scale of repeating features and the number of distinct patterns expected in the image
   based on the material system and imaging conditions.
+  Always save components and abundances as .npy files (e.g.,
+  `np.save("nmf_components.npy", result["components"])` and
+  `np.save("abundance_maps.npy", result["abundances"])`) and include them in
+  `saved_arrays` so follow-up analysis can reuse them.
 
 **Commit to specific choices — do NOT hedge:**
 - State ONE segmentation method, not alternatives (write "Otsu thresholding" not "Otsu or adaptive")
