@@ -71,7 +71,7 @@ def render_file_preview(file_path: Path) -> None:
 
     # HTML reports — render as interactive HTML
     if suffix == ".html":
-        st.components.v1.html(
+        st.iframe(
             file_path.read_text(encoding="utf-8"),
             height=600,
             scrolling=True,

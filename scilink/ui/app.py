@@ -447,7 +447,7 @@ with chat_tab:
                 p = Path(html_path)
                 if p.exists():
                     with st.expander(f"Report: {p.name}"):
-                        st.components.v1.html(
+                        st.iframe(
                             p.read_text(encoding="utf-8"),
                             height=600,
                             scrolling=True,
@@ -569,7 +569,7 @@ with chat_tab:
                 # Estimate height: ~20px per line, clamped to 150-400px
                 n_lines = escaped_ctx.count("\n") + 1
                 box_h = max(150, min(400, n_lines * 20 + 32))
-                st.components.v1.html(
+                st.iframe(
                     f'<pre style="background:#1e1e1e;margin:0;'
                     f"border:1px solid #333;border-radius:6px;"
                     f"padding:12px 16px;font-family:monospace;"
@@ -710,7 +710,7 @@ with chat_tab:
                 # Force-restyle the toggle track in light mode (BaseWeb
                 # uses inline styles that CSS cannot override).
                 if st.session_state.get("theme_mode", "dark") == "light":
-                    st.components.v1.html("""<script>
+                    st.iframe("""<script>
 (function(){
     var doc = window.parent.document;
     var OFF = '#90A4AE', ON = '#6200EE';
@@ -738,7 +738,7 @@ with chat_tab:
 
                     tail = "\n".join(live.split("\n")[-200:])
                     escaped = _html.escape(tail)
-                    st.components.v1.html(
+                    st.iframe(
                         f'<pre style="height:280px;overflow-y:auto;margin:0;'
                         f"background:#1e1e1e;padding:8px;border-radius:4px;"
                         f"border:1px solid #333;font-family:monospace;"

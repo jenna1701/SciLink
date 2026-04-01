@@ -38,6 +38,12 @@ pip install scilink[ui]
 pip install scilink[sim]
 ```
 
+The analysis agents work without additional dependencies, but installing Meta's [Segment Anything Model](https://github.com/facebookresearch/segment-anything) (SAM) enables more advanced particle and grain segmentation. SAM is not available on PyPI and must be installed from source:
+
+```bash
+pip install git+https://github.com/facebookresearch/segment-anything.git
+```
+
 ### Environment Variables
 
 Set API keys for your preferred LLM provider:
