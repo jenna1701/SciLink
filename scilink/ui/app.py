@@ -2,9 +2,14 @@
 
 import base64
 import builtins
+import logging
 import re
 import threading
 from pathlib import Path
+
+# Suppress Streamlit's own st.components.v1.html deprecation warnings
+# (emitted internally by Streamlit 1.56+, not by our code).
+logging.getLogger("streamlit.deprecation_util").setLevel(logging.ERROR)
 
 import streamlit as st
 
