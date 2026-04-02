@@ -55,6 +55,20 @@ def render_file_preview(file_path: Path) -> None:
             st.code(file_path.read_text()[:100000], language="text")
         return
 
+    # Excel
+    if suffix in (".xlsx", ".xls"):
+        try:
+            import pandas as pd
+            df = pd.read_excel(file_path)
+            if len(df) > 100:
+                st.caption(f"Showing first 100 of {len(df):,} rows")
+                st.dataframe(df.head(100))
+            else:
+                st.dataframe(df)
+        except Exception:
+            st.info("Install `openpyxl` to preview Excel files.")
+        return
+
     # NumPy
     if suffix == ".npy":
         try:
