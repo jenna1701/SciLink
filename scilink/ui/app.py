@@ -735,7 +735,7 @@ with chat_tab:
     new MutationObserver(fix).observe(doc.body,
         {childList:true, subtree:true, attributes:true, attributeFilter:['aria-checked','checked']});
 })();
-</script>""", height=0)
+</script>""", height=1)
                 if show:
                     import html as _html
 
