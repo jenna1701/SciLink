@@ -3279,6 +3279,21 @@ Return JSON: {{"diagnosis": "what you changed and why", "script": "full Python s
                     np.save(temp_data_path, image_data)
                     output_prefix = f"image_{image_idx:04d}"
 
+                    # Remove old viz files before running the patched
+                    # script so we only find genuinely new output.
+                    # On revert the original is restored from in-memory
+                    # visualization_bytes.
+                    canonical_viz = working_dir / f"{output_prefix}_analysis.png"
+                    for old_viz in [
+                        canonical_viz,
+                        working_dir / "analysis_visualization.png",
+                    ]:
+                        if old_viz.exists():
+                            try:
+                                os.remove(old_viz)
+                            except Exception:
+                                pass
+
                     patched_script = self._sanitize_script(patched_script)
                     exec_result = self.executor.execute_script(
                         patched_script, working_dir=str(working_dir)
@@ -3305,7 +3320,7 @@ Return JSON: {{"diagnosis": "what you changed and why", "script": "full Python s
                                     pass
                                 break
 
-                        viz_path = working_dir / f"{output_prefix}_analysis.png"
+                        viz_path = canonical_viz
                         if not viz_path.exists():
                             viz_path = working_dir / "analysis_visualization.png"
 
@@ -3313,6 +3328,12 @@ Return JSON: {{"diagnosis": "what you changed and why", "script": "full Python s
                         if viz_path.exists():
                             with open(viz_path, "rb") as f:
                                 viz_bytes = f.read()
+                            # Normalize to canonical name
+                            if viz_path != canonical_viz:
+                                try:
+                                    viz_path.replace(canonical_viz)
+                                except Exception:
+                                    pass
 
                         if analysis_results and viz_bytes:
                             # Verify the user-guided result with the LLM
@@ -3333,7 +3354,7 @@ Return JSON: {{"diagnosis": "what you changed and why", "script": "full Python s
                                 ),
                                 "summary": analysis_results.get("summary"),
                                 "visualization_bytes": viz_bytes,
-                                "visualization_path": str(viz_path),
+                                "visualization_path": str(canonical_viz),
                                 "script": patched_script,
                                 "script_errors": [],
                             }
@@ -3382,6 +3403,18 @@ Return JSON: {{"diagnosis": "what you changed and why", "script": "full Python s
                                 )
                                 if keep:
                                     return user_guided_result, user_score
+                                # Restore original viz on disk so the
+                                # file matches what best_result describes
+                                if best_result.get("visualization_bytes"):
+                                    try:
+                                        with open(canonical_viz, "wb") as f:
+                                            f.write(
+                                                best_result[
+                                                    "visualization_bytes"
+                                                ]
+                                            )
+                                    except Exception:
+                                        pass
                                 return best_result, best_score
 
                     self.logger.warning(
@@ -3448,12 +3481,28 @@ Return JSON: {{"diagnosis": "what you changed and why", "script": "full Python s
                 if keep_user:
                     return user_guided_result, user_score
                 else:
+                    # Restore original viz on disk so the file matches
+                    # what best_result describes (the re-analysis
+                    # overwrote or deleted the original file).
+                    if best_result.get("visualization_bytes") and best_result.get("visualization_path"):
+                        try:
+                            with open(best_result["visualization_path"], "wb") as f:
+                                f.write(best_result["visualization_bytes"])
+                        except Exception:
+                            pass
                     state["locked_analysis_config"] = original_config
                     return best_result, best_score
         else:
             self.logger.warning(
                 "   User-guided analysis failed, keeping previous"
             )
+            # Restore original viz on disk (re-analysis deleted it)
+            if best_result.get("visualization_bytes") and best_result.get("visualization_path"):
+                try:
+                    with open(best_result["visualization_path"], "wb") as f:
+                        f.write(best_result["visualization_bytes"])
+                except Exception:
+                    pass
             state["locked_analysis_config"] = original_config
             return best_result, best_score
 
@@ -4890,10 +4939,13 @@ Return JSON with:
             f"   Attempting script correction (attempt {attempt})..."
         )
         if len(error_message) > 1000:
+            tail = "\n".join(error_message.splitlines()[-30:])
             error_message = (
                 error_message[:500]
                 + "\n...[truncated]...\n"
                 + error_message[-500:]
+                + "\n\n--- Last 30 lines ---\n"
+                + tail
             )
 
         prompt = f"""Fix this Python script that failed:

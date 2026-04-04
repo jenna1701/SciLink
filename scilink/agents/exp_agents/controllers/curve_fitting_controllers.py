@@ -2666,26 +2666,27 @@ Return JSON with:
         refined_config = self._refine_model_from_feedback(state, user_feedback)
         original_config = state.get("locked_fitting_config")
         state["locked_fitting_config"] = refined_config
-        
-        # Clean up old visualization
+
+        # Clean up old visualization — _fit_single_spectrum will
+        # create a fresh file at the same canonical path.
         old_viz_path = best_result.get("visualization_path")
         if old_viz_path and Path(old_viz_path).exists():
             try:
                 os.remove(old_viz_path)
-            except:
+            except Exception:
                 pass
-        
-        self.logger.info(f"   Refitting with user feedback...")
+
+        self.logger.info("   Refitting with user feedback...")
         user_guided_result = self._fit_single_spectrum(
             state=state, curve_data=curve_data, data_path=data_path,
             spectrum_name=spectrum_name, spectrum_idx=spectrum_idx, base_script=None
         )
-        
+
         if user_guided_result["success"]:
             user_r2 = user_guided_result.get("fit_quality", {}).get("r_squared", 0)
             self.logger.info(f"   User-guided fit: R² = {user_r2:.4f}")
             all_attempts.append({"model": "User-guided", "r2": user_r2, "result": user_guided_result})
-            
+
             if user_r2 > best_r2:
                 return user_guided_result, user_r2
             else:
@@ -2699,10 +2700,26 @@ Return JSON with:
                 if keep_user:
                     return user_guided_result, user_r2
                 else:
+                    # Restore original viz on disk so the file matches
+                    # what best_result describes (re-analysis overwrote
+                    # or deleted the original file).
+                    if best_result.get("visualization_bytes") and old_viz_path:
+                        try:
+                            with open(old_viz_path, "wb") as f:
+                                f.write(best_result["visualization_bytes"])
+                        except Exception:
+                            pass
                     state["locked_fitting_config"] = original_config
                     return best_result, best_r2
         else:
-            self.logger.warning(f"   User-guided fit failed, keeping previous")
+            self.logger.warning("   User-guided fit failed, keeping previous")
+            # Restore original viz on disk (re-analysis deleted it)
+            if best_result.get("visualization_bytes") and old_viz_path:
+                try:
+                    with open(old_viz_path, "wb") as f:
+                        f.write(best_result["visualization_bytes"])
+                except Exception:
+                    pass
             state["locked_fitting_config"] = original_config
             return best_result, best_r2
 
