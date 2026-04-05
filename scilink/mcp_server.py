@@ -55,8 +55,22 @@ _SUPERVISED_APPROVAL_TOOLS = {
 }
 
 # Tools that support optional background execution via ``background=true``.
+# These are the long-running tools where a blocking call can realistically
+# exceed the ~4 minute tool-call timeout in clients like Claude Desktop:
+#   - run_analysis / run_optimization: full agent analysis or BO loop
+#   - assess_novelty: FutureHouse literature search per claim (max_wait 600s each)
+#   - get_recommendations: LLM synthesis over a full analysis record
+#   - generate_initial_plan / generate_implementation_code: RAG + LLM generation
+#     over potentially large docs/code knowledge bases
+#   - run_economic_analysis: TEA with knowledge retrieval + LLM synthesis
 _BACKGROUND_CAPABLE_TOOLS = {
-    "run_analysis", "run_optimization",
+    "run_analysis",
+    "run_optimization",
+    "assess_novelty",
+    "get_recommendations",
+    "generate_initial_plan",
+    "generate_implementation_code",
+    "run_economic_analysis",
 }
 
 

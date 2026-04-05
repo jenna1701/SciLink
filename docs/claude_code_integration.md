@@ -219,7 +219,14 @@ Tools that require approval:
 
 ## Background execution
 
-Long-running tools (`run_analysis`, `run_optimization`) support an optional `background=true` parameter that returns a job ID immediately instead of blocking. This avoids timeouts in clients like Claude Desktop.
+Long-running tools support an optional `background=true` parameter that returns a job ID immediately instead of blocking. This avoids timeouts in clients like Claude Desktop.
+
+Tools that support background execution:
+- `run_analysis`, `run_optimization` — full agent analysis or Bayesian optimization
+- `assess_novelty` — FutureHouse literature search per scientific claim
+- `get_recommendations` — measurement recommendations over a full analysis record
+- `generate_initial_plan`, `generate_implementation_code` — RAG + LLM generation
+- `run_economic_analysis` — technoeconomic analysis with knowledge retrieval
 
 ```
 run_analysis(data_path="...", background=true)
