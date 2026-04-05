@@ -126,32 +126,32 @@
   <!-- All dots use same speed (12s) to maintain consistent 120° spacing -->
   
   <!-- Blue dot - starts at top (0°), clockwise -->
-  <g filter="url(#blueDotGlow)">
-    <circle r="6" fill="#4A90E2">
-      <animateMotion dur="12s" repeatCount="indefinite" begin="0s">
+  <g filter="url(#blueDotGlow)" opacity="0.45">
+    <circle r="5" fill="#4A90E2">
+      <animateMotion dur="18s" repeatCount="indefinite" begin="0s">
         <mpath href="#orbitPathCW"/>
       </animateMotion>
-      <animate attributeName="r" values="6;8;6" dur="4s" repeatCount="indefinite" calcMode="spline" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1"/>
+      <animate attributeName="r" values="5;6;5" dur="6s" repeatCount="indefinite" calcMode="spline" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1"/>
     </circle>
   </g>
   
-  <!-- Orange dot - starts at bottom-left (240°), clockwise, 8s behind blue -->
-  <g filter="url(#orangeDotGlow)">
-    <circle r="6" fill="#F06A45">
-      <animateMotion dur="12s" repeatCount="indefinite" begin="-8s">
+  <!-- Orange dot - starts at bottom-left (240°), clockwise, 12s behind blue -->
+  <g filter="url(#orangeDotGlow)" opacity="0.45">
+    <circle r="5" fill="#F06A45">
+      <animateMotion dur="18s" repeatCount="indefinite" begin="-12s">
         <mpath href="#orbitPathCW"/>
       </animateMotion>
-      <animate attributeName="r" values="6;8;6" dur="4s" repeatCount="indefinite" begin="-1.33s" calcMode="spline" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1"/>
+      <animate attributeName="r" values="5;6;5" dur="6s" repeatCount="indefinite" begin="-2s" calcMode="spline" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1"/>
     </circle>
   </g>
   
-  <!-- Green dot - starts at bottom-right (120°), clockwise, 4s behind blue -->
-  <g filter="url(#greenDotGlow)">
-    <circle r="6" fill="#34C77B">
-      <animateMotion dur="12s" repeatCount="indefinite" begin="-4s">
+  <!-- Green dot - starts at bottom-right (120°), clockwise, 6s behind blue -->
+  <g filter="url(#greenDotGlow)" opacity="0.45">
+    <circle r="5" fill="#34C77B">
+      <animateMotion dur="18s" repeatCount="indefinite" begin="-6s">
         <mpath href="#orbitPathCW"/>
       </animateMotion>
-      <animate attributeName="r" values="6;8;6" dur="4s" repeatCount="indefinite" begin="-2.67s" calcMode="spline" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1"/>
+      <animate attributeName="r" values="5;6;5" dur="6s" repeatCount="indefinite" begin="-4s" calcMode="spline" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1"/>
     </circle>
   </g>
   
