@@ -122,6 +122,20 @@ using the papers in ./literature/ as the knowledge base.
 
 Copilot will call the appropriate SciLink tools (`scilink_examine_data`, `scilink_run_analysis`, `scilink_generate_initial_plan`, etc.) and weave the results into its response. You will see each tool call appear in the chat with its arguments and return values.
 
+### Individual tools vs orchestrator
+
+SciLink exposes its tools at two levels:
+
+- **Individual tools** (`scilink_examine_data`, `scilink_run_analysis`, etc.) — Copilot calls them one by one and drives the workflow itself. Good for simple tasks or when you want to see and control each step.
+- **Orchestrator tools** (`scilink_orchestrate_analysis`, `scilink_orchestrate_planning`) — send a single natural-language prompt and SciLink's own orchestrator handles the entire multi-step workflow internally, using its domain-specific system prompt to decide which agents and tools to use. Best for complex analyses where SciLink's domain expertise should drive the flow.
+
+Example using the orchestrator:
+
+```
+Use scilink_orchestrate_analysis to analyze the XPS data at ./data/ti2p.csv
+with the xps skill, then assess novelty of the findings. Use background=true.
+```
+
 ### Long-running analyses
 
 SciLink's heavy tools (`run_analysis`, `run_optimization`, `assess_novelty`, `generate_initial_plan`, `generate_implementation_code`, `get_recommendations`, `run_economic_analysis`) support an optional `background=true` parameter. When used, the tool returns a job ID immediately instead of blocking, and Copilot polls with `scilink_job_status` / `scilink_job_result` to retrieve the result. This avoids tool-call timeouts in VS Code. You can nudge this explicitly:

@@ -63,6 +63,7 @@ _SUPERVISED_APPROVAL_TOOLS = {
 #   - generate_initial_plan / generate_implementation_code: RAG + LLM generation
 #     over potentially large docs/code knowledge bases
 #   - run_economic_analysis: TEA with knowledge retrieval + LLM synthesis
+#   - orchestrate_analysis / orchestrate_planning: full orchestrator chat loop
 _BACKGROUND_CAPABLE_TOOLS = {
     "run_analysis",
     "run_optimization",
@@ -71,6 +72,8 @@ _BACKGROUND_CAPABLE_TOOLS = {
     "generate_initial_plan",
     "generate_implementation_code",
     "run_economic_analysis",
+    "orchestrate_analysis",
+    "orchestrate_planning",
 }
 
 
@@ -352,6 +355,87 @@ def create_server(
             },
         ))
 
+        # Orchestrator-level tools — delegate entire workflows instead
+        # of calling individual tools one by one.
+        if state["analysis_orch"]:
+            tools.append(types.Tool(
+                name="scilink_orchestrate_analysis",
+                description=(
+                    "Delegate a complete analysis workflow to SciLink's analysis "
+                    "orchestrator. Instead of calling individual tools (examine_data, "
+                    "select_agent, run_analysis, etc.) one by one, send a natural-"
+                    "language prompt and the orchestrator handles the entire flow: "
+                    "data examination, metadata handling, agent selection, analysis "
+                    "execution, and results compilation. Best for complex multi-step "
+                    "analyses where SciLink's domain expertise should drive the "
+                    "workflow. Use background=true for non-trivial requests, as the "
+                    "orchestrator may take several minutes."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": (
+                                "Natural-language instruction for the analysis "
+                                "orchestrator, e.g. 'Analyze the XPS data at "
+                                "/path/to/data.csv using the xps skill and assess "
+                                "novelty of the findings.'"
+                            ),
+                        },
+                        "background": {
+                            "type": "boolean",
+                            "description": (
+                                "If true, run in the background and return a job_id "
+                                "immediately. Recommended for most requests. Use "
+                                "scilink_job_status and scilink_job_result to poll "
+                                "and retrieve results. Default: false."
+                            ),
+                        },
+                    },
+                    "required": ["prompt"],
+                },
+            ))
+
+        if state["planning_orch"]:
+            tools.append(types.Tool(
+                name="scilink_orchestrate_planning",
+                description=(
+                    "Delegate a complete planning workflow to SciLink's planning "
+                    "orchestrator. Send a natural-language prompt and the "
+                    "orchestrator handles the entire flow: objective understanding, "
+                    "knowledge base retrieval, experimental plan generation, "
+                    "implementation code, and Bayesian optimization. Best for "
+                    "complex experimental design tasks where SciLink's domain "
+                    "expertise should drive the workflow. Use background=true for "
+                    "non-trivial requests."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": (
+                                "Natural-language instruction for the planning "
+                                "orchestrator, e.g. 'Generate an experimental plan "
+                                "for optimizing lithium extraction from brine using "
+                                "papers in ./literature/ as the knowledge base.'"
+                            ),
+                        },
+                        "background": {
+                            "type": "boolean",
+                            "description": (
+                                "If true, run in the background and return a job_id "
+                                "immediately. Recommended for most requests. Use "
+                                "scilink_job_status and scilink_job_result to poll "
+                                "and retrieve results. Default: false."
+                            ),
+                        },
+                    },
+                    "required": ["prompt"],
+                },
+            ))
+
         return tools
 
     # ── tools/call ───────────────────────────────────────────────────
@@ -375,6 +459,12 @@ def create_server(
             return _handle_job_status(state, arguments)
         if name == "scilink_job_result":
             return _handle_job_result(state, arguments)
+
+        # Handle orchestrator-level chat tools
+        if name in ("scilink_orchestrate_analysis", "scilink_orchestrate_planning"):
+            return await _handle_orchestrate(
+                state, name, arguments, _executor
+            )
 
         # Look up which orchestrator owns this tool
         if name not in tool_map:
@@ -717,6 +807,90 @@ def _handle_job_result(
             job["status"] = "failed"
 
     return [types.TextContent(type="text", text=job["result"])]
+
+
+# ── Orchestrator chat handlers ──────────────────────────────────────────
+
+def _execute_chat_captured(orch, prompt: str) -> str:
+    """Execute orch.chat() while capturing stdout."""
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        result = orch.chat(prompt)
+
+    log_output = captured.getvalue().strip()
+    if log_output:
+        logging.info(f"[orchestrate] {log_output}")
+
+    return result
+
+
+async def _handle_orchestrate(
+    state: dict, name: str, arguments: dict, executor
+) -> List["types.TextContent"]:
+    """Handle orchestrator-level chat tools."""
+    from datetime import datetime as _dt
+
+    orch_key = (
+        "analysis_orch" if name == "scilink_orchestrate_analysis"
+        else "planning_orch"
+    )
+    orch = state.get(orch_key)
+    if orch is None:
+        mode_label = "analysis" if "analysis" in name else "planning"
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "status": "error",
+                "message": (
+                    f"{mode_label.title()} orchestrator is not available. "
+                    f"Start the server with --mode {mode_label} or --mode both."
+                ),
+            }),
+        )]
+
+    prompt = arguments.get("prompt", "")
+    if not prompt.strip():
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "status": "error",
+                "message": "Empty prompt. Provide a natural-language instruction.",
+            }),
+        )]
+
+    run_in_background = arguments.pop("background", False)
+    tool_label = name.replace("scilink_", "")
+
+    if run_in_background:
+        state["job_counter"] += 1
+        ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+        job_id = f"job_{ts}_{state['job_counter']:03d}"
+
+        future = executor.submit(_execute_chat_captured, orch, prompt)
+        state["jobs"][job_id] = {
+            "future": future,
+            "tool": tool_label,
+            "started_at": ts,
+            "status": "running",
+            "result": None,
+        }
+
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "status": "started",
+                "job_id": job_id,
+                "tool": tool_label,
+                "message": (
+                    f"Orchestrator running in background (job {job_id}). "
+                    "Use scilink_job_status to check progress, "
+                    "then scilink_job_result to retrieve the result."
+                ),
+            }),
+        )]
+
+    result = await asyncio.to_thread(_execute_chat_captured, orch, prompt)
+    return [types.TextContent(type="text", text=result)]
 
 
 # ── Autonomy mode switch ─────────────────────────────────────────────────

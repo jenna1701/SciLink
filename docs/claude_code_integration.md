@@ -136,6 +136,15 @@ Available with `--mode plan` or `--mode both`:
 | `scilink_job_status` | Check status of a background job |
 | `scilink_job_result` | Retrieve result of a completed background job |
 
+### Orchestrator tools
+
+| Tool | Description |
+|------|-------------|
+| `scilink_orchestrate_analysis` | Delegate a complete analysis workflow to SciLink's analysis orchestrator via natural language |
+| `scilink_orchestrate_planning` | Delegate a complete planning workflow to SciLink's planning orchestrator via natural language |
+
+These tools wrap the full orchestrator chat loop. Instead of calling individual tools one by one (examine_data, select_agent, run_analysis, etc.), send a single natural-language prompt and the orchestrator handles the entire multi-step workflow using its domain-specific system prompt. Use `background=true` for non-trivial requests — the orchestrator may chain several internal tool calls and take minutes to complete.
+
 ## Usage examples
 
 Just chat naturally. The LLM calls SciLink tools automatically.
@@ -227,6 +236,7 @@ Tools that support background execution:
 - `get_recommendations` — measurement recommendations over a full analysis record
 - `generate_initial_plan`, `generate_implementation_code` — RAG + LLM generation
 - `run_economic_analysis` — technoeconomic analysis with knowledge retrieval
+- `orchestrate_analysis`, `orchestrate_planning` — full orchestrator chat loops
 
 ```
 run_analysis(data_path="...", background=true)
