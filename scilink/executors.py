@@ -10,7 +10,7 @@ import threading
 
 from .auth import get_api_key
 
-DEFAULT_TIMEOUT = 300
+DEFAULT_TIMEOUT = 600
 
 # Global registry of active subprocesses, keyed by thread ID.
 # Accessible from any thread so the UI stop handler can kill them.
