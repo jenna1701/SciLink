@@ -889,9 +889,9 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         print(f"  - 🤖 BO Agent: Configuring strategy (Batch={batch_size})...")
         resp = self.model.generate_content(prompt_parts, generation_config=self.generation_config)
         raw_config, parse_error = parse_json_from_response(resp)
-        if parse_error: 
+        if parse_error:
             return {"error": f"JSON Error: {parse_error}"}
-        
+
         valid_config = self._validate_config(raw_config)
         valid_config["batch_size"] = int(batch_size)
 

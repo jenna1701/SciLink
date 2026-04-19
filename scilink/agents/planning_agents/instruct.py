@@ -171,7 +171,7 @@ You are a Principal Investigator configuring a Single-Objective Bayesian Optimiz
 
 **INPUTS:**
 1. **Context:** User's objective and the **Fixed Batch Size** constraint.
-2. **Trend:** History of previous steps. Watch for plateaus in best-found — if best has not moved recently, the current strategy may be stuck and pure exploration may be warranted.
+2. **Trend:** History of previous steps. If best-found has not improved for 5+ steps despite kernel/noise changes, the optimizer is likely trapped in a local-minimum basin — not suffering a model-calibration problem. Switch to `max_variance` for 2-3 steps to sample elsewhere in the space before returning to exploitation; do not commit harder to the current best region.
 3. **Data:** Statistics of current dataset.
 4. **Experimental Budget:** How many optimization iterations remain in the campaign,
    along with a recommended phase and guidance. **You MUST follow the budget guidance
@@ -244,7 +244,7 @@ You are a Principal Investigator configuring a Multi-Objective Optimization expe
 
 **INPUTS:**
 1. **Context:** User's objective and **Fixed Batch Size** constraint.
-2. **Trend:** History of previous steps. Watch for plateaus in best-found — if best has not moved recently, the current strategy may be stuck and pure exploration may be warranted.
+2. **Trend:** History of previous steps. If best-found has not improved for 5+ steps despite kernel/noise changes, the optimizer is likely trapped in a local-minimum basin — not suffering a model-calibration problem. Switch to `max_variance` for 2-3 steps to sample elsewhere in the space before returning to exploitation; do not commit harder to the current best region.
 3. **Data:** Statistics of current dataset.
 4. **Experimental Budget:** How many optimization iterations remain in the campaign,
    along with a recommended phase and guidance. **You MUST follow the budget guidance
@@ -307,7 +307,7 @@ You are a Data Scientist validating a GP model and its optimization strategy.
 Analyze the 4-panel diagnostic dashboard.
 
 **Checklist:**
-1. **LOO-CV Residuals (Top-Left):** Each bar shows the prediction error when that point is left out. The pink band is the GP's epistemic 1σ (mean uncertainty only — observation noise not included), so some residuals extending past it is expected. Only flag the model as miscalibrated if most bars exceed the band, or if any residual exceeds it by ~3×. For large datasets (>50 points), training residuals are shown instead and will be near-zero, which is expected.
+1. **LOO-CV Residuals (Top-Left):** Each bar shows the prediction error when that point is left out. The pink band is the GP's epistemic 1σ (mean uncertainty only — observation noise not included), so some residuals extending past it is expected. Only flag the model as miscalibrated if most bars exceed the band, or if any residual exceeds it by ~3×. On intrinsically multi-modal or rough landscapes, LOO-CV failures persist regardless of kernel/noise — they reflect the landscape, not miscalibration; if 3+ consecutive kernel/noise changes have not reduced residuals, accept the current config and pivot strategy instead of tuning further. For large datasets (>50 points), training residuals are shown instead and will be near-zero, which is expected.
 2. **Trend (Top-Right):** If optimization has started, is the green 'Best Found' line improving or flat? A flat line means the optimizer is stuck and may need a strategy change. If this is the first step, only initial data is shown (gray squares) — no trend to evaluate yet.
 3. **Acquisition Function (Bot-Left):** This panel shows the acquisition landscape used to select the next experiment(s).
    - For **1D/2D problems**: The full acquisition surface is shown. The peak (brightest region or curve maximum) should align with the red candidate marker — this confirms the optimizer is sampling where it believes the best improvement lies.
