@@ -130,7 +130,7 @@ def _run_bo_loop(df, input_cols, target_col, bounds, func, n_iters=5,
 
         bounds_tensor = np.array(bounds, dtype=np.float64)  # (d, 2) — fit() transposes internally
 
-        model_config = {"kernel": "matern_2.5", "noise": "fixed_low"}
+        model_config = {"kernel": "matern_2.5", "noise": "min_noise_low"}
         optimizer.fit(X, y_train, bounds_tensor, model_config, input_cols)
 
         candidates = optimizer.recommend(
@@ -306,7 +306,7 @@ def soo_batch_returns_correct_count():
     y = -df[["y"]].values.astype(np.float64)  # minimize
     bounds_arr = np.array(bounds, dtype=np.float64)
 
-    optimizer.fit(X, y, bounds_arr, {"kernel": "matern_2.5", "noise": "fixed_low"}, ["x"])
+    optimizer.fit(X, y, bounds_arr, {"kernel": "matern_2.5", "noise": "min_noise_low"}, ["x"])
 
     for batch_size in [1, 3, 5]:
         candidates = optimizer.recommend(n_candidates=batch_size, strategy="log_ei", params={})
@@ -329,7 +329,7 @@ def soo_candidates_within_bounds():
     y = -df[["y"]].values.astype(np.float64)
     bounds_arr = np.array(bounds, dtype=np.float64)
 
-    optimizer.fit(X, y, bounds_arr, {"kernel": "matern_2.5", "noise": "fixed_low"}, ["x1", "x2"])
+    optimizer.fit(X, y, bounds_arr, {"kernel": "matern_2.5", "noise": "min_noise_low"}, ["x1", "x2"])
 
     candidates = optimizer.recommend(n_candidates=5, strategy="log_ei", params={})
 
@@ -364,7 +364,7 @@ def moo_2d_pareto_improvement():
     bounds_arr = np.array(bounds, dtype=np.float64)
 
     optimizer.fit(X, np.column_stack([y1, y2]), bounds_arr,
-                  {"kernel": "matern_2.5", "noise": "fixed_low"},
+                  {"kernel": "matern_2.5", "noise": "min_noise_low"},
                   ["x1", "x2"])
 
     candidates = optimizer.recommend(n_candidates=3, strategy="pareto", params={})
@@ -663,7 +663,7 @@ def bo_with_3_data_points():
     y = -df[["y"]].values.astype(np.float64)
     bounds_arr = np.array(bounds, dtype=np.float64)
 
-    optimizer.fit(X, y, bounds_arr, {"kernel": "matern_2.5", "noise": "fixed_low"}, ["x"])
+    optimizer.fit(X, y, bounds_arr, {"kernel": "matern_2.5", "noise": "min_noise_low"}, ["x"])
     candidates = optimizer.recommend(n_candidates=1, strategy="log_ei", params={})
 
     ok = len(candidates) == 1 and 0.0 <= candidates[0][0] <= 6.0
@@ -684,7 +684,7 @@ def bo_different_kernels():
     bounds_arr = np.array(bounds, dtype=np.float64)
 
     for kernel in ["matern_2.5", "matern_1.5", "rbf"]:
-        optimizer.fit(X, y, bounds_arr, {"kernel": kernel, "noise": "fixed_low"}, ["x"])
+        optimizer.fit(X, y, bounds_arr, {"kernel": kernel, "noise": "min_noise_low"}, ["x"])
         candidates = optimizer.recommend(n_candidates=1, strategy="log_ei", params={})
         if len(candidates) != 1:
             return False, f"kernel={kernel} failed to produce candidate"
@@ -705,7 +705,7 @@ def bo_different_acquisition_functions():
     y = -df[["y"]].values.astype(np.float64)
     bounds_arr = np.array(bounds, dtype=np.float64)
 
-    optimizer.fit(X, y, bounds_arr, {"kernel": "matern_2.5", "noise": "fixed_low"}, ["x"])
+    optimizer.fit(X, y, bounds_arr, {"kernel": "matern_2.5", "noise": "min_noise_low"}, ["x"])
 
     strategies = [
         ("log_ei", {}),
@@ -835,7 +835,7 @@ def llm_guided_vs_fixed_on_multimodal():
 
 @_test
 def llm_adapts_noise_prior():
-    """On noisy data, LLM should select learnable/high_noise prior (not fixed_low)."""
+    """On noisy data, LLM should select a higher-floor noise prior (not min_noise_low)."""
     d = _tmp()
     output_dir = d / "bo_artifacts"
     output_dir.mkdir()
@@ -873,8 +873,8 @@ def llm_adapts_noise_prior():
     strategy = result.get("strategy", {})
     noise = strategy.get("model_config", {}).get("noise", "unknown")
 
-    # LLM should recognize noisy data and NOT use fixed_low
-    ok = noise in ("learnable", "high_noise")
+    # LLM should recognize noisy data and NOT use min_noise_low
+    ok = noise in ("min_noise_med", "min_noise_high")
     return ok, f"noise_prior={noise}, rationale={strategy.get('rationale', '')[:150]}"
 
 
