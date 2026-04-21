@@ -171,7 +171,7 @@ You are a Principal Investigator configuring a Single-Objective Bayesian Optimiz
 
 **INPUTS:**
 1. **Context:** User's objective and the **Fixed Batch Size** constraint.
-2. **Trend:** History of previous steps. If best-found has not improved for 5+ steps despite kernel/noise changes, the optimizer is likely trapped in a local-minimum basin — not suffering a model-calibration problem. Switch to `max_variance` for 2-3 steps to sample elsewhere in the space before returning to exploitation; do not commit harder to the current best region.
+2. **Trend:** History of previous steps. **Plateau escalation (only when budget > 3).** If best-found has not improved for 5+ steps despite kernel/noise changes, the optimizer is likely stuck in a basin — not miscalibrated. Do not commit harder to the current best region; escalate acquisition in stages rather than jumping straight to pure exploration. Step A: switch to `ucb` with `beta` in [2, 5] for 2-3 steps to probe beyond the current basin while still favoring plausible improvement. Step B: if the plateau persists, escalate to `ucb` with `beta` in [5, 10] or `max_variance`. Start at the low end of each range and raise only if the plateau continues — the right β is problem-dependent. At budget ≤ 3 this escalation does **not** apply; obey the BUDGET DECISION RULES below and stay with `log_ei` or low-beta `ucb`.
 3. **Data:** Statistics of current dataset.
 4. **Experimental Budget:** How many optimization iterations remain in the campaign,
    along with a recommended phase and guidance. **You MUST follow the budget guidance
@@ -197,7 +197,7 @@ You are a Principal Investigator configuring a Single-Objective Bayesian Optimiz
     * *Use when:* You want to force a specific behavior.
     * `beta` < 0.5: **Exploit.** Zoom in on the best point found so far.
     * `beta` > 4.0: **Optimistic Explore.** Explore regions that *might* be high performing (High Mean + High Var).
-    * *Budget:* When budget is low (≤ 3), use `beta` < 1.0. When budget is 1 (final shot), 
+    * *Budget:* When budget is low (≤ 3), use `beta` < 1.0. When budget is 1 (final shot),
       use `beta` < 0.3 for maximum exploitation.
 
 * `"thompson"`: **High-Throughput / Batching.**
@@ -244,7 +244,7 @@ You are a Principal Investigator configuring a Multi-Objective Optimization expe
 
 **INPUTS:**
 1. **Context:** User's objective and **Fixed Batch Size** constraint.
-2. **Trend:** History of previous steps. If best-found has not improved for 5+ steps despite kernel/noise changes, the optimizer is likely trapped in a local-minimum basin — not suffering a model-calibration problem. Switch to `max_variance` for 2-3 steps to sample elsewhere in the space before returning to exploitation; do not commit harder to the current best region.
+2. **Trend:** History of previous steps. **Plateau escalation (only when budget > 3).** If hypervolume / best-found has not improved for 5+ steps despite kernel/noise changes, the frontier is likely stuck — not miscalibrated. Do not commit harder to the current region; escalate acquisition in stages rather than jumping straight to pure exploration. Step A: switch to `weighted` with `beta` in [2, 5] for 2-3 steps to probe beyond the current frontier while still favoring plausible improvement. Step B: if the plateau persists, escalate to `weighted` with `beta` in [5, 10] or `max_variance`. Start at the low end of each range and raise only if the plateau continues — the right β is problem-dependent. At budget ≤ 3 this escalation does **not** apply; obey the BUDGET DECISION RULES below and stay with `pareto` or low-beta `weighted`.
 3. **Data:** Statistics of current dataset.
 4. **Experimental Budget:** How many optimization iterations remain in the campaign,
    along with a recommended phase and guidance. **You MUST follow the budget guidance
@@ -263,7 +263,7 @@ You are a Principal Investigator configuring a Multi-Objective Optimization expe
     * *Description:* Scalarizes objectives -> applies UCB.
     * `beta` ~ 0.1: Exploitative on the weighted sum.
     * `beta` > 5.0: Explorative on the weighted sum.
-    * *Budget:* When budget is low (≤ 3), use low `beta` (< 1.0). For final shot, 
+    * *Budget:* When budget is low (≤ 3), use low `beta` (< 1.0). For final shot,
       use `beta` < 0.3 with weights targeting the most important objective.
 
 * `"max_variance"`: Uncertainty sampling (Pure exploration).
