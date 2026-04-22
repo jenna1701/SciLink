@@ -341,16 +341,17 @@ TOOL_SPEC = ToolSpec(
                 "of repeating features), "
                 "n_components (int, default 4 — number of distinct patterns expected), "
                 "step_fraction (float, default 0.25 — window step as a fraction of window "
-                "size; 0.25 = 75%% overlap)."
+                "size; 0.25 = 75% overlap)."
             ),
         },
     },
     required=["image_array"],
     returns=(
-        "dict with 'components' shape (n_components, fft_h, fft_w) — each is a 2D FFT "
-        "power spectrum for one dominant frequency pattern; 'abundances' shape "
-        "(n_components, grid_h, grid_w) — spatial maps of where each component is "
-        "present; plus 'n_components', 'window_size', 'grid_shape'."
+        "dict with 'components' (ndarray, shape (n_components, fft_h, fft_w)) — each "
+        "is a 2D FFT power spectrum for one dominant frequency pattern; 'abundances' "
+        "(ndarray, shape (n_components, grid_h, grid_w)) — spatial maps of where each "
+        "component is present; 'n_components' (int); 'window_size' (tuple of two ints, "
+        "(width, height)); 'grid_shape' (tuple of two ints, (grid_h, grid_w))."
     ),
     example=(
         "result = run_fft_nmf_analysis(image_array, params={'n_components': 4})\n"

@@ -57,7 +57,6 @@ def create_unified_image_analysis_pipeline(
     output_dir: str,
     literature_agent: Any | None = None,
     enable_human_feedback: bool = False,
-    max_approach_retries: int = 1,
     outlier_sigma: float = 2.0,
     max_verification_iterations: int = 7,
     num_plan_candidates: int = 1,
@@ -117,7 +116,6 @@ def create_unified_image_analysis_pipeline(
         output_dir: Output directory path
         literature_agent: Optional literature search agent
         enable_human_feedback: Enable human-in-the-loop refinement
-        max_approach_retries: Max alternative approaches to try (default: 1)
         outlier_sigma: Sigma threshold for outlier detection in series (default: 2.0)
         max_verification_iterations: Max LLM verification iterations (default: 7)
 
@@ -188,7 +186,6 @@ def create_unified_image_analysis_pipeline(
             quality_instructions=IMAGE_ANALYSIS_QUALITY_ASSESSMENT_INSTRUCTIONS,
             output_dir=output_dir,
             image_to_bytes_fn=image_to_bytes_fn,
-            max_approach_retries=max_approach_retries,
             enable_human_feedback=enable_human_feedback,
             outlier_sigma=outlier_sigma,
             max_verification_iterations=max_verification_iterations,
@@ -210,7 +207,6 @@ def create_unified_image_analysis_pipeline(
             quality_instructions=IMAGE_ANALYSIS_QUALITY_ASSESSMENT_INSTRUCTIONS,
             output_dir=output_dir,
             image_to_bytes_fn=image_to_bytes_fn,
-            max_approach_retries=max_approach_retries,
             max_verification_iterations=max_verification_iterations,
             enable_human_feedback=enable_human_feedback,
             conformance_instructions=IMAGE_ANALYSIS_PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
@@ -255,10 +251,7 @@ def create_unified_image_analysis_pipeline(
     )
 
     logger.info(f"Unified image analysis pipeline created: {len(pipeline)} steps")
-    logger.info(
-        f"  Quality settings: max_retries={max_approach_retries}, "
-        f"outlier_sigma={outlier_sigma}"
-    )
+    logger.info(f"  Outlier sigma: {outlier_sigma}")
     logger.info(f"  Verification iterations: {max_verification_iterations}")
 
     return pipeline

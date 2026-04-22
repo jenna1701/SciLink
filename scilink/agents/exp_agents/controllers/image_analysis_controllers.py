@@ -1355,14 +1355,13 @@ class UnifiedImageProcessingController:
 
     Quality control features:
     - LLM-based quality verification of analysis results
-    - If quality is inadequate, automatically tries alternative pipelines (max_approach_retries)
-    - If still inadequate and human feedback enabled, asks for guidance
+    - Annealing-driven refinement loop inside the verification iterations
+    - If quality remains inadequate and human feedback is enabled, asks for guidance
     - Otherwise proceeds with best available result
     - For series: detects statistical outliers that may indicate interesting physics
     """
 
     MAX_ATTEMPTS = 5
-    DEFAULT_MAX_APPROACH_RETRIES = 1
     DEFAULT_OUTLIER_SIGMA = 2.0
     DEFAULT_MAX_VERIFICATION_ITERATIONS = 7
     DEFAULT_QUALITY_THRESHOLD = 0.7
@@ -1393,6 +1392,31 @@ class UnifiedImageProcessingController:
         "You have full freedom to suggest any pipeline or method change the data "
         "warrants. The only requirement is that you justify every deviation from "
         "the original plan based on what you observe in the images.\n",
+    )
+
+    # Tool-use constraint, graded with the same annealing ladder.
+    # At T=0 the verifier and refinement LLM must stay within the tool's
+    # documented parameters; at T=1 they prefer to but may replace the
+    # tool with justification; at T=2 there is no extra constraint because
+    # the main annealing directive already grants full pipeline freedom.
+    _TOOL_CONSTRAINT_SCHEDULE = (
+        # T=0 strict
+        "\n**Registered tool constraints:**\n"
+        "When the pipeline uses a registered tool (any function imported from "
+        "`scilink.tools.*`), your suggested fixes must be achievable via that "
+        "tool's documented parameters OR via preprocessing / postprocessing that "
+        "happens OUTSIDE the tool call. Do not suggest modifications to the "
+        "tool's internal algorithm. If the tool's documented parameters cannot "
+        "fix the issue, say so explicitly rather than inventing internal "
+        "modifications that would force the code generator to bypass the tool.\n",
+        # T=1 preferred
+        "\n**Registered tool constraints (eased):**\n"
+        "Prefer keeping registered tools in the pipeline and expressing fixes "
+        "through their documented parameters. If you must recommend replacing a "
+        "tool with custom code, briefly state why the tool's parameters could "
+        "not address the issue.\n",
+        # T=2 open — main annealing already grants full freedom
+        "",
     )
 
     # Same annealing applied to domain skill strictness during analysis.
@@ -1449,46 +1473,6 @@ more complete coverage), select it even if it is not perfect. Only return accept
 results are fundamentally flawed.
 '''
 
-    ALTERNATIVE_APPROACH_PROMPT = '''The current image analysis pipeline produced unsatisfactory results.
-
-**Current Pipeline:** {current_pipeline}
-**Quality Score:** {quality_score:.2f}
-**Quality Issues:** {quality_issues}
-
-**Image Statistics:**
-{image_stats}
-
-**Original Analysis Approach:** {analysis_approach}
-{previous_attempts_section}
-**IMPORTANT:** Examine the analysis visualization provided below carefully. Look for:
-1. False positives (artifacts incorrectly identified as features)
-2. Missed features (visible structures not captured)
-3. Incorrect segmentation (wrong boundaries, merged objects, split objects)
-4. Preprocessing issues (too much/too little filtering)
-
-Based on your visual inspection and the quality assessment, suggest an alternative analysis pipeline.
-
-**Required features:** Your alternative should extract these features for consistency with the rest of the series: {required_features}
-If a feature is physically unavailable (e.g., domains fully coalesced so individual count is meaningless), set its value to null and note the reason — do not fabricate values. You may add extra features.
-
-**Physics-first rule:** Before changing the pipeline drastically, first try improving the existing approach:
-1. Different thresholding method (e.g., adaptive instead of global, or different threshold level)
-2. Better preprocessing (different denoising, contrast enhancement)
-3. Morphological post-processing (opening/closing to clean up segmentation)
-4. Different feature extraction parameters
-
-Only switch to a fundamentally different approach if the current pipeline is clearly wrong for this
-type of image (e.g., using edge detection when segmentation is needed).
-
-Return JSON with:
-{{
-    "diagnosis": "specific description of what you observe is wrong with the current analysis based on the visualization",
-    "alternative_pipeline": "description of the new processing pipeline to try",
-    "analysis_approach": "updated analysis approach description",
-    "features_to_extract": ["list", "of", "features"]
-}}
-'''
-
     HUMAN_FEEDBACK_PROMPT = '''## Analysis Quality Issue
 
 The automated image analysis could not achieve adequate quality.
@@ -1517,7 +1501,6 @@ Your guidance: '''
         quality_instructions: str,
         output_dir: str,
         image_to_bytes_fn: Callable,
-        max_approach_retries: int = None,
         enable_human_feedback: bool = False,
         outlier_sigma: float = None,
         max_verification_iterations: int = None,
@@ -1534,7 +1517,6 @@ Your guidance: '''
         self.quality_instructions = quality_instructions
         self.output_dir = Path(output_dir)
         self.image_to_bytes_fn = image_to_bytes_fn
-        self.max_approach_retries = max_approach_retries if max_approach_retries is not None else self.DEFAULT_MAX_APPROACH_RETRIES
         self.enable_human_feedback = enable_human_feedback
         self.outlier_sigma = outlier_sigma if outlier_sigma is not None else self.DEFAULT_OUTLIER_SIGMA
         self.max_verification_iterations = max_verification_iterations if max_verification_iterations is not None else self.DEFAULT_MAX_VERIFICATION_ITERATIONS
@@ -1567,6 +1549,8 @@ Your guidance: '''
                     lines.append(f"- `{name}`{shape_str}")
                 context_parts.append("\n".join(lines))
 
+        from ....tools._registry import format_tool_inventory
+
         prompt = self.script_instructions.format(
             analysis_approach=config.get("analysis_approach", "Analyze the image"),
             processing_pipeline=config.get("processing_pipeline", "Standard processing"),
@@ -1577,6 +1561,7 @@ Your guidance: '''
             dtype=stats.get("dtype", "unknown"),
             intensity_min=stats.get("intensity_range", [0, 255])[0],
             intensity_max=stats.get("intensity_range", [0, 255])[1],
+            tool_inventory=format_tool_inventory("image_analysis"),
         )
 
         response = self.model.generate_content(prompt)
@@ -1597,11 +1582,14 @@ Your guidance: '''
             explanation of what went wrong and how it was fixed, or None.
         """
         config = state.get("locked_analysis_config", {})
+        from ....tools._registry import format_tool_inventory
+
         prompt = self.correction_instructions.format(
             analysis_approach=config.get("analysis_approach", ""),
             processing_pipeline=config.get("processing_pipeline", ""),
             failed_script=script,
             error_message=error_msg,
+            tool_inventory=format_tool_inventory("image_analysis"),
         )
         skill_sections = state.get("skill_sections")
         if skill_sections and skill_sections.get("analysis"):
@@ -1910,86 +1898,6 @@ Your guidance: '''
             "script_errors": script_errors,
         }
 
-    def _suggest_alternative_approach(
-        self, state: dict, current_result: dict,
-        previous_attempts: List[dict] = None,
-    ) -> Optional[dict]:
-        """Use LLM to suggest an alternative analysis pipeline, showing the actual poor result.
-
-        Args:
-            previous_attempts: List of dicts with keys 'pipeline', 'score',
-                'diagnosis', 'recommended_action' from prior alternative attempts.
-                Injected into the prompt so the LLM doesn't repeat failed approaches.
-        """
-        config = state.get("locked_analysis_config", {})
-        quality_issues = current_result.get("_quality_issues", "Quality below threshold")
-
-        # Build previous attempts section
-        prev_section = ""
-        if previous_attempts:
-            lines = [
-                "\n## PREVIOUSLY TRIED APPROACHES (do NOT repeat these)",
-                "The following approaches were already attempted and failed. "
-                "You MUST suggest something fundamentally different.\n",
-            ]
-            for i, prev in enumerate(previous_attempts, 1):
-                lines.append(f"### Attempt {i}")
-                lines.append(f"- Pipeline: {prev.get('pipeline', 'N/A')}")
-                lines.append(f"- Score: {prev.get('score', 'N/A')}")
-                if prev.get("diagnosis"):
-                    lines.append(f"- Diagnosis: {prev['diagnosis']}")
-                if prev.get("recommended_action"):
-                    lines.append(f"- Verifier recommended: {prev['recommended_action']}")
-                lines.append("")
-            prev_section = "\n".join(lines)
-
-        required_features = config.get("features_to_extract", [])
-        prompt_text = self.ALTERNATIVE_APPROACH_PROMPT.format(
-            current_pipeline=config.get("processing_pipeline", "Unknown"),
-            quality_score=current_result.get("_quality_score", 0.0),
-            quality_issues=quality_issues,
-            image_stats=json.dumps(current_result.get("statistics", {}), indent=2),
-            analysis_approach=config.get("analysis_approach", ""),
-            previous_attempts_section=prev_section,
-            required_features=", ".join(required_features) if required_features else "same as original plan",
-        )
-
-        prompt_parts = [prompt_text]
-
-        # Include the actual analysis visualization so LLM can see what went wrong
-        if current_result.get("visualization_bytes"):
-            prompt_parts.append("\n\n**CURRENT ANALYSIS VISUALIZATION (showing the poor result):**")
-            prompt_parts.append({
-                "mime_type": "image/png",
-                "data": current_result["visualization_bytes"]
-            })
-            prompt_parts.append(
-                "\nExamine this visualization carefully. Look at where the analysis "
-                "went wrong and suggest a better pipeline."
-            )
-
-        # Also include original image for comparison
-        if state.get("original_image_bytes"):
-            prompt_parts.append("\n\n**ORIGINAL IMAGE:**")
-            prompt_parts.append({
-                "mime_type": "image/jpeg",
-                "data": state["original_image_bytes"]
-            })
-
-        try:
-            response = self.model.generate_content(
-                contents=prompt_parts,
-                generation_config=self.generation_config,
-                safety_settings=self.safety_settings,
-            )
-            result, error = self._parse(response)
-            if error or not result:
-                return None
-            return result
-        except Exception as e:
-            self.logger.error(f"Failed to get alternative approach suggestion: {e}")
-            return None
-
     QUALITY_VERIFICATION_PROMPT = '''You are a scientific image analysis expert reviewing an analysis result.
 
 **TASK:** Compare the analysis visualization against the original image and score the result.
@@ -2063,6 +1971,10 @@ Estimate Completeness, Precision, and Plausibility separately, then average.
 
 ---
 
+{tool_constraint}
+
+---
+
 {plan_constraint}
 
 ---
@@ -2125,6 +2037,8 @@ Return JSON:
             max_iter = max(self.max_verification_iterations, 1)
             level = min(verification_iter * n_levels // max_iter, n_levels - 1)
         plan_constraint = schedule[level]
+        tool_schedule = self._TOOL_CONSTRAINT_SCHEDULE
+        tool_constraint = tool_schedule[min(level, len(tool_schedule) - 1)]
 
         prompt_text = self.QUALITY_VERIFICATION_PROMPT.format(
             analysis_approach=config.get("analysis_approach", "Unknown"),
@@ -2134,6 +2048,7 @@ Return JSON:
             metrics=metrics_str,
             quality_threshold=self.quality_threshold,
             plan_constraint=plan_constraint,
+            tool_constraint=tool_constraint,
         )
 
         # Add history context
@@ -2220,6 +2135,10 @@ Return JSON:
         annealing_level = state.get("_annealing_level", 0)
         schedule = self._CONSTRAINT_ANNEALING_SCHEDULE
         constraint_text = schedule[min(annealing_level, len(schedule) - 1)]
+        tool_schedule = self._TOOL_CONSTRAINT_SCHEDULE
+        tool_constraint = tool_schedule[
+            min(annealing_level, len(tool_schedule) - 1)
+        ]
 
         refinement_prompt = f"""Refine the image analysis approach based on automated verification feedback.
 
@@ -2227,6 +2146,7 @@ Return JSON:
 - Pipeline: {config.get('processing_pipeline', 'Unknown')}
 - Approach: {config.get('analysis_approach', 'Unknown')}
 {constraint_text}
+{tool_constraint}
 **VERIFICATION FINDINGS:**
 {chr(10).join(issues_summary) if issues_summary else 'No specific issues listed'}
 
@@ -2271,9 +2191,8 @@ Return JSON with the refined analysis approach:
         """Ask user for guidance when automated quality is poor."""
         # Build concise summary grouped by attempt type
         lines = []
-        initial = [a for a in all_attempts if not str(a["pipeline"]).startswith(("Verification", "Alternative", "User"))]
+        initial = [a for a in all_attempts if not str(a["pipeline"]).startswith(("Verification", "User"))]
         verifications = [a for a in all_attempts if str(a["pipeline"]).startswith("Verification")]
-        alternatives = [a for a in all_attempts if not str(a["pipeline"]).startswith(("Verification", "User")) and a not in initial]
         user_guided = [a for a in all_attempts if str(a["pipeline"]).startswith("User")]
 
         if initial:
@@ -2281,8 +2200,6 @@ Return JSON with the refined analysis approach:
         if verifications:
             scores = [f"{v['score']:.2f}" for v in verifications]
             lines.append(f"  Verification refinements ({len(verifications)}): scores = {', '.join(scores)}")
-        for i, a in enumerate(alternatives, 1):
-            lines.append(f"  Alternative {i}: score = {a['score']:.2f}")
         for a in user_guided:
             lines.append(f"  User-guided: score = {a['score']:.2f}")
 
@@ -2812,205 +2729,6 @@ Return JSON with:
                 "result": result,
             })
 
-        # --- Alternative approach retries ---
-        current_config = state.get("locked_analysis_config", {}).copy()
-        alternative_history = []
-
-        # Seed history with the initial locked approach
-        initial_verification = (
-            all_attempts[-1].get("result", {}) if all_attempts else {}
-        )
-        alternative_history.append({
-            "pipeline": initial_pipeline,
-            "score": best_score,
-            "diagnosis": "Initial locked approach",
-            "recommended_action": initial_verification.get(
-                "_last_recommended_action", ""
-            ),
-        })
-
-        for retry in range(self.max_approach_retries):
-            self.logger.info(
-                f"   Alternative approach {retry + 1}/"
-                f"{self.max_approach_retries}..."
-            )
-
-            alternative = self._suggest_alternative_approach(
-                state, best_result or result,
-                previous_attempts=alternative_history,
-            )
-
-            if not alternative:
-                self.logger.warning(
-                    "   Could not generate alternative approach suggestion"
-                )
-                break
-
-            print("\n" + "=" * 60)
-            print(f"📋 ALTERNATIVE APPROACH {retry + 1}/{self.max_approach_retries}")
-            print("=" * 60)
-            print(f"\n🔍 Diagnosis:\n   {alternative.get('diagnosis', 'N/A')}")
-            print(f"\n📊 Approach:\n   {alternative.get('analysis_approach', 'N/A')}")
-            _pipeline = alternative.get("alternative_pipeline", "N/A")
-            if isinstance(_pipeline, list):
-                _pipeline = " -> ".join(str(s) for s in _pipeline)
-            _pipeline = re.sub(r"\. (\d+)\. ", r".\n   \1. ", _pipeline)
-            print(f"\n⚙️  Pipeline:\n   {_pipeline}")
-            print(f"\n🎯 Features:\n   {', '.join(alternative.get('features_to_extract', []))}")
-            print("=" * 60)
-
-            temp_config = current_config.copy()
-            temp_config["processing_pipeline"] = alternative.get(
-                "alternative_pipeline",
-                temp_config.get("processing_pipeline"),
-            )
-            temp_config["analysis_approach"] = alternative.get(
-                "analysis_approach",
-                temp_config.get("analysis_approach"),
-            )
-            temp_config["features_to_extract"] = alternative.get(
-                "features_to_extract",
-                temp_config.get("features_to_extract", []),
-            )
-
-            original_config = state.get("locked_analysis_config")
-            state["locked_analysis_config"] = temp_config
-
-            alt_result = self._process_single_image(
-                state=state, image_data=image_data, data_path=data_path,
-                image_name=image_name, image_idx=image_idx, base_script=None,
-            )
-
-            state["locked_analysis_config"] = original_config
-
-            if alt_result["success"]:
-                # Verify and allow one re-analysis if fixable
-                alt_verification = self._verify_quality(state, alt_result)
-                if alt_verification:
-                    alt_score = alt_verification.get("quality_score", 0.0)
-                    if isinstance(alt_score, str):
-                        try:
-                            alt_score = float(alt_score)
-                        except (ValueError, TypeError):
-                            alt_score = 0.0
-
-                    # One re-analysis chance if below threshold
-                    if alt_score < quality_threshold:
-                        self.logger.info(
-                            f"   Score = {alt_score:.2f}, attempting one re-analysis..."
-                        )
-                        refined = self._apply_verification_feedback(
-                            state, alt_verification
-                        )
-                        refined.pop("_refinement_error", None)
-                        if refined != temp_config:
-                            state["locked_analysis_config"] = refined
-                            reanalysis = self._process_single_image(
-                                state=state, image_data=image_data,
-                                data_path=data_path,
-                                image_name=image_name,
-                                image_idx=image_idx, base_script=None,
-                            )
-                            state["locked_analysis_config"] = original_config
-                            if reanalysis["success"]:
-                                re_verif = self._verify_quality(
-                                    state, reanalysis
-                                )
-                                if re_verif:
-                                    re_score = re_verif.get(
-                                        "quality_score", 0.0
-                                    )
-                                    if isinstance(re_score, str):
-                                        try:
-                                            re_score = float(re_score)
-                                        except (ValueError, TypeError):
-                                            re_score = 0.0
-                                    if re_score > alt_score:
-                                        alt_score = re_score
-                                        alt_result = reanalysis
-                                        temp_config = refined
-                                        self.logger.info(
-                                            f"   Re-analysis improved: {re_score:.2f}"
-                                        )
-                else:
-                    alt_score = 0.0
-                alt_result["_quality_score"] = alt_score
-                all_attempts.append({
-                    "pipeline": alternative.get(
-                        "alternative_pipeline",
-                        f"Alternative {retry + 1}",
-                    ),
-                    "score": alt_score,
-                    "result": alt_result,
-                    "config": temp_config,
-                })
-
-                if alt_score > best_score:
-                    best_score = alt_score
-                    best_result = alt_result
-                    best_config = temp_config.copy()
-                    best_result["_winning_config"] = temp_config
-
-                if alt_score >= quality_threshold:
-                    self.logger.info(
-                        f"Quality score = {alt_score:.2f} "
-                        f"(meets threshold with alternative pipeline)"
-                    )
-                    if _is_anchor:
-                        state["locked_analysis_config"] = temp_config
-
-                        if (
-                            self.enable_human_feedback
-                            and alt_result.get("visualization_bytes")
-                        ):
-                            user_feedback = self._get_user_feedback_on_result(
-                                state, alt_result, alt_score
-                            )
-                            if user_feedback:
-                                alt_result, alt_score = self._apply_user_feedback(
-                                    state, user_feedback, alt_result, alt_score,
-                                    image_data, data_path, image_name,
-                                    image_idx, all_attempts,
-                                )
-
-                    return alt_result
-                else:
-                    self.logger.warning(
-                        f"   Score = {alt_score:.2f} (still below threshold)"
-                    )
-
-                # Record this attempt for cross-attempt memory
-                alternative_history.append({
-                    "pipeline": alternative.get("alternative_pipeline", "N/A"),
-                    "score": alt_score,
-                    "diagnosis": alternative.get("diagnosis", ""),
-                    "recommended_action": (
-                        alt_verification.get("recommended_action", "")
-                        if alt_verification else ""
-                    ),
-                })
-            else:
-                self.logger.warning(
-                    f"   Alternative pipeline failed: "
-                    f"{alt_result.get('error', 'Unknown')[:50]}"
-                )
-                all_attempts.append({
-                    "pipeline": alternative.get(
-                        "alternative_pipeline",
-                        f"Alternative {retry + 1}",
-                    ),
-                    "score": 0,
-                    "result": alt_result,
-                })
-
-                # Record failed attempt too
-                alternative_history.append({
-                    "pipeline": alternative.get("alternative_pipeline", "N/A"),
-                    "score": 0,
-                    "diagnosis": alternative.get("diagnosis", ""),
-                    "recommended_action": "Script execution failed",
-                })
-
         # --- Human feedback for poor quality (if enabled) ---
         if self.enable_human_feedback and _is_anchor:
             feedback_result = self._get_human_feedback_for_poor_quality(
@@ -3090,37 +2808,29 @@ Return JSON with:
                     ][:500]
 
         # --- Summarize plan history ---
-        used_alternative = best_result and best_result.get("_winning_config")
-        if used_alternative or len(all_attempts) > 1:
+        multiple_attempts = len(all_attempts) > 1
+        if multiple_attempts:
             summary_lines = []
             summary_lines.append(
                 f"Original plan: {initial_pipeline[:100]}"
             )
-            if len(all_attempts) > 1:
+            summary_lines.append(
+                f"Original plan score: "
+                f"{all_attempts[0].get('score', 'N/A')}"
+            )
+            for a in all_attempts[1:]:
                 summary_lines.append(
-                    f"Original plan score: "
-                    f"{all_attempts[0].get('score', 'N/A')}"
+                    f"{a.get('pipeline', 'N/A')[:80]} "
+                    f"(score: {a.get('score', 'N/A')})"
                 )
-                for i, a in enumerate(all_attempts[1:], 1):
-                    summary_lines.append(
-                        f"Alternative {i}: "
-                        f"{a.get('pipeline', 'N/A')[:80]} "
-                        f"(score: {a.get('score', 'N/A')})"
-                    )
-            if used_alternative:
-                winning = best_result["_winning_config"]
-                summary_lines.append(
-                    f"Selected: {winning.get('processing_pipeline', 'N/A')[:80]}"
-                )
-            else:
-                summary_lines.append(
-                    f"Selected: original plan (best available)"
-                )
+            summary_lines.append(
+                "Selected: original plan (best available)"
+            )
 
             plan_summary = "\n".join(summary_lines)
 
             print("\n" + "=" * 60)
-            print("📋 PLAN DEVIATION SUMMARY")
+            print("📋 REFINEMENT HISTORY")
             print("=" * 60)
             for line in summary_lines:
                 print(f"   {line}")
@@ -3135,7 +2845,7 @@ Return JSON with:
             best_result["attempted_pipelines"] = [
                 a["pipeline"] for a in all_attempts
             ]
-            if used_alternative or len(all_attempts) > 1:
+            if multiple_attempts:
                 best_result["plan_deviation_summary"] = plan_summary
             self.logger.warning(
                 f"Proceeding with best available result "
@@ -3239,14 +2949,6 @@ Return JSON with:
                     "fix_applied": entry.get("recommended_action", ""),
                 }
                 for entry in verification_history
-            ],
-            "alternative_approaches": [
-                {
-                    "pipeline": a["pipeline"],
-                    "score": a["score"],
-                    "diagnosis": a.get("diagnosis", ""),
-                }
-                for a in all_attempts[1:]
             ],
             "script_errors": script_errors or [],
             "judge_reasoning": (
@@ -3809,7 +3511,6 @@ Return JSON: {{"diagnosis": "what you changed and why", "script": "full Python s
         mode_str = "SINGLE IMAGE" if is_single else f"SERIES ({num_images} images)"
         self.logger.info("")
         self.logger.info(f"IMAGE ANALYSIS: {mode_str}")
-        self.logger.info(f"   Max approach retries: {self.max_approach_retries}")
         if not is_single:
             self.logger.info(
                 f"   Outlier detection: {self.outlier_sigma} sigma"
@@ -4047,7 +3748,6 @@ Return JSON: {{"diagnosis": "what you changed and why", "script": "full Python s
                 "is_single_image": is_single,
                 "series_metadata": state.get("series_metadata", {}),
                 "quality_settings": {
-                    "max_approach_retries": self.max_approach_retries,
                     "outlier_sigma": self.outlier_sigma,
                 },
                 "locked_config": state.get("locked_analysis_config"),
@@ -4218,7 +3918,6 @@ class ImageAdaptiveRefitController:
         quality_instructions: str,
         output_dir: str,
         image_to_bytes_fn: Callable,
-        max_approach_retries: int = 1,
         max_verification_iterations: int = 7,
         enable_human_feedback: bool = False,
         conformance_instructions: str = "",
@@ -4241,7 +3940,6 @@ class ImageAdaptiveRefitController:
             quality_instructions=quality_instructions,
             output_dir=output_dir,
             image_to_bytes_fn=image_to_bytes_fn,
-            max_approach_retries=max_approach_retries,
             enable_human_feedback=False,
             max_verification_iterations=max_verification_iterations,
             conformance_instructions=conformance_instructions,
@@ -5261,8 +4959,8 @@ Return JSON with:
         if quality_warning:
             prompt_parts.append(
                 f"\n## Quality Warning\n{quality_warning}\n"
-                "Note: Alternative pipelines were attempted but this was "
-                "the best result achieved."
+                "Note: this is the best result achieved after verification "
+                "refinement — quality remained below the threshold."
             )
 
         qh = analysis_result.get("quality_history")
@@ -5274,11 +4972,9 @@ Return JSON with:
                 f"({'approved' if approved else 'best available, below threshold'})"
             )
             iters = qh.get("verification_iterations", [])
-            alts = qh.get("alternative_approaches", [])
-            if len(iters) > 1 or alts:
+            if len(iters) > 1:
                 qh_lines.append(
-                    f"- Verification iterations: {len(iters)}, "
-                    f"alternative pipelines tried: {len(alts)}"
+                    f"- Verification iterations: {len(iters)}"
                 )
             # Remaining issues from last verification (known limitations)
             if iters:

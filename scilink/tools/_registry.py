@@ -43,6 +43,37 @@ def format_library_inventory() -> str:
     return "\n".join(lines)
 
 
+def format_tool_inventory(agent: str = "image_analysis") -> str:
+    """Render the full tool + library inventory for ``agent`` as one string.
+
+    Used by prompts that need a drop-in ``{tool_inventory}`` substitution
+    (code-gen, script-correction) — complements ``_append_tool_inventory``
+    which is list-based for multi-part prompts. Both draw from the same
+    registry so there is a single source of truth.
+    """
+    parts: list[str] = []
+    specs = get_tools_for(agent)
+    if specs:
+        parts.append("## Available Tools")
+        parts.append(
+            "The following tools are registered and callable from generated scripts. "
+            "Prefer a tool when it fits; combine with custom numpy/scipy/skimage/cv2 "
+            "code for post-processing. A tool call anchoring the hard step followed "
+            "by custom code is usually more reliable than an all-custom pipeline."
+        )
+        for spec in specs:
+            parts.append(spec.to_prompt())
+
+    parts.append("## Available Libraries")
+    parts.append(
+        "These libraries are importable in the execution sandbox. Use them for "
+        "custom code when no registered tool fits."
+    )
+    parts.append(format_library_inventory())
+
+    return "\n\n".join(parts)
+
+
 def _collect_specs_from_module(mod) -> list[ToolSpec]:
     """Return ToolSpec list declared by a module (supports TOOL_SPEC and TOOL_SPECS)."""
     specs: list[ToolSpec] = []

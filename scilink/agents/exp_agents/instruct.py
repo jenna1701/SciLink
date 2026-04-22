@@ -3108,6 +3108,19 @@ features. You may adjust numerical parameters (thresholds, window sizes, sigma v
 to produce reasonable results — document adjustments in the "summary" field. Do not \
 change the analysis methods themselves (e.g., don't replace Otsu with adaptive thresholding).
 
+**REGISTERED TOOLS:** If the plan names a registered tool, you MUST import and call it \
+by its exact import line and signature. Do not reimplement the tool's internals inline, \
+even when you believe you can write "equivalent logic" — a hand-written variant cannot \
+be verified as equivalent to the registered implementation. Two narrow exceptions: \
+(1) the tool fails at runtime due to a major infrastructure issue (model weights \
+cannot be downloaded, a required dependency is not installed, model files are missing \
+or corrupted); (2) the tool runs but produces clearly unacceptable output that cannot \
+be fixed by tuning its documented parameters — and you have actually tried tuning \
+them first. In either case: try the tool first (and for case 2, attempt reasonable \
+parameter adjustments before giving up), catch the failure or inadequate result, \
+document the specific issue in the "summary" field, and only then fall back to custom \
+code.
+
 **Context:** {context}
 
 **Data:**
@@ -3116,29 +3129,7 @@ change the analysis methods themselves (e.g., don't replace Otsu with adaptive t
 - dtype: {dtype}
 - Intensity range: [{intensity_min}, {intensity_max}]
 
-**Available Libraries:** numpy, scipy (ndimage, signal, optimize), scikit-image (skimage), \
-opencv-python (cv2), matplotlib, Pillow (PIL), scikit-learn (sklearn), pandas, json, \
-scilink.tools.sam — SAM instance segmentation for touching/overlapping objects. \
-`from scilink.tools.sam import run_sam_analysis`; \
-usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "default", \
-"min_area": <set_from_plan>, "max_area": <set_from_plan>, \
-"pruning_iou_threshold": <set_from_plan>}})`. \
-First arg must be a 2D grayscale numpy array or an HxWx3 RGB uint8 array. \
-For multi-channel images that are not RGB (e.g., 2-channel or 4-channel), pass a single \
-channel (e.g., `image[:,:,0]`). True RGB images can be passed directly. \
-Choose min_area/max_area based on expected object sizes in the image. \
-sam_parameters MUST be 'default' on the first attempt — only switch to 'sensitive' in a retry \
-after 'default' has been tried and missed objects. \
-Parameters: \
-min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
-pruning_iou_threshold (masks with IoU above this are removed; lower = stricter, higher = keeps more overlapping objects; default 0.5). \
-Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \
-For RGB input, each particle also includes "mean_color_rgb". \
-Avoid Gaussian blur before SAM unless noise is very high. \
-scilink.tools.atom_finding_tools — atomic column detection for STEM images. \
-`from scilink.tools.atom_finding_tools import detect_atoms, detect_atoms_dcnn, refine_positions, find_zone_axes, find_missing_atoms, subtract_atoms`; \
-detect_atoms uses classical peak detection; detect_atoms_dcnn uses a DCNN ensemble and requires fov_nm (field of view in nm). \
-Use only when the domain skill or plan calls for atom-finding tools.
+{tool_inventory}
 
 **Requirements:**
 1. Load image: use `np.load(path)` for .npy, or `cv2.imread(path, cv2.IMREAD_UNCHANGED)` \
@@ -3196,29 +3187,7 @@ IMAGE_ANALYSIS_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed image analysi
 {error_message}
 ```
 
-**Available Libraries:** numpy, scipy (ndimage, signal, optimize), scikit-image (skimage), \
-opencv-python (cv2), matplotlib, Pillow (PIL), scikit-learn (sklearn), pandas, json, \
-scilink.tools.sam — SAM instance segmentation for touching/overlapping objects. \
-`from scilink.tools.sam import run_sam_analysis`; \
-usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "default", \
-"min_area": <set_from_plan>, "max_area": <set_from_plan>, \
-"pruning_iou_threshold": <set_from_plan>}})`. \
-First arg must be a 2D grayscale numpy array or an HxWx3 RGB uint8 array. \
-For multi-channel images that are not RGB (e.g., 2-channel or 4-channel), pass a single \
-channel (e.g., `image[:,:,0]`). True RGB images can be passed directly. \
-Choose min_area/max_area based on expected object sizes in the image. \
-sam_parameters MUST be 'default' on the first attempt — only switch to 'sensitive' in a retry \
-after 'default' has been tried and missed objects. \
-Parameters: \
-min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
-pruning_iou_threshold (masks with IoU above this are removed; lower = stricter, higher = keeps more overlapping objects; default 0.5). \
-Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \
-For RGB input, each particle also includes "mean_color_rgb". \
-Avoid Gaussian blur before SAM unless noise is very high. \
-scilink.tools.atom_finding_tools — atomic column detection for STEM images. \
-`from scilink.tools.atom_finding_tools import detect_atoms, detect_atoms_dcnn, refine_positions, find_zone_axes, find_missing_atoms, subtract_atoms`; \
-detect_atoms uses classical peak detection; detect_atoms_dcnn uses a DCNN ensemble and requires fov_nm (field of view in nm). \
-Use only when the domain skill or plan calls for atom-finding tools.
+{tool_inventory}
 
 **CRITICAL:** Fix only the execution error. Do NOT change the analysis pipeline, feature \
 extraction approach, or the overall analysis strategy. The approach is locked for series consistency.
@@ -3264,6 +3233,16 @@ implementation-level decision, not a method change.
 The script's "summary" field should explain any adjustment.
 Changing the analysis method (e.g., replacing LoG with Hough circles) is NOT a justified \
 deviation — that requires a new plan via the retry pipeline.
+
+Reimplementing a registered tool inline instead of calling it is NOT a justified \
+deviation, even when the script claims "equivalent logic" or "same parameters". The \
+registered tool is the single source of truth for that operation. The only valid \
+exceptions are (1) the tool actually failed at runtime due to a major infrastructure \
+issue (model download failed, required dependency not installed, model files missing), \
+or (2) the tool ran but produced clearly unacceptable output that could not be fixed by \
+tuning its documented parameters and the script documents the attempted tuning. Both \
+exceptions must be explicitly documented in the script's "summary" field — mere \
+assertion of equivalence is not sufficient.
 
 Return JSON:
 {{"conformant": true/false, "justified_deviations": ["deviations with stated reasoning, if any"], "unjustified_deviations": ["deviations with no explanation"], "summary": "one sentence"}}
