@@ -299,3 +299,62 @@ def run_fft_nmf_analysis(image_array, params=None):
             analyzer.grid_shape[2],
         ),
     }
+
+
+# =============================================================================
+# TOOL SPEC
+# =============================================================================
+
+from ._spec import ToolSpec
+
+TOOL_SPEC = ToolSpec(
+    name="run_fft_nmf_analysis",
+    description=(
+        "Sliding-window FFT + NMF decomposition. Factorizes local frequency patterns "
+        "across an image into a small set of basis spectra and their spatial abundance maps."
+    ),
+    import_line="from scilink.tools.fft_nmf import run_fft_nmf_analysis",
+    signature="run_fft_nmf_analysis(image_array, params=None) -> dict",
+    agents=["image_analysis"],
+    when_to_use=(
+        "Materials with defects, disorder, multiple phases, or spatially varying "
+        "structure — or when the objective involves characterizing disorder, phase "
+        "separation, or local symmetry variations. Also useful for any image where "
+        "the goal is periodic patterns, symmetries, or electronic/lattice patterns "
+        "rather than individual atom positions.\n"
+        "\n"
+        "With a window size tuned to the spatial scale of the repeating features and a "
+        "simple post-processing step (e.g. inspecting components and abundance maps, "
+        "thresholding or clustering abundances to localize distinct regions), this is "
+        "already a complete Tier 1 pipeline — no extra processing steps are required."
+    ),
+    parameters={
+        "image_array": {
+            "type": "ndarray",
+            "description": "2D grayscale numpy array.",
+        },
+        "params": {
+            "type": "dict",
+            "description": (
+                "Optional. Keys: "
+                "window_size (int pixels, default auto — pick based on the spatial scale "
+                "of repeating features), "
+                "n_components (int, default 4 — number of distinct patterns expected), "
+                "step_fraction (float, default 0.25 — window step as a fraction of window "
+                "size; 0.25 = 75%% overlap)."
+            ),
+        },
+    },
+    required=["image_array"],
+    returns=(
+        "dict with 'components' shape (n_components, fft_h, fft_w) — each is a 2D FFT "
+        "power spectrum for one dominant frequency pattern; 'abundances' shape "
+        "(n_components, grid_h, grid_w) — spatial maps of where each component is "
+        "present; plus 'n_components', 'window_size', 'grid_shape'."
+    ),
+    example=(
+        "result = run_fft_nmf_analysis(image_array, params={'n_components': 4})\n"
+        "np.save('nmf_components.npy', result['components'])\n"
+        "np.save('abundance_maps.npy', result['abundances'])"
+    ),
+)

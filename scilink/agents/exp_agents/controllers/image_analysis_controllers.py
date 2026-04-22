@@ -180,6 +180,38 @@ def _append_auxiliary_context(prompt: list, state: dict) -> None:
     })
 
 
+def _append_tool_inventory(prompt: list, agent: str = "image_analysis") -> None:
+    """Append the registered tool inventory and library list for ``agent``.
+
+    Tools come from ``scilink.tools._registry.get_tools_for(agent)``; libraries
+    come from ``IMAGE_ANALYSIS_LIBRARIES``. Injected before skill context so
+    skill prose can reference tools introduced here by name.
+    """
+    from ....tools._registry import (
+        format_library_inventory,
+        get_tools_for,
+    )
+
+    specs = get_tools_for(agent)
+    if specs:
+        prompt.append("\n## Available Tools")
+        prompt.append(
+            "The following tools are registered and callable from generated scripts. "
+            "Prefer a tool when it fits; combine with custom numpy/scipy/skimage/cv2 "
+            "code for post-processing. A tool call anchoring the hard step followed "
+            "by custom code is usually more reliable than an all-custom pipeline."
+        )
+        for spec in specs:
+            prompt.append(spec.to_prompt())
+
+    prompt.append("\n## Available Libraries")
+    prompt.append(
+        "These libraries are importable in the execution sandbox. Use them for "
+        "custom code when no registered tool fits."
+    )
+    prompt.append(format_library_inventory())
+
+
 def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     """Append domain skill knowledge to an LLM prompt for the given stage.
 
@@ -693,6 +725,7 @@ class ImagePlanningController:
             prompt.append(f"\n## User Guidance\n{state['analysis_hints']}")
 
         _append_auxiliary_context(prompt, state)
+        _append_tool_inventory(prompt, agent="image_analysis")
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
         _append_subagent_context(prompt, state)
@@ -995,6 +1028,7 @@ class ImagePlanningController:
             prompt.append(f"\n## Original Guidance\n{state['analysis_hints']}")
 
         _append_auxiliary_context(prompt, state)
+        _append_tool_inventory(prompt, agent="image_analysis")
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
         _append_subagent_context(prompt, state)
@@ -2546,6 +2580,22 @@ Return JSON with:
                                     f"{_annealing_level}"
                                 )
                         _prev_best_score = best_score
+
+                        # Iteration-based floor: guarantees progression when
+                        # noisy quality scores keep resetting the stall
+                        # counter. Each level gets ~max_iter/n_levels slots
+                        # before the floor forces the next one.
+                        _floor = min(
+                            verification_iter // 2,
+                            _n_anneal_levels - 1,
+                        )
+                        if _floor > _annealing_level:
+                            self.logger.info(
+                                f"   Annealing: iteration floor lifting "
+                                f"level {_annealing_level} -> {_floor}"
+                            )
+                            _annealing_level = _floor
+                            _stall_count = 0
 
                         _cur_level = _annealing_level
 
