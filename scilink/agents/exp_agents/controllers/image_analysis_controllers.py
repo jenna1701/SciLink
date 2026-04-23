@@ -1366,6 +1366,15 @@ class UnifiedImageProcessingController:
     DEFAULT_MAX_VERIFICATION_ITERATIONS = 7
     DEFAULT_QUALITY_THRESHOLD = 0.7
 
+    # Quality verification is rubric-based scoring — not generative work.
+    # Using a deterministic config (T=0) so the same visualization gets the
+    # same sub-scores across iterations, which the annealing /
+    # stall-counter logic depends on. Other LLM calls (planner, refiner,
+    # code-gen) continue to use provider-default temperature.
+    # Note: only temperature is set — Anthropic's Messages API rejects
+    # temperature and top_p together.
+    _VERIFIER_GEN_CONFIG = {"temperature": 0.0}
+
     # Constraint annealing: gradually raise the "temperature" so the
     # verifier can explore more of the pipeline space when early iterations
     # fail to produce an adequate result.  Like simulated annealing
@@ -2093,7 +2102,7 @@ Return JSON:
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,
-                generation_config=self.generation_config,
+                generation_config=self._VERIFIER_GEN_CONFIG,
                 safety_settings=self.safety_settings,
             )
             result_parsed, error = self._parse(response)
