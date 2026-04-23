@@ -1268,7 +1268,7 @@ class PlanningOrchestratorAgent:
             if iteration > 1:
                 self._compress_large_tool_results()
 
-            print(f"  ⏳ Waiting for LLM response ...")
+            print(f"  ⏳ Waiting for orchestrator response ...")
 
             response = client.chat.completions.create(
                 model=self.model.model,
@@ -1341,7 +1341,7 @@ class PlanningOrchestratorAgent:
             if iteration > 1:
                 self._compress_large_tool_results()
 
-            print(f"  ⏳ Waiting for LLM response ...")
+            print(f"  ⏳ Waiting for orchestrator response ...")
 
             response = litellm.completion(
                 model=self.model.model,
