@@ -269,6 +269,146 @@ def _append_prior_knowledge_context(prompt: list, state: dict) -> None:
                 prompt.append(f"- {f}")
 
 
+def _append_prior_analysis_state(prompt: list, state: dict) -> None:
+    """Surface a compact state summary from prior analyses to the planner.
+
+    For each path in ``state['prior_analysis_paths']`` that points at (or
+    contains) a directory holding ``analysis_results.json``, parse that
+    JSON and append a state block with the analysis's pipeline, quality
+    score, extracted features, scientific claims, and saved-arrays
+    catalog. Missing or malformed JSON silently skips the path (the
+    file-listing block for code-gen stays the single source of truth
+    for "which files exist"; this helper only adds planner-facing
+    context).
+
+    Called during the planning stage; the code-gen stage sees the raw
+    file listing injected separately in ``_generate_analysis_script``.
+    """
+    paths = state.get("prior_analysis_paths", [])
+    if not paths:
+        return
+
+    entries = []
+    for raw_path in paths:
+        p = Path(raw_path)
+        # Accept directory or a file inside an analysis directory.
+        if p.is_file():
+            dir_candidates = [p.parent, p.parent.parent]
+        else:
+            dir_candidates = [p, p.parent]
+        results_json = None
+        anchor_dir = None
+        for cand in dir_candidates:
+            candidate_json = cand / "analysis_results.json"
+            if candidate_json.is_file():
+                results_json = candidate_json
+                anchor_dir = cand
+                break
+        if not results_json:
+            continue
+        try:
+            data = json.loads(results_json.read_text())
+        except Exception:
+            continue
+
+        # Per-image state (extracted_features, saved_arrays, quality_metrics)
+        # lives in series_analysis_results.json alongside, not in the top-
+        # level file. Merge the first result's fields in so the planner
+        # sees a complete picture.
+        series_json = anchor_dir / "series_analysis_results.json"
+        if series_json.is_file():
+            try:
+                series_data = json.loads(series_json.read_text())
+                per_image_results = series_data.get("results") or []
+                if per_image_results:
+                    first = per_image_results[0] or {}
+                    for key in (
+                        "extracted_features",
+                        "saved_arrays",
+                        "quality_metrics",
+                    ):
+                        if key not in data and first.get(key):
+                            data[key] = first[key]
+                    if "analysis_type" not in data and first.get(
+                        "analysis_type"
+                    ):
+                        data["analysis_type"] = first["analysis_type"]
+            except Exception:
+                pass
+
+        entries.append((anchor_dir, data))
+
+    if not entries:
+        return
+
+    prompt.append("\n## Prior Analysis State")
+    prompt.append(
+        "Compact summaries of prior analyses whose full artifacts are "
+        "listed to the code generator below. Use these to inform your "
+        "plan — what has already been measured, what features are "
+        "available, and how reliable the prior results were."
+    )
+    for anchor_dir, data in entries:
+        label = anchor_dir.name or str(anchor_dir)
+        prompt.append(f"\n### {label}")
+
+        approach = data.get("analysis_approach") or data.get("analysis_type")
+        if approach:
+            prompt.append(f"- Approach: {approach}")
+
+        qh = data.get("quality_history") or {}
+        score = qh.get("final_score")
+        approved = qh.get("approved")
+        if score is not None or approved is not None:
+            parts = []
+            if score is not None:
+                parts.append(f"score={score}")
+            if approved is not None:
+                parts.append(f"approved={approved}")
+            prompt.append(f"- Quality: {', '.join(parts)}")
+
+        features = data.get("extracted_features") or {}
+        if features:
+            feat_lines = ["- Extracted features:"]
+            for k, v in list(features.items())[:12]:
+                v_str = str(v)
+                if len(v_str) > 120:
+                    v_str = v_str[:120] + "..."
+                feat_lines.append(f"  - `{k}`: {v_str}")
+            if len(features) > 12:
+                feat_lines.append(f"  - ... ({len(features) - 12} more)")
+            prompt.append("\n".join(feat_lines))
+
+        claims = data.get("scientific_claims") or []
+        if claims:
+            claim_lines = ["- Scientific claims:"]
+            for c in claims[:6]:
+                c_str = c if isinstance(c, str) else (
+                    c.get("claim") or c.get("text") or str(c)
+                )
+                if len(c_str) > 200:
+                    c_str = c_str[:200] + "..."
+                claim_lines.append(f"  - {c_str}")
+            if len(claims) > 6:
+                claim_lines.append(f"  - ... ({len(claims) - 6} more)")
+            prompt.append("\n".join(claim_lines))
+
+        saved = data.get("saved_arrays") or {}
+        if saved:
+            saved_lines = ["- Saved arrays:"]
+            for name, meta in saved.items():
+                desc = ""
+                shape = ""
+                if isinstance(meta, dict):
+                    desc = meta.get("description", "")
+                    shape_val = meta.get("shape")
+                    if shape_val:
+                        shape = f" shape {shape_val}"
+                desc_str = f" — {desc}" if desc else ""
+                saved_lines.append(f"  - `{name}`{shape}{desc_str}")
+            prompt.append("\n".join(saved_lines))
+
+
 def _append_objective_context(prompt: list, state: dict) -> None:
     """Append high-level scientific objective to an LLM prompt.
 
@@ -728,6 +868,7 @@ class ImagePlanningController:
         _append_tool_inventory(prompt, agent="image_analysis")
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
+        _append_prior_analysis_state(prompt, state)
         _append_subagent_context(prompt, state)
 
         # Series context: use scout data if available, otherwise basic notice
@@ -1031,6 +1172,7 @@ class ImagePlanningController:
         _append_tool_inventory(prompt, agent="image_analysis")
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
+        _append_prior_analysis_state(prompt, state)
         _append_subagent_context(prompt, state)
 
         # Include current series plan and scout data in refinement context
@@ -1270,7 +1412,7 @@ class ImagePlanningController:
             state["quality_criteria"] = "Visual inspection"
             state["expected_outputs"] = []
             state["literature_query"] = None
-            state["locked_analysis_config"] = None
+            state["locked_analysis_config"] = {}
             state["series_analysis_plan"] = None
             state["regime_configs"] = None
 
@@ -1570,6 +1712,40 @@ Your guidance: '''
                     shape = preproc.get("array_shapes", {}).get(name, "")
                     shape_str = f" shape {shape}" if shape else ""
                     lines.append(f"- `{name}`{shape_str}")
+                context_parts.append("\n".join(lines))
+
+        # Add prior-analysis file listing (available via absolute path;
+        # NOT copied into working dir — use the absolute paths directly).
+        prior_paths = state.get("prior_analysis_paths") or []
+        if prior_paths:
+            listing: list[str] = []
+            file_globs = ("*.npy", "*.json", "*.csv", "*.png", "*.py")
+            for raw in prior_paths:
+                p = Path(raw)
+                if p.is_file():
+                    listing.append(str(p.resolve()))
+                elif p.is_dir():
+                    # Include files in this dir and one level of subdirs
+                    # (typical analysis-results layout: analysis_<id>/ and
+                    # analysis_<id>/image_0000/).
+                    matched: set = set()
+                    for pat in file_globs:
+                        matched.update(p.glob(pat))
+                        matched.update(p.glob(f"*/{pat}"))
+                    for f in sorted(matched):
+                        listing.append(str(f.resolve()))
+            if listing:
+                lines = [
+                    "## Prior Analysis Files (available via absolute path)",
+                    "The following files from previous analyses are "
+                    "accessible. Load them with `np.load` (.npy), "
+                    "`json.load` or `pd.read_json` (.json), "
+                    "`pd.read_csv` (.csv), `cv2.imread` (.png) as "
+                    "appropriate. Use the absolute paths — files are "
+                    "NOT copied into the working directory.",
+                ]
+                for f in listing:
+                    lines.append(f"- `{f}`")
                 context_parts.append("\n".join(lines))
 
         from ....tools._registry import format_tool_inventory

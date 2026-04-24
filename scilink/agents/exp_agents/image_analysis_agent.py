@@ -228,6 +228,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         auxiliary_label: Optional[str] = None,
         skill: Optional[str] = None,
         prior_knowledge: Optional[List[Dict[str, Any]]] = None,
+        prior_analysis_paths: Optional[List[str]] = None,
         # Quality control overrides
         outlier_sigma: Optional[float] = None,
         **kwargs,
@@ -259,6 +260,13 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             auxiliary_label: Description of auxiliary data
             skill: Domain skill name or path to .md skill file
             prior_knowledge: Reference findings from previous analyses
+            prior_analysis_paths: List of folder or file paths from previous
+                analyses. Folders containing ``analysis_results.json`` surface
+                a compact state summary (pipeline, quality score, extracted
+                features, scientific claims, saved-arrays catalog) to the
+                planner; all paths surface a file listing to the code
+                generator so generated scripts can load prior outputs via
+                absolute path.
             outlier_sigma: Override default outlier sigma
 
         Returns:
@@ -411,6 +419,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             **skill_state,
             # Prior knowledge
             "prior_knowledge": prior_knowledge or [],
+            "prior_analysis_paths": prior_analysis_paths or [],
             # First image (for planning)
             "image_path": (
                 image_paths[0] if image_paths else first_image_name
@@ -972,6 +981,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             **skill_state,
             # Prior knowledge
             "prior_knowledge": tier1_state.get("prior_knowledge", []),
+            "prior_analysis_paths": tier1_state.get(
+                "prior_analysis_paths", []
+            ),
             # Sub-agent results
             "fft_preprocessing": None,
             "sam_preprocessing": None,
