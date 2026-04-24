@@ -1,8 +1,21 @@
 import io
+import re
 import base64
 from types import SimpleNamespace
 from PIL import Image
 import openai
+
+
+# OpenAI reasoning-class models (gpt-5*, o1*, o3*, o4*) only accept the default
+# temperature/top_p. Sending custom values raises "Unsupported value" errors.
+_REASONING_MODEL_RE = re.compile(r'^(gpt-5|o[134])(?!\d)', re.IGNORECASE)
+
+
+def _is_openai_reasoning_model(model: str) -> bool:
+    if not model:
+        return False
+    name = model.split('/', 1)[-1]
+    return bool(_REASONING_MODEL_RE.match(name))
 
 
 class OpenAIAsGenerativeModel:
@@ -102,9 +115,10 @@ class OpenAIAsGenerativeModel:
             return {}
 
         out = {}
-        if getattr(cfg, "temperature", None) is not None:
+        reasoning = _is_openai_reasoning_model(self.model)
+        if not reasoning and getattr(cfg, "temperature", None) is not None:
             out["temperature"] = cfg.temperature
-        if getattr(cfg, "top_p", None) is not None:
+        if not reasoning and getattr(cfg, "top_p", None) is not None:
             out["top_p"] = cfg.top_p
         if getattr(cfg, "max_output_tokens", None) is not None:
             out["max_tokens"] = cfg.max_output_tokens
