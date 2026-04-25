@@ -2831,6 +2831,13 @@ IMAGE_ANALYSIS_PIPELINE_DISCIPLINE_SUFFIX = """
 
 **Pipeline complexity discipline:**
 
+**Step cap (hard rule):** Your `processing_pipeline` field must describe
+at most 3 sequential operations, where an operation is one tool call
+or one distinct processing / computation step. If you find yourself
+needing more than three, your goal is too broad — pick the most
+foundational subset and leave the rest to a follow-up `run_analysis`
+call with `prior_analysis_paths`.
+
 Keep the pipeline simple and robust. A successful focused analysis that
 captures the question at hand is more valuable than a complex pipeline
 that fails.
