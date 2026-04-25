@@ -69,7 +69,7 @@ You MUST output a valid JSON object containing two keys: "detailed_analysis" and
     * Heterostructure interfaces
     * Surface adsorption sites
 
-2.  **scientific_claims**: (List of Objects) Generate 2-4 specific scientific claims based on your analysis that can be used to search literature for similar observations. Each object must have the following keys:
+2.  **scientific_claims**: (List of Objects) Generate 1-2 specific scientific claims based on your analysis that can be used to search literature for similar observations. Each object must have the following keys:
     * **claim**: (String) A single, focused scientific claim written as a complete sentence about a specific observation from the microscopy image.
     * **scientific_impact**: (String) A brief explanation of why this claim would be scientifically significant if confirmed through literature search or further experimentation.
     * **has_anyone_question**: (String) A direct question starting with "Has anyone" that reformulates the claim as a research question.
@@ -232,7 +232,7 @@ You MUST output a valid JSON object with two keys: "detailed_analysis" and "scie
    - Cross-correlations between different analysis modes
    - Identification of novel or unexpected features
 
-2. **scientific_claims**: (List of Objects) Generate 2-4 specific claims for literature comparison. Each must have:
+2. **scientific_claims**: (List of Objects) Generate 1-2 specific claims for literature comparison. Each must have:
    * **claim**: (String) Focused scientific claim about a specific multi-modal observation
    * **scientific_impact**: (String) Why this finding would be scientifically significant
    * **has_anyone_question**: (String) Research question starting with "Has anyone"
@@ -661,7 +661,7 @@ You MUST output a valid JSON object containing two keys: "detailed_analysis" and
    * Assessment of data quality and any artifacts
    * If a structural image was provided, explicitly state how the correlation between spectroscopic and structural data (if any) contributed to your analysis and conclusions.
 
-2. **scientific_claims**: (List of Objects) Generate 2-4 specific scientific claims based on spectroscopic analysis. Each object must have:
+2. **scientific_claims**: (List of Objects) Generate 1-2 specific scientific claims based on spectroscopic analysis. Each object must have:
    * **claim**: (String) A single, focused scientific claim about a specific spectroscopic observation or finding
    * **spectroscopic_evidence**: (String) Specific spectral features, peak positions, intensities, or spatial patterns supporting this claim
    * **scientific_impact**: (String) Why this spectroscopic finding would be scientifically significant or novel
@@ -838,7 +838,7 @@ You MUST output a valid JSON object containing two keys: "detailed_analysis" and
         - If you observe regular gaps in dense arrays, consider if this indicates an ordered structure or a systematic segmentation error.
         - Note any systematic patterns in the segmentation results that could indicate bias or error in the analysis.
 
-2.  **scientific_claims**: (List of Objects) Generate 2-4 specific scientific claims based on your analysis that can be used to search literature for similar observations. Each object must have the following keys:
+2.  **scientific_claims**: (List of Objects) Generate 1-2 specific scientific claims based on your analysis that can be used to search literature for similar observations. Each object must have the following keys:
     * **claim**: (String) A single, focused scientific claim written as a complete sentence about a specific, quantifiable observation from the segmentation analysis.
     * **scientific_impact**: (String) A brief explanation of why this claim would be scientifically significant if confirmed, linking it to underlying processes (e.g., formation mechanism, material properties, biological function).
     * **has_anyone_question**: (String) A question that MUST start with "Has anyone" (e.g., "Has anyone observed...", "Has anyone reported...", "Has anyone characterized..."). This reformulates the claim as a literature-searchable research question.
@@ -1419,7 +1419,7 @@ You MUST output a valid JSON object containing "detailed_analysis" and "scientif
 
 **detailed_analysis**: (String) Your final, synthesized narrative.
 
-**scientific_claims**: (List of Objects) Generate 2-4 high-level scientific claims that are supported by the combined evidence from all analysis scales. Each object must have the standard keys:
+**scientific_claims**: (List of Objects) Generate 1-2 high-level scientific claims that are supported by the combined evidence from all analysis scales. Each object must have the standard keys:
 * **claim**: (String) A single, focused scientific claim written as a complete sentence about a specific observation from the microscopy image.
 * **scientific_impact**: (String) A brief explanation of why this claim would be scientifically significant if confirmed through literature search or further experimentation.
 * **has_anyone_question**: (String) A direct question starting with "Has anyone" that reformulates the claim as a research question.
@@ -1686,7 +1686,7 @@ You MUST output a valid JSON object with two keys: "detailed_analysis" and "scie
    - Comparison with expected behavior
    - Notable anomalies or unexpected findings
 
-2. **scientific_claims**: (List of Objects) 2-4 high-level claims based on the batch analysis:
+2. **scientific_claims**: (List of Objects) 1-2 high-level claims based on the batch analysis:
    * **claim**: A focused scientific claim about the observed trends
    * **scientific_impact**: Why this finding is significant
    * **supporting_evidence**: Quantitative evidence from the batch analysis
@@ -1738,7 +1738,7 @@ Return a JSON object with:
 - Focus on specific, testable observations
 - Use precise scientific terminology
 - Avoid overly specific numbers
-- Generate 2-4 scientific claims
+- Generate 1-2 scientific claims
 - Ensure "has_anyone_question" is self-contained and searchable
 '''
 
@@ -1806,7 +1806,7 @@ Don't just say "increasing/decreasing". Describe:
 - Relationships between components
 
 ## Guidelines for Claims
-- Generate 2-4 specific, testable claims
+- Generate 1-2 specific, testable claims
 - Avoid overly specific numbers
 - "has_anyone_question" must be self-contained
 '''
@@ -1891,7 +1891,7 @@ Guidelines:
 3. Discuss particle size distribution (mean, std, range)
 4. Comment on particle morphology (circularity, solidity, aspect ratio)
 5. Note any patterns or anomalies in the data
-6. Generate 2-4 meaningful scientific claims
+6. Generate 1-2 meaningful scientific claims
 7. Consider what the findings might indicate about the sample
 8. Acknowledge limitations of single-image analysis
 
@@ -2038,7 +2038,7 @@ You MUST output a valid JSON object with two keys: "detailed_analysis" and "scie
    - Comparison with expected behavior
    - Notable anomalies or unexpected findings
 
-2. **scientific_claims**: (List of Objects) 2-4 high-level claims based on the batch analysis:
+2. **scientific_claims**: (List of Objects) 1-2 high-level claims based on the batch analysis:
    * **claim**: A focused scientific claim about the observed trends
    * **scientific_impact**: Why this finding is significant
    * **supporting_evidence**: Quantitative evidence from the batch analysis
