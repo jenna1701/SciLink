@@ -32,6 +32,60 @@ from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
 
+# Anthropic's API rejects images over 5 MB. Cap below that with headroom
+# for base64 expansion and other margin so generated visualizations don't
+# crash the verification call when scripts pile on diagnostic subplots.
+_VERIFICATION_IMAGE_CAP_BYTES = int(4.5 * 1024 * 1024)
+
+
+def _fit_image_under_api_cap(
+    image_bytes: bytes, cap: int = _VERIFICATION_IMAGE_CAP_BYTES
+) -> tuple[bytes, str]:
+    """Return image bytes guaranteed (best-effort) to fit under ``cap``.
+
+    No-op for inputs already at or below the cap — returns them with the
+    detected mime type. Otherwise decodes via PIL, re-encodes as JPEG
+    with progressively smaller dimensions until under the cap or a
+    floor size is reached. Returns the last attempt either way (better
+    a slightly-too-large image than crashing the API call).
+    """
+    if len(image_bytes) <= cap:
+        mime = "image/png" if image_bytes.startswith(b"\x89PNG") else "image/jpeg"
+        return image_bytes, mime
+
+    try:
+        from io import BytesIO
+        from PIL import Image as PILImage
+
+        img = PILImage.open(BytesIO(image_bytes))
+        if img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGB")
+        elif img.mode == "L":
+            img = img.convert("RGB")
+
+        target_w, target_h = img.size
+        last_bytes = image_bytes
+        for _ in range(6):
+            buf = BytesIO()
+            img.resize((target_w, target_h), PILImage.LANCZOS).save(
+                buf, format="JPEG", quality=85, optimize=True
+            )
+            last_bytes = buf.getvalue()
+            if len(last_bytes) <= cap:
+                return last_bytes, "image/jpeg"
+            target_w = max(200, int(target_w * 0.7))
+            target_h = max(200, int(target_h * 0.7))
+            if target_w == 200 and target_h == 200:
+                break
+        return last_bytes, "image/jpeg"
+    except Exception:
+        # If PIL can't decode or anything else goes wrong, return the
+        # original bytes; the caller's API call may still fail but we
+        # don't make it worse.
+        mime = "image/png" if image_bytes.startswith(b"\x89PNG") else "image/jpeg"
+        return image_bytes, mime
+
+
 def load_image_file(image_path: str) -> np.ndarray:
     """Load image data from file, handling various formats.
 
@@ -2494,11 +2548,18 @@ Return JSON:
             "\n\n**ANALYSIS VISUALIZATION (examine carefully):**",
         ]
 
-        # Add the analysis visualization
-        prompt_parts.append({
-            "mime_type": "image/png",
-            "data": result["visualization_bytes"]
-        })
+        # Add the analysis visualization, capped under Anthropic's 5 MB
+        # per-image limit so retry-loop figure inflation doesn't crash
+        # the verification call.
+        viz_bytes, viz_mime = _fit_image_under_api_cap(
+            result["visualization_bytes"]
+        )
+        if viz_bytes is not result["visualization_bytes"]:
+            self.logger.info(
+                f"      Visualization shrunk for verification: "
+                f"{len(result['visualization_bytes'])} → {len(viz_bytes)} bytes"
+            )
+        prompt_parts.append({"mime_type": viz_mime, "data": viz_bytes})
 
         # Also include original image for comparison
         if state.get("original_image_bytes"):
