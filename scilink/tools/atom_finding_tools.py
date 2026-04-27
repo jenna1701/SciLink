@@ -738,7 +738,14 @@ def _empty_result():
     }
 
 
-def local_env_gmm(image, positions, n_components=4, window_size=32):
+def local_env_gmm(
+    image,
+    positions,
+    n_components=4,
+    window_size=32,
+    covariance="diag",
+    random_state=1,
+):
     """GMM clustering on local image patches around detected atomic positions.
 
     Crops a ``(window_size, window_size)`` window around each position,
@@ -755,6 +762,14 @@ def local_env_gmm(image, positions, n_components=4, window_size=32):
         window_size: side length of the local patch in pixels (default 32).
             Should be roughly the lattice parameter so each patch contains
             the central atom plus its immediate neighbors.
+        covariance: GMM covariance type — ``'diag'`` (default), ``'full'``,
+            ``'tied'``, or ``'spherical'``. ``'diag'`` is the safe default
+            for high-dimensional patch features (full covariance overfits
+            when ``window_size`` × ``window_size`` is large relative to
+            the atom count).
+        random_state: RNG seed passed through to the underlying GMM
+            (default 1). Fixing this makes cluster assignments reproducible
+            across runs on the same input.
 
     Returns:
         dict with:
@@ -801,7 +816,11 @@ def local_env_gmm(image, positions, n_components=4, window_size=32):
     imstack = aoi.stat.imlocal(
         expdata, {0: coords_rcc}, window_size=int(window_size)
     )
-    centroids, _, coords_class = imstack.gmm(int(n_components))
+    centroids, _, coords_class = imstack.gmm(
+        int(n_components),
+        covariance=covariance,
+        random_state=int(random_state),
+    )
 
     # Strip any trailing channel dim from centroids: atomai returns
     # (k, win, win, 1) for single-channel input.
@@ -1082,7 +1101,8 @@ TOOL_SPECS = [
         ),
         import_line="from scilink.tools.atom_finding_tools import local_env_gmm",
         signature=(
-            "local_env_gmm(image, positions, n_components=4, window_size=32) -> dict"
+            "local_env_gmm(image, positions, n_components=4, window_size=32, "
+            "covariance='diag', random_state=1) -> dict"
         ),
         agents=["image_analysis"],
         when_to_use=(
@@ -1109,6 +1129,22 @@ TOOL_SPECS = [
                 "description": (
                     "Side length of the local patch in pixels (default 32). "
                     "Set to ~lattice parameter."
+                ),
+            },
+            "covariance": {
+                "type": "str",
+                "description": (
+                    "GMM covariance type: 'diag' (default — safe for "
+                    "high-dim patch features), 'full', 'tied', or "
+                    "'spherical'."
+                ),
+            },
+            "random_state": {
+                "type": "int",
+                "description": (
+                    "RNG seed (default 1). Fixed seed makes cluster "
+                    "assignments reproducible across runs on the same "
+                    "input."
                 ),
             },
         },
