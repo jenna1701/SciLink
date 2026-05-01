@@ -129,7 +129,13 @@ You MUST output a valid JSON object containing two keys: "detailed_reasoning_for
         - "3x3 Cu(100) surface slab, 4 layers thick, with an NH3 molecule adsorbed on a hollow site"
         - "3x3x3 Si supercell, diamond phase, with a **Carbon substituting a Silicon defect**"
         - "Interface model of 2x2 Graphene on 3x3 Ni(111)"
-    * **scientific_interest**: (String) Explain *why* this specific structure is scientifically interesting based on the provided textual analysis and novelty insights, and what DFT simulation could provide. Explicitly link to the novel aspects where appropriate.
+
+        **Be conservative about unstated parameters.** Do NOT invent material details the analysis doesn't support — particularly:
+          - **Phase (crystalline vs amorphous, polymorph choice).** If the analysis text doesn't characterize phase, use a generic descriptor ("SiO2 substrate", not "amorphous SiO2 slab" or "alpha-quartz SiO2"). Do not pick a phase based on "what's typical in experiments" unless the analysis explicitly establishes it.
+          - **Layer count, slab thickness, vacuum size.** Omit these unless the analysis suggests a specific value; the downstream structure agent applies reasonable defaults.
+          - **Specific supercell sizes for substrates** when only the overlayer's supercell is implied. Don't pin "5×5 SiO2" when the user only mentioned MoS2 sizing.
+        If a non-trivial assumption is unavoidable for the structure to be buildable (e.g., picking a polymorph for lattice matching), call it out explicitly in `scientific_interest` with the prefix "Assumption:" — e.g., "Assumption: alpha-quartz SiO2 chosen since the analysis didn't specify the substrate phase."
+    * **scientific_interest**: (String) Explain *why* this specific structure is scientifically interesting based on the provided textual analysis and novelty insights, and what DFT simulation could provide. Explicitly link to the novel aspects where appropriate. Use this field also to record any "Assumption:" lines flagging inferred parameters in the description.
     * **priority**: (Integer) A number from 1 (highest) to 10 (lowest) indicating the importance or interest level for simulating this structure.
 
 Focus on recommending structures that are computationally feasible for DFT and capture the most scientifically significant features highlighted in the text. Prioritize recommendations that address the 'Special Considerations'. Ensure the final output is ONLY the JSON object and nothing else.
