@@ -62,6 +62,58 @@ def _check_mp_api_installed():
 # Tests
 # ---------------------------------------------------------------------------
 
+def test_0_orchestrator_plumbing(model_name: str):
+    """Plumbing check: verify the resolver actually activates when reached
+    via DFTOrchestrator with `mp_api_key=None` — the call shape used by
+    AnalysisOrchestrator's `run_dft_workflow` tool. Catches regressions
+    where someone breaks the auto-discovery chain (DFTOrchestrator →
+    get_api_key('materials_project') → StructureGenerator → mp_helper).
+
+    Costs zero LLM calls — just constructs the agent stack and inspects
+    `o.structure_generator.mp_helper.enabled`.
+    """
+    from scilink.agents.sim_agents.dft_orchestrator import DFTOrchestrator
+
+    # Positive: with MP_API_KEY in env, the resolver chain should be live.
+    o = DFTOrchestrator(
+        api_key="not-used-for-plumbing-check",  # no LLM call made in __init__
+        mp_api_key=None,                        # the analysis-orchestrator shape
+        generator_model=model_name,
+        validator_model=model_name,
+        output_dir="/tmp/scilink_plumbing_check",
+        max_refinement_cycles=0,
+    )
+    assert o.structure_generator.mp_helper.enabled, (
+        "MP helper should be enabled when MP_API_KEY is in env and "
+        "DFTOrchestrator is constructed with mp_api_key=None. The chain "
+        "DFTOrchestrator → get_api_key('materials_project') → "
+        "StructureGenerator → MaterialsProjectHelper is broken."
+    )
+    print("   ✅ MP enabled in orchestrator-dispatched pipeline (MP_API_KEY in env).")
+
+    # Negative: no MP key anywhere → chain ends with disabled helper, no error.
+    saved = {k: os.environ.pop(k, None) for k in ("MP_API_KEY", "MATERIALS_PROJECT_API_KEY")}
+    try:
+        from scilink.auth import clear_api_key
+        clear_api_key("materials_project")
+        o2 = DFTOrchestrator(
+            api_key="not-used-for-plumbing-check",
+            mp_api_key=None,
+            generator_model=model_name,
+            validator_model=model_name,
+            output_dir="/tmp/scilink_plumbing_check_2",
+            max_refinement_cycles=0,
+        )
+        assert not o2.structure_generator.mp_helper.enabled, (
+            "MP helper should be disabled when no MP key is configured anywhere."
+        )
+        print("   ✅ Chain disables cleanly when no MP key configured (no error).")
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+
+
 def test_1_disabled_mp_short_circuit(model_name: str):
     """No MP key → resolver returns '' and prompt is unchanged.
 
@@ -544,9 +596,11 @@ def e2e_2_diamond_slab(model_name: str):
 # ---------------------------------------------------------------------------
 
 TARGETED_TESTS = [
-    ("Disabled-MP short-circuit", test_1_disabled_mp_short_circuit),
-    ("Positive: single named material",  test_2_resolver_positive_single),
-    ("Positive: multi-material request", test_3_resolver_multi_material),
+    ("Orchestrator plumbing (MP enabled via DFTOrchestrator chain)",
+                                          test_0_orchestrator_plumbing),
+    ("Disabled-MP short-circuit",         test_1_disabled_mp_short_circuit),
+    ("Positive: single named material",   test_2_resolver_positive_single),
+    ("Positive: multi-material request",  test_3_resolver_multi_material),
     ("Negative control: generic request", test_4_resolver_negative_control),
     ("_build_initial_prompt injection",   test_5_initial_prompt_injection),
 ]
