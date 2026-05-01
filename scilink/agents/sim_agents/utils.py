@@ -36,6 +36,83 @@ except ImportError:
             pass
 
 
+# OpenAI-compatible JSONSchema describing the MP search tool exposed to the
+# StructureGenerator's pre-script-gen resolution step. Kept here next to the
+# helper so the tool definition and its implementation stay in one place.
+MP_SEARCH_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_material_id",
+        "description": (
+            "Look up a Materials Project ID (mp-id) for a chemical formula or "
+            "chemical system. Use this whenever a structure-building request "
+            "names a specific material (e.g., 'rutile TiO2', 'monoclinic HfO2', "
+            "'graphene', 'NaCl', 'GaAs'). Returns the mp-id of the most stable "
+            "polymorph matching the query, plus its canonical formula, space "
+            "group, and energy above hull. Do not call for generic requests "
+            "like 'a Lennard-Jones solid' or 'a 4-atom cubic cell'.\n\n"
+            "When the request names a polymorph by name (e.g., 'rutile TiO2', "
+            "'anatase TiO2', 'wurtzite GaN', 'monoclinic HfO2', 'cubic SiC'), "
+            "you MUST set `spacegroup_symbol` or `crystal_system` to "
+            "disambiguate — otherwise the search returns the lowest-energy "
+            "polymorph, which may not be the one the user asked for."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "chemical_query": {
+                    "type": "string",
+                    "description": (
+                        "A chemical formula like 'TiO2', 'GaAs', 'LiCoO2' "
+                        "(use search_type='formula'), or a chemical system "
+                        "like 'Fe-S-O' (use search_type='chemsys')."
+                    ),
+                },
+                "search_type": {
+                    "type": "string",
+                    "enum": ["formula", "chemsys"],
+                    "description": (
+                        "'formula' (default) finds the most stable polymorph "
+                        "for a specific stoichiometry. 'chemsys' finds the "
+                        "most stable material across all stoichiometries "
+                        "within the given elements."
+                    ),
+                },
+                "spacegroup_symbol": {
+                    "type": "string",
+                    "description": (
+                        "Optional Hermann–Mauguin space-group symbol to "
+                        "disambiguate polymorphs. Set this when the request "
+                        "names a specific polymorph: 'rutile TiO2' → "
+                        "'P4_2/mnm', 'anatase TiO2' → 'I4_1/amd', 'brookite "
+                        "TiO2' → 'Pbca', 'wurtzite GaN' → 'P6_3mc', "
+                        "'zincblende GaAs' → 'F-43m', 'rocksalt NaCl' → "
+                        "'Fm-3m'. Use underscores for subscripts (P4_2, "
+                        "P6_3, etc.). Omit when only a stoichiometry is "
+                        "given without a polymorph qualifier."
+                    ),
+                },
+                "crystal_system": {
+                    "type": "string",
+                    "enum": [
+                        "triclinic", "monoclinic", "orthorhombic",
+                        "tetragonal", "trigonal", "hexagonal", "cubic",
+                    ],
+                    "description": (
+                        "Optional crystal-system filter — less specific than "
+                        "spacegroup_symbol. Use when only the crystal family "
+                        "is named (e.g., 'cubic SiC', 'hexagonal BN') and "
+                        "you don't have a definite space group. Prefer "
+                        "spacegroup_symbol when you know it."
+                    ),
+                },
+            },
+            "required": ["chemical_query"],
+        },
+    },
+}
+
+
 class MaterialsProjectHelper:
     """Minimal MP helper for automatic material resolution by searching for mp-ids."""
 
@@ -100,7 +177,16 @@ class MaterialsProjectHelper:
         info += "        - Example: If asked for 'gallium arsenide', you should note a search for `search_material_id('GaAs', search_type='formula')` is needed by the system.\n"
         info += "\n"
         info += "3.  **Using mp-ids in Scripts:**\n"
-        info += "    Once an mp-id is known (e.g., 'mp-149' for Si), it can be used in ASE scripts like: `atoms = bulk(mpid='mp-149')`.\n"
+        info += "    Once an mp-id is known, fetch the structure via pymatgen and convert to ASE Atoms.\n"
+        info += "    The MP_API_KEY environment variable is set automatically inside the sandbox:\n"
+        info += "    ```python\n"
+        info += "    import os\n"
+        info += "    from mp_api.client import MPRester\n"
+        info += "    from pymatgen.io.ase import AseAtomsAdaptor\n"
+        info += "    with MPRester(os.getenv(\"MP_API_KEY\")) as mpr:\n"
+        info += "        structure = mpr.get_structure_by_material_id(\"mp-149\")\n"
+        info += "    atoms = AseAtomsAdaptor.get_atoms(structure)\n"
+        info += "    ```\n"
         info += "\n"
         info += "**Guidance for LLM:** When a material is mentioned:\n"
         info += "    a. Check the common list above. If found, note the mp-id for use.\n"
@@ -171,7 +257,88 @@ class MaterialsProjectHelper:
         except Exception as e:
             self.logger.error(f"Error during Materials Project search for '{chemical_query}': {e}", exc_info=True)
             return None
-    
+
+    def search_material_record(self, chemical_query: str, search_type: str = "formula",
+                               spacegroup_symbol: Optional[str] = None,
+                               crystal_system: Optional[str] = None) -> Optional[Dict]:
+        """
+        Like ``search_material_id`` but returns the full best-match record:
+        ``{"material_id", "formula_pretty", "energy_above_hull",
+        "spacegroup_symbol"}``, or None.
+
+        Optional ``spacegroup_symbol`` / ``crystal_system`` narrow the search
+        to a specific polymorph — required when the request specifies one
+        (e.g., 'rutile TiO2'), since plain formula search returns whichever
+        polymorph has the lowest e_above_hull regardless of which the user
+        asked for.
+
+        Used by the structure agent's pre-script tool-resolution step so the
+        LLM can verify it got the polymorph it asked for without a second
+        round-trip to MP.
+        """
+        if not self.enabled or not chemical_query:
+            return None
+
+        self.logger.info(
+            f"Searching MP record for '{chemical_query}' ({search_type}"
+            + (f", spacegroup={spacegroup_symbol}" if spacegroup_symbol else "")
+            + (f", crystal_system={crystal_system}" if crystal_system else "")
+            + ")"
+        )
+        try:
+            with MPRester(self.api_key) as mpr:
+                fields = ["material_id", "energy_above_hull", "formula_pretty", "symmetry"]
+                kwargs = {"fields": fields}
+                if spacegroup_symbol:
+                    kwargs["spacegroup_symbol"] = spacegroup_symbol
+                if crystal_system:
+                    # MP API expects the CrystalSystem enum value (capitalized),
+                    # but accepts the lowercase string too via pymatgen's coercion.
+                    kwargs["crystal_system"] = crystal_system.capitalize()
+
+                if search_type == "formula":
+                    results = mpr.materials.summary.search(
+                        formula=chemical_query, **kwargs,
+                    )
+                elif search_type == "chemsys":
+                    results = mpr.materials.summary.search(
+                        chemsys=chemical_query, **kwargs,
+                    )
+                else:
+                    self.logger.error(f"Invalid search_type: {search_type}")
+                    return None
+
+                if not results:
+                    return None
+
+                best = sorted(
+                    results,
+                    key=lambda x: (
+                        float('inf') if x.energy_above_hull is None else x.energy_above_hull,
+                        x.material_id,
+                    ),
+                )[0]
+
+                # `symmetry` is a Symmetry pydantic model with .symbol, .number,
+                # .crystal_system. Extract the HM symbol if present.
+                sg_symbol = None
+                sym = getattr(best, "symmetry", None)
+                if sym is not None:
+                    sg_symbol = getattr(sym, "symbol", None)
+
+                return {
+                    "material_id": str(best.material_id),
+                    "formula_pretty": best.formula_pretty,
+                    "energy_above_hull": best.energy_above_hull,
+                    "spacegroup_symbol": sg_symbol,
+                }
+        except Exception as e:
+            self.logger.error(
+                f"MP search_material_record error for '{chemical_query}': {e}",
+                exc_info=True,
+            )
+            return None
+
 
 def save_generated_script(script_content: str, description: str, attempt: int, output_dir: str) -> str | None:
     """Saves the script content to a file and returns the path."""
