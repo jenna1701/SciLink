@@ -5,15 +5,22 @@ Mirrors the shape of AnalysisOrchestratorTools — each tool is a closure
 registered via _register_tool with an OpenAI-format JSONSchema. Tools are
 dispatched from the chat loop's manual tool-call handler.
 
-Step 1 (skeleton): only a single placeholder `session_status` tool is wired
-up so the chat-loop dispatch path can be smoke-tested. Real tools land in
-subsequent commits — see the v1 tool surface in CLAUDE.md and the branch's
-PR description.
+Each tool wraps a piece of the existing sim_agents stack
+(StructureGenerator, StructureValidatorAgent, VaspInputAgent, etc.) and
+records a structure-centric session record in
+`orch.generated_structures` so subsequent tools can find prior work.
+
+Tools are constructed fresh per call (StructureGenerator's per-call
+`generated_script_dir` makes caching awkward, and construction is fast).
 """
 
+import glob
 import json
 import logging
-from typing import Any, Callable, Dict
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional
 
 
 class SimulationOrchestratorTools:
@@ -45,15 +52,9 @@ class SimulationOrchestratorTools:
         """Register all tools with OpenAI format. Called once from __init__."""
 
         # =====================================================================
-        # 0. SESSION STATUS  (placeholder — proves dispatch wiring works)
+        # 0. SESSION STATUS  (low-cost diagnostic)
         # =====================================================================
         def session_status() -> str:
-            """Report the orchestrator's current session state.
-
-            Useful as a smoke test of the tool-call dispatch path; will
-            remain in the registry as a low-cost diagnostic the LLM can
-            call when it needs to remember what's been generated.
-            """
             structures = self.orch.generated_structures or []
             params = self.orch.default_calc_params or {}
             return json.dumps({
@@ -65,6 +66,7 @@ class SimulationOrchestratorTools:
                         "slug": s.get("slug"),
                         "description": s.get("description"),
                         "poscar_path": s.get("poscar_path"),
+                        "incar_path": s.get("incar_path"),
                     } for s in structures
                 ],
                 "default_calc_params": params,
@@ -84,8 +86,484 @@ class SimulationOrchestratorTools:
             required=[],
         )
 
-        # ↓↓↓ Real tools land in subsequent commits (steps 2–6 of the branch).
-        # See CLAUDE.md "v1 tool surface" for the full list.
+        # =====================================================================
+        # 1. GENERATE STRUCTURE
+        # =====================================================================
+        def generate_structure(description: str) -> str:
+            from .structure_agent import StructureGenerator
+
+            slug = self._make_slug(description)
+            workdir = self.orch.structures_dir / slug
+            workdir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                sg = StructureGenerator(
+                    api_key=self.orch.api_key,
+                    base_url=self.orch.base_url,
+                    model_name=self.orch.model_name,
+                    generated_script_dir=str(workdir),
+                    mp_api_key=self.orch.mp_api_key,
+                )
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Failed to construct StructureGenerator: {e}",
+                })
+
+            # Append POSCAR-format request so downstream VASP tools can read it.
+            request = description
+            if "poscar" not in request.lower():
+                request = request + ". Save the structure in POSCAR format."
+
+            result = sg.generate_script(
+                original_user_request=request,
+                attempt_number_overall=1,
+                is_refinement_from_validation=False,
+            )
+
+            if result.get("status") != "success":
+                return json.dumps({
+                    "status": "error",
+                    "message": result.get("message") or result.get("last_error") or "Unknown failure",
+                    "last_attempted_script_path": result.get("last_attempted_script_path"),
+                })
+
+            poscar_path = result["output_file"]
+            script_path = result["final_script_path"]
+            script_content = result["final_script_content"]
+            n_atoms = self._count_atoms(poscar_path)
+
+            record = {
+                "slug": slug,
+                "description": description,
+                "structure_dir": str(workdir),
+                "poscar_path": poscar_path,
+                "script_path": script_path,
+                "script_content": script_content,
+                "incar_path": None,
+                "kpoints_path": None,
+                "vasp_summary": None,
+                "validation": None,
+                "created_at": datetime.now().isoformat(),
+            }
+            self.orch.generated_structures.append(record)
+
+            return json.dumps({
+                "status": "success",
+                "slug": slug,
+                "structure_dir": str(workdir),
+                "poscar_path": poscar_path,
+                "script_path": script_path,
+                "n_atoms": n_atoms,
+                "next_steps": (
+                    "Optionally call validate_structure(poscar_path=..., "
+                    "original_request=...) to review the geometry, or "
+                    "generate_vasp_inputs(...) to produce INCAR + KPOINTS."
+                ),
+            })
+
+        self._register_tool(
+            func=generate_structure,
+            name="generate_structure",
+            description=(
+                "Build a single atomic structure from a natural-language "
+                "description (e.g., 'rutile TiO2 with one O vacancy', "
+                "'graphene/MoS2 heterostructure'). Generates the structure "
+                "file (POSCAR) only — does not produce VASP inputs. Use "
+                "this when iterating on geometry; pair with "
+                "`validate_structure` and `refine_structure` for review/"
+                "refinement, and with `generate_vasp_inputs` afterward. "
+                "For the one-shot pipeline (structure + VASP inputs "
+                "together) use `run_complete_dft_workflow` instead."
+            ),
+            parameters={
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "Natural-language description of the structure to "
+                        "build. Be specific about polymorph (e.g., "
+                        "'rutile TiO2', 'wurtzite GaN'), supercell size, "
+                        "defects, and other modifications. Materials Project "
+                        "lookup is automatic when MP_API_KEY is configured."
+                    ),
+                },
+            },
+            required=["description"],
+        )
+
+        # =====================================================================
+        # 2. VALIDATE STRUCTURE
+        # =====================================================================
+        def validate_structure(poscar_path: str, original_request: str) -> str:
+            from .val_agent import StructureValidatorAgent
+
+            if not Path(poscar_path).exists():
+                return json.dumps({
+                    "status": "error",
+                    "message": f"POSCAR not found: {poscar_path}",
+                })
+
+            script_content = self._find_script_content(poscar_path)
+            if not script_content:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        "Could not locate the generating script next to the "
+                        "POSCAR. Validation requires the original script for "
+                        "context. Re-run generate_structure if needed."
+                    ),
+                })
+
+            try:
+                validator = StructureValidatorAgent(
+                    api_key=self.orch.api_key,
+                    base_url=self.orch.base_url,
+                    model_name=self.orch.model_name,
+                )
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Failed to construct StructureValidatorAgent: {e}",
+                })
+
+            val_result = validator.validate_structure_and_script(
+                structure_file_path=poscar_path,
+                generating_script_content=script_content,
+                original_request=original_request,
+            )
+
+            # Attach to the matching session record (if any)
+            record = self._find_structure_record(poscar_path)
+            if record is not None:
+                record["validation"] = val_result
+
+            return json.dumps({
+                "status": val_result.get("status", "unknown"),
+                "overall_assessment": val_result.get("overall_assessment", ""),
+                "all_identified_issues": val_result.get("all_identified_issues", []),
+                "script_modification_hints": val_result.get("script_modification_hints", []),
+                "poscar_path": poscar_path,
+            })
+
+        self._register_tool(
+            func=validate_structure,
+            name="validate_structure",
+            description=(
+                "Run a multimodal review of a previously generated structure "
+                "(POSCAR + generating script + axis-view images). Returns "
+                "overall_assessment, identified issues, and script-modification "
+                "hints. Status is 'success' when no issues remain, "
+                "'needs_correction' when refinement is warranted. Use after "
+                "generate_structure to verify the geometry before producing "
+                "VASP inputs."
+            ),
+            parameters={
+                "poscar_path": {
+                    "type": "string",
+                    "description": "Absolute path to the POSCAR file to validate.",
+                },
+                "original_request": {
+                    "type": "string",
+                    "description": (
+                        "The original natural-language request the structure "
+                        "was built for — used to check that the result "
+                        "matches what was asked for."
+                    ),
+                },
+            },
+            required=["poscar_path", "original_request"],
+        )
+
+        # =====================================================================
+        # 5. GENERATE VASP INPUTS
+        # =====================================================================
+        def generate_vasp_inputs(poscar_path: str, request: str,
+                                 method: str = "llm") -> str:
+            if not Path(poscar_path).exists():
+                return json.dumps({
+                    "status": "error",
+                    "message": f"POSCAR not found: {poscar_path}",
+                })
+
+            structure_dir = Path(poscar_path).parent
+
+            try:
+                if method == "llm":
+                    from .vasp_agent import VaspInputAgent
+                    agent = VaspInputAgent(
+                        api_key=self.orch.api_key,
+                        base_url=self.orch.base_url,
+                        model_name=self.orch.model_name,
+                    )
+                    vasp_result = agent.generate_vasp_inputs(
+                        poscar_path=poscar_path,
+                        original_request=request,
+                    )
+                    if vasp_result.get("status") != "success":
+                        return json.dumps({
+                            "status": "error",
+                            "message": vasp_result.get("message") or "VASP input generation failed",
+                        })
+                    saved = agent.save_inputs(vasp_result, str(structure_dir))
+                    if "error" in saved:
+                        return json.dumps({"status": "error", "message": saved["error"]})
+                    summary = vasp_result.get("summary", "")
+
+                elif method == "atomate2":
+                    try:
+                        from .atomate2_utils import Atomate2Input
+                    except ImportError as e:
+                        return json.dumps({
+                            "status": "error",
+                            "message": (
+                                "method='atomate2' requires the [sim] extras "
+                                "(pymatgen, atomate2). Install with: "
+                                "pip install 'scilink[sim]'. "
+                                f"Original error: {e}"
+                            ),
+                        })
+                    from ase.io import read as ase_read
+                    structure_obj = ase_read(poscar_path)
+                    Atomate2Input().generate(
+                        structure=structure_obj,
+                        output_dir=str(structure_dir),
+                    )
+                    summary = "Standard relaxation set from atomate2/pymatgen"
+
+                else:
+                    return json.dumps({
+                        "status": "error",
+                        "message": f"Invalid method '{method}'. Choose 'llm' or 'atomate2'.",
+                    })
+
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"VASP input generation failed: {e}",
+                })
+
+            incar_path = structure_dir / "INCAR"
+            kpoints_path = structure_dir / "KPOINTS"
+
+            record = self._find_structure_record(poscar_path)
+            if record is not None:
+                record["incar_path"] = str(incar_path)
+                record["kpoints_path"] = str(kpoints_path)
+                record["vasp_summary"] = summary
+
+            return json.dumps({
+                "status": "success",
+                "incar_path": str(incar_path),
+                "kpoints_path": str(kpoints_path),
+                "summary": summary,
+                "method": method,
+                "structure_dir": str(structure_dir),
+            })
+
+        self._register_tool(
+            func=generate_vasp_inputs,
+            name="generate_vasp_inputs",
+            description=(
+                "Generate VASP INCAR and KPOINTS files for a given structure "
+                "tailored to the scientific objective in `request`. Saves "
+                "INCAR + KPOINTS alongside the POSCAR. method='llm' (default) "
+                "uses an LLM to derive parameters; method='atomate2' uses "
+                "pymatgen/atomate2's MPRelaxSet (deterministic, requires the "
+                "[sim] extras)."
+            ),
+            parameters={
+                "poscar_path": {
+                    "type": "string",
+                    "description": "Absolute path to the POSCAR the inputs should match.",
+                },
+                "request": {
+                    "type": "string",
+                    "description": (
+                        "Scientific objective / calculation type description "
+                        "(e.g., 'static SCF for band structure', "
+                        "'relaxation with vdW corrections for an interface'). "
+                        "Drives INCAR parameter choices."
+                    ),
+                },
+                "method": {
+                    "type": "string",
+                    "enum": ["llm", "atomate2"],
+                    "description": (
+                        "'llm' (default): AI-driven, more flexible. "
+                        "'atomate2': rule-based, deterministic, requires the "
+                        "[sim] extras."
+                    ),
+                },
+            },
+            required=["poscar_path", "request"],
+        )
+
+        # =====================================================================
+        # 10. RUN COMPLETE DFT WORKFLOW (one-shot shortcut)
+        # =====================================================================
+        def run_complete_dft_workflow(description: str,
+                                      max_refinement_cycles: int = 4,
+                                      vasp_generator_method: str = "llm") -> str:
+            from .dft_orchestrator import DFTOrchestrator
+
+            slug = self._make_slug(description)
+            workdir = self.orch.structures_dir / slug
+            workdir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                wf = DFTOrchestrator(
+                    api_key=self.orch.api_key,
+                    base_url=self.orch.base_url,
+                    futurehouse_api_key=self.orch.futurehouse_api_key,
+                    mp_api_key=self.orch.mp_api_key,
+                    generator_model=self.orch.model_name,
+                    validator_model=self.orch.model_name,
+                    output_dir=str(workdir),
+                    max_refinement_cycles=max_refinement_cycles,
+                    vasp_generator_method=vasp_generator_method,
+                )
+                result = wf.run_complete_workflow(description)
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"DFT workflow failed: {e}",
+                })
+
+            final_status = result.get("final_status")
+            structure_gen = result.get("structure_generation", {}) or {}
+            structure_warning = structure_gen.get("warning")
+            cycles_used = structure_gen.get("cycles_used")
+            val_result = structure_gen.get("validation_result", {}) or {}
+            outstanding_issues = val_result.get("all_identified_issues", []) or []
+
+            poscar_path = workdir / "POSCAR"
+            incar_path = workdir / "INCAR"
+            kpoints_path = workdir / "KPOINTS"
+
+            # Record in session state (only if structure exists)
+            if poscar_path.exists():
+                record = {
+                    "slug": slug,
+                    "description": description,
+                    "structure_dir": str(workdir),
+                    "poscar_path": str(poscar_path),
+                    "script_path": structure_gen.get("final_script_path"),
+                    "script_content": None,  # not surfaced by run_complete_workflow
+                    "incar_path": str(incar_path) if incar_path.exists() else None,
+                    "kpoints_path": str(kpoints_path) if kpoints_path.exists() else None,
+                    "vasp_summary": result.get("vasp_generation", {}).get("summary"),
+                    "validation": val_result,
+                    "created_at": datetime.now().isoformat(),
+                }
+                self.orch.generated_structures.append(record)
+
+            return json.dumps({
+                "status": final_status if final_status else "error",
+                "ready_for_vasp": final_status == "success",
+                "output_directory": str(workdir),
+                "manifest_path": str(workdir / "final_files_manifest.json"),
+                "structure_warning": structure_warning,
+                "structure_refinement_cycles": cycles_used,
+                "structure_outstanding_issues_count": len(outstanding_issues),
+                "structure_outstanding_issues": outstanding_issues[:10],
+            })
+
+        self._register_tool(
+            func=run_complete_dft_workflow,
+            name="run_complete_dft_workflow",
+            description=(
+                "Run the full DFT input pipeline as a one-shot: structure "
+                "generation → validation → refinement → VASP inputs (with "
+                "optional literature validation when FUTUREHOUSE_API_KEY is "
+                "set). Use when the user just wants 'a complete DFT setup' "
+                "without iterating on each step. For iterative work "
+                "(build → check → refine → inputs), use the granular tools "
+                "(generate_structure, validate_structure, refine_structure, "
+                "generate_vasp_inputs) instead."
+            ),
+            parameters={
+                "description": {
+                    "type": "string",
+                    "description": "Natural-language description of the structure to build and prep.",
+                },
+                "max_refinement_cycles": {
+                    "type": "integer",
+                    "description": "Maximum validator-guided refinement cycles (default: 4).",
+                },
+                "vasp_generator_method": {
+                    "type": "string",
+                    "enum": ["llm", "atomate2"],
+                    "description": (
+                        "How to produce INCAR/KPOINTS. 'llm' (default) is "
+                        "more flexible; 'atomate2' is rule-based and faster."
+                    ),
+                },
+            },
+            required=["description"],
+        )
+
+        # ↓↓↓ Granular tools 3, 4, 6, 7, 11 land in step 3.
+        # ↓↓↓ Post-run analysis (8, 9) lands in step 4.
+
+    # ------------------------------------------------------------------
+    # Helpers used by tool closures
+    # ------------------------------------------------------------------
+
+    def _make_slug(self, description: str) -> str:
+        """Build a unique short slug from a description for use as a
+        directory name. Always increments the orchestrator's structure
+        counter so concurrent calls with the same description don't
+        collide."""
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", description)[:40].strip("_") or "structure"
+        self.orch._structure_counter += 1
+        return f"{safe}_{self.orch._structure_counter:03d}"
+
+    @staticmethod
+    def _count_atoms(poscar_path: str) -> Optional[int]:
+        """Best-effort atom count via ASE; returns None on parse failure."""
+        try:
+            from ase.io import read as ase_read
+            atoms = ase_read(poscar_path)
+            return len(atoms)
+        except Exception:
+            return None
+
+    def _find_script_content(self, poscar_path: str) -> Optional[str]:
+        """Find the generating script for a POSCAR.
+
+        First check the orchestrator's session records (cheap, exact). If
+        not found, fall back to globbing `script_*.py` in the POSCAR's
+        directory and reading the most recent one — this lets validation
+        work even when the LLM passes around paths without going through
+        the session record path.
+        """
+        record = self._find_structure_record(poscar_path)
+        if record and record.get("script_content"):
+            return record["script_content"]
+
+        poscar_dir = Path(poscar_path).parent
+        candidates = sorted(
+            poscar_dir.glob("script_*.py"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not candidates:
+            return None
+        try:
+            return candidates[0].read_text(encoding="utf-8")
+        except Exception:
+            return None
+
+    def _find_structure_record(self, poscar_path: str) -> Optional[Dict[str, Any]]:
+        """Find the session record matching a POSCAR path, by string match."""
+        target = str(Path(poscar_path).resolve())
+        for record in self.orch.generated_structures or []:
+            try:
+                if str(Path(record.get("poscar_path", "")).resolve()) == target:
+                    return record
+            except Exception:
+                continue
+        return None
 
     # ------------------------------------------------------------------
     # Registration + dispatch primitives (mirror analyze-mode shapes)
