@@ -93,7 +93,7 @@ Supported Models:
         dest='api_key',
         help='API key for LLM provider (overrides environment variables)'
     )
-    
+
     # Autonomy arguments
     parser.add_argument(
         '--autonomy',
@@ -199,7 +199,7 @@ Supported Models:
         print("⚠️  Warning: '--google-api-key' is deprecated. Use '--api-key' instead.")
         if not api_key:
             api_key = args.google_api_key
-    
+
     # Validate: higher autonomy requires data-dir
     if args.autonomy in ('supervised', 'autonomous') and not args.data_dir:
         parser.error(

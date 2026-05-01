@@ -191,3 +191,4 @@ kb_storage/
 
 # Test outputs
 test_*/
+tests/_e2e_runs/

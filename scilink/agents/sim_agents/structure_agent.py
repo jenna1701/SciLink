@@ -14,13 +14,14 @@ from .instruct import (
     DOCS_ENHANCED_INITIAL_PROMPT_TEMPLATE,
     DOCS_ENHANCED_CORRECTION_PROMPT_TEMPLATE
 )
-from .utils import save_generated_script, MaterialsProjectHelper
+from .utils import save_generated_script, MaterialsProjectHelper, MP_SEARCH_TOOL_SCHEMA
 from ...executors import ScriptExecutor, DEFAULT_TIMEOUT
 
 from ._deprecation import normalize_params
 
 
 MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS = 5
+MAX_MP_RESOLVER_ITERATIONS = 3
 
 # Tool configurations for keyword matching and documentation
 TOOL_CONFIGS = {
@@ -169,22 +170,30 @@ class StructureGenerator:
     def _build_initial_prompt(self, description: str, tool_name: str) -> str:
         """Build initial prompt with tool-specific documentation and MP integration."""
         docs_content = self._get_tool_docs(tool_name)
-        
+
         if docs_content and self.mp_helper.enabled:
             docs_content += self.mp_helper.get_common_materials_info()
-        
+
         if docs_content:
             base_prompt = DOCS_ENHANCED_INITIAL_PROMPT_TEMPLATE.format(
-                description=description, 
-                tool_name=tool_name, 
+                description=description,
+                tool_name=tool_name,
                 documentation=docs_content
             )
         else:
             base_prompt = INITIAL_PROMPT_TEMPLATE.format(
-                description=description, 
+                description=description,
                 tool_name=tool_name
             )
-        
+
+        # Pre-resolve any named materials in the request to mp-ids via tool
+        # calls, then inject the resolved facts as ground truth before the
+        # script-generation instructions. Empty string when MP is disabled,
+        # nothing needed resolving, or the resolver call itself fails.
+        resolved_block = self._resolve_materials_via_tools(description)
+        if resolved_block:
+            base_prompt = resolved_block + base_prompt
+
         return base_prompt + JSON_OUTPUT_INSTRUCTION
 
     def _build_correction_prompt(self, original_request: str, failed_script: str, 
@@ -253,6 +262,257 @@ class StructureGenerator:
         )
 
         return base_prompt + JSON_OUTPUT_INSTRUCTION
+
+    def _resolve_materials_via_tools(self, description: str) -> str:
+        """
+        Pre-script-generation step: ask the LLM to identify any named materials
+        in the request and resolve them to Materials Project IDs via tool
+        calls. Returns a formatted block to prepend to the script-generation
+        prompt, or "" when MP is unavailable, no materials need resolution,
+        or the resolution call itself fails.
+
+        Fails closed: any exception is logged as a warning and returns "" so
+        the caller falls through to the existing prompt unchanged.
+        """
+        if not self.mp_helper.enabled:
+            return ""
+
+        system_prompt = (
+            "You are a materials-science assistant whose only job is to "
+            "resolve named materials in a structure-building request to "
+            "Materials Project IDs (mp-ids). Use the `search_material_id` "
+            "tool for each specific material that appears named in the "
+            "request (e.g., 'rutile TiO2', 'NaCl', 'graphene', 'monoclinic "
+            "HfO2', 'GaAs'). For multiple materials, call the tool multiple "
+            "times — one call per material is fine. For generic requests "
+            "like 'a 4-atom cubic cell' or 'a Lennard-Jones solid', do not "
+            "call any tool and respond with the single token "
+            "NO_LOOKUP_NEEDED.\n\n"
+            "After all lookups are done, briefly summarize the resolved "
+            "ids in plain text. Do not write any Python code."
+        )
+        user_prompt = (
+            f"Structure-building request:\n{description}\n\n"
+            "Resolve any named materials to mp-ids."
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        tools = [MP_SEARCH_TOOL_SCHEMA]
+        resolved: list[dict] = []
+
+        try:
+            base_url = getattr(self.model, "base_url", None)
+            api_key = getattr(self.model, "api_key", None)
+            model_name = getattr(self.model, "model", None) or self.model_name
+
+            if base_url:
+                self._run_resolver_loop_openai(
+                    messages, tools, resolved,
+                    api_key=api_key, base_url=base_url, model_name=model_name,
+                )
+            else:
+                self._run_resolver_loop_litellm(
+                    messages, tools, resolved,
+                    api_key=api_key, model_name=model_name,
+                )
+        except Exception as e:
+            # Resolution is best-effort; don't fail the workflow over it.
+            self.logger.warning(f"MP resolution step failed (non-fatal): {e}")
+            return ""
+
+        if not resolved:
+            return ""
+
+        return self._format_resolved_block(resolved)
+
+    def _run_resolver_loop_openai(self, messages, tools, resolved,
+                                  *, api_key, base_url, model_name):
+        """Tool-call loop using the OpenAI Python SDK (internal-proxy path)."""
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
+
+        for _ in range(MAX_MP_RESOLVER_ITERATIONS):
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+            )
+            msg = resp.choices[0].message
+            if not msg.tool_calls:
+                break
+            messages.append({
+                "role": "assistant",
+                "content": msg.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    } for tc in msg.tool_calls
+                ],
+            })
+            for tc in msg.tool_calls:
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                result = self._dispatch_resolver_tool(tc.function.name, args, resolved)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result,
+                })
+
+    def _run_resolver_loop_litellm(self, messages, tools, resolved,
+                                   *, api_key, model_name):
+        """Tool-call loop using LiteLLM (public-API path)."""
+        import litellm
+
+        for _ in range(MAX_MP_RESOLVER_ITERATIONS):
+            resp = litellm.completion(
+                model=model_name,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                api_key=api_key,
+                timeout=60,
+            )
+            msg = resp.choices[0].message
+            tcs = getattr(msg, "tool_calls", None)
+            if not tcs:
+                break
+            messages.append({
+                "role": "assistant",
+                "content": getattr(msg, "content", None),
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    } for tc in tcs
+                ],
+            })
+            for tc in tcs:
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                result = self._dispatch_resolver_tool(tc.function.name, args, resolved)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result,
+                })
+
+    def _dispatch_resolver_tool(self, name: str, args: dict, resolved: list) -> str:
+        """Execute a resolver tool call. Records the outcome in `resolved` and
+        returns a JSON string the LLM can read back."""
+        if name != "search_material_id":
+            return json.dumps({"error": f"Unknown tool: {name}"})
+
+        query = (args.get("chemical_query") or "").strip()
+        search_type = args.get("search_type") or "formula"
+        spacegroup_symbol = (args.get("spacegroup_symbol") or "").strip() or None
+        crystal_system = (args.get("crystal_system") or "").strip() or None
+        if not query:
+            return json.dumps({"error": "chemical_query is required"})
+
+        record = self.mp_helper.search_material_record(
+            query,
+            search_type=search_type,
+            spacegroup_symbol=spacegroup_symbol,
+            crystal_system=crystal_system,
+        )
+
+        # Build a label that captures the polymorph constraint so the resolved
+        # block reads as "rutile TiO2 → mp-XXXX" rather than just "TiO2".
+        label_parts = []
+        if spacegroup_symbol:
+            label_parts.append(spacegroup_symbol)
+        elif crystal_system:
+            label_parts.append(crystal_system)
+        label_parts.append(query)
+        query_label = " ".join(label_parts)
+
+        if record is None:
+            resolved.append({
+                "query": query_label,
+                "search_type": search_type,
+                "mp_id": None,
+                "formula": None,
+                "e_above_hull": None,
+                "spacegroup_symbol": None,
+            })
+            return json.dumps({
+                "found": False,
+                "query": query_label,
+                "message": (
+                    "No Materials Project entry found for this query."
+                    + (" Try without the polymorph filter." if (spacegroup_symbol or crystal_system) else "")
+                ),
+            })
+
+        resolved.append({
+            "query": query_label,
+            "search_type": search_type,
+            "mp_id": record["material_id"],
+            "formula": record.get("formula_pretty"),
+            "e_above_hull": record.get("energy_above_hull"),
+            "spacegroup_symbol": record.get("spacegroup_symbol"),
+        })
+        return json.dumps({
+            "found": True,
+            "query": query_label,
+            "mp_id": record["material_id"],
+            "formula": record.get("formula_pretty"),
+            "spacegroup_symbol": record.get("spacegroup_symbol"),
+            "e_above_hull": record.get("energy_above_hull"),
+        })
+
+    @staticmethod
+    def _format_resolved_block(resolved: list) -> str:
+        """Format the resolver's findings as a markdown block to prepend to
+        the script-generation prompt."""
+        lines = ["## RESOLVED MATERIALS (Materials Project lookup results):"]
+        for entry in resolved:
+            if entry["mp_id"] is None:
+                lines.append(
+                    f'- Query "{entry["query"]}" ({entry["search_type"]}): '
+                    f'no MP entry found — build the structure from scratch '
+                    f'using ASE primitives.'
+                )
+            else:
+                ehull = entry.get("e_above_hull")
+                ehull_str = (
+                    f"{ehull:.4f} eV/atom" if isinstance(ehull, (int, float)) else "N/A"
+                )
+                sg = entry.get("spacegroup_symbol")
+                sg_str = f", space group: {sg}" if sg else ""
+                lines.append(
+                    f'- Query "{entry["query"]}" → **{entry["mp_id"]}** '
+                    f'(formula: {entry["formula"]}{sg_str}, '
+                    f'e_above_hull: {ehull_str})'
+                )
+        lines.append("")
+        lines.append(
+            "To use a resolved mp-id in the script, fetch the structure via "
+            "pymatgen and convert to ASE Atoms. The MP_API_KEY environment "
+            "variable is already set in the sandbox:"
+        )
+        lines.append("```python")
+        lines.append("import os")
+        lines.append("from mp_api.client import MPRester")
+        lines.append("from pymatgen.io.ase import AseAtomsAdaptor")
+        lines.append('with MPRester(os.getenv("MP_API_KEY")) as mpr:')
+        lines.append('    structure = mpr.get_structure_by_material_id("mp-XXXX")')
+        lines.append("atoms = AseAtomsAdaptor.get_atoms(structure)")
+        lines.append("```")
+        lines.append("")
+        return "\n".join(lines) + "\n"
 
     def _generate_json(self, prompt: str) -> dict:
         """Generate JSON response from LLM."""

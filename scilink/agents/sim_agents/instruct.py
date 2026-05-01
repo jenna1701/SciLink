@@ -6,13 +6,15 @@ First, think step-by-step about how you would create this structure:
 2. What supercell sizes, layer thicknesses, or geometric parameters are required?
 3. What defects, substitutions, or other modifications need to be applied?
 4. What atomic constraints are physically appropriate for this model? (e.g., fixing the bottom layers of a slab to mimic bulk).
-5. How should the materials be combined? (For interfaces/heterostructures: stacking order, lattice matching, strain accommodation)
-6. In what order should these steps be performed?
+5. How should the materials be combined? (For interfaces/heterostructures, do NOT invent supercell sizes by hand — that frequently produces unphysical strain. Use `pymatgen.analysis.interfaces.zsl.ZSLGenerator` (or `CoherentInterfaceBuilder`) to enumerate lattice-matched supercell combinations and pick one with low strain (typically <5%). If the user pinned specific supercell sizes that don't lattice-match, prefer the user's explicit request only if the resulting strain is reasonable; otherwise raise an error explaining the mismatch rather than producing a 50%+-strain structure.)
+6. If the user requests an **amorphous** material as a substrate or component, do NOT fake it by adding small random displacements to a crystalline polymorph — that produces a disordered crystal, not a true amorphous network with proper coordination chemistry. A real amorphous structure requires melt-quench molecular dynamics (out of scope for a one-shot script). Either (a) raise a `NotImplementedError` explaining that a pre-equilibrated amorphous structure file should be supplied by the user, or (b) build with a crystalline polymorph and **explicitly disclose in a printed message** that the substrate is crystalline, not amorphous as requested. Do not silently produce a "pseudo-amorphous" structure.
+7. **Stacking convention** for substrate-on-overlayer geometries: the named *substrate* (the material the user says the overlayer is "on") must occupy the lower z-range of the cell, and the *overlayer* must occupy the higher z-range above it. Vacuum goes above the overlayer. Surface passivation (e.g., H termination) goes on the substrate's bottom surface (its z-min side, away from the overlayer). After assembling the structure, verify this with explicit min/max z prints per species before saving — getting this inverted is a common failure.
+8. In what order should these steps be performed?
 
-Then, generate a *complete* and *executable* Python script using the Atomic Simulation Environment (ASE) library to implement your approach:
-1. The script MUST include necessary imports (e.g., `from ase import Atoms`, `from ase.build import ...`, `from ase.io import write`).
-2. The script MUST define or load the base structure correctly (e.g., using `bulk`, `surface`, `molecule`, or reading a file if appropriate).
-3. The script MUST perform any requested modifications (e.g., creating vacancies, substituting atoms, adding adsorbates, applying strain). Use standard ASE functionalities when available.
+Then, generate a *complete* and *executable* Python script implementing your approach. Use ASE as the primary structure-manipulation and I/O library; bring in other Python libraries as needed (e.g., `pymatgen` for Materials Project structure fetching and interface lattice matching, `aimsgb` for grain boundaries):
+1. The script MUST include all necessary imports (e.g., `from ase import Atoms`, `from ase.build import ...`, `from ase.io import write`, plus any non-ASE libraries the approach requires).
+2. The script MUST define or load the base structure correctly (e.g., via ASE's `bulk` / `surface` / `molecule`, by reading a file, or by fetching from Materials Project with `MPRester`).
+3. The script MUST perform any requested modifications (e.g., creating vacancies, substituting atoms, adding adsorbates, applying strain). Use standard ASE functionality when available; fall back to pymatgen or other libraries when ASE doesn't cover the operation cleanly.
 4. The script MUST save the final `Atoms` object to a file (e.g., 'structure.xyz', 'POSCAR', 'structure.cif'). Choose a suitable, simple filename.
 5. CRITICALLY: Immediately after successfully saving the file, the script MUST print *exactly* this confirmation line to standard output: `STRUCTURE_SAVED:<filename.ext>` (replace `<filename.ext>` with the actual filename used). No other output should precede or follow this specific line unless it's part of error handling.
 6. Ensure the script handles potential issues gracefully if possible (e.g., checks for valid indices if modifying atoms).
@@ -22,7 +24,7 @@ Then, generate a *complete* and *executable* Python script using the Atomic Simu
 CORRECTION_PROMPT_TEMPLATE = """
 The user's original request was: "{original_request}"
 
-You previously generated the following Python ASE script:
+You previously generated the following Python script:
 ```python
 {failed_script}
 ```
@@ -32,9 +34,9 @@ Your task is to:
 
 Analyze the error message (especially the traceback) and the failed script provided above.
 Identify the specific bug or issue in the script that caused the error. Common issues include incorrect imports, wrong function arguments, index errors, undefined variables, or logical errors in structure manipulation.
-Generate a corrected, complete, and executable Python ASE script that fulfills the original request ("{original_request}") and specifically avoids the previous error.
-The corrected script MUST still include all necessary imports, structure definition/modification, saving the file with ase.io.write(), and printing the exact confirmation line 'STRUCTURE_SAVED:<filename.ext>' upon successful saving. Use a simple filename.
-Call the '{tool_name}' function/tool again, providing the entire corrected Python script content as the 'script_content' argument. Do not add explanatory text around the function call itself. 
+Generate a corrected, complete, and executable Python script that fulfills the original request ("{original_request}") and specifically avoids the previous error. Use ASE as the primary structure library; bring in pymatgen or other Python libraries when the approach requires them.
+The corrected script MUST still include all necessary imports, structure definition/modification, saving the file with `ase.io.write()` (or equivalent), and printing the exact confirmation line 'STRUCTURE_SAVED:<filename.ext>' upon successful saving. Use a simple filename.
+Call the '{tool_name}' function/tool again, providing the entire corrected Python script content as the 'script_content' argument. Do not add explanatory text around the function call itself.
 """
 
 
@@ -135,12 +137,12 @@ A previous attempt to generate an ASE script for this request was made.
   - **Validator's Hints for Modifying the Script:**
     {validator_script_hints}
 {prior_attempts_summary}
-Your task is to generate a **new, corrected, complete, and executable Python ASE script** that:
+Your task is to generate a **new, corrected, complete, and executable Python script** that:
 1.  Precisely fulfills the original user request: "{original_request}".
 2.  Directly addresses **substantive** "Specific Issues Identified by Validator" — but recognize when an "issue" is actually cosmetic or a non-problem (see rule 8 below).
 3.  Intelligently incorporates the "Validator's Hints for Modifying the Script". If hints conflict or are unclear, prioritize fulfilling the original request and fixing real issues.
-4.  The script MUST include all necessary imports (e.g., `from ase import Atoms`, `from ase.build import ...`, `from ase.io import write`).
-5.  The script MUST save the final `Atoms` object to a file (e.g., 'structure.xyz', 'POSCAR'). Choose a suitable, simple filename.
+4.  The script MUST include all necessary imports. Use ASE as the primary structure library (e.g., `from ase import Atoms`, `from ase.build import ...`, `from ase.io import write`); bring in pymatgen or other Python libraries when the approach requires them (e.g., `MPRester` for MP fetching, `pymatgen.analysis.interfaces` for lattice matching, `aimsgb` for grain boundaries).
+5.  The script MUST save the final structure to a file (e.g., 'structure.xyz', 'POSCAR'). Choose a suitable, simple filename.
 6.  CRITICALLY: Immediately after successfully saving the file, the script MUST print *exactly* this confirmation line to standard output: `STRUCTURE_SAVED:<filename.ext>` (replace `<filename.ext>` with the actual filename used).
 7.  Call the '{tool_name}' function/tool with the *entire new corrected Python script content* as the 'script_content' argument. Do not add any explanatory text before or after the function call itself in your response.
 8.  **STOP CHASING COSMETIC ISSUES.** If the prior-attempts history shows the same kind of complaint repeating (e.g., "negative Cartesian coordinates in hexagonal cell", "atom near edge could be wrapped", "structure could be cleaner"), AND no prior fix has eliminated it, treat it as cosmetic and **return the previous script unchanged** (or with only trivial whitespace changes). Cosmetic remarks do not warrant another refinement cycle. Save the user's compute budget by accepting the structure as-is when validator complaints are recurring or non-substantive.

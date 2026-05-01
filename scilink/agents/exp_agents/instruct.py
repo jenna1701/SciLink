@@ -129,7 +129,9 @@ You MUST output a valid JSON object containing two keys: "detailed_reasoning_for
         - "3x3 Cu(100) surface slab, 4 layers thick, with an NH3 molecule adsorbed on a hollow site"
         - "3x3x3 Si supercell, diamond phase, with a **Carbon substituting a Silicon defect**"
         - "Interface model of 2x2 Graphene on 3x3 Ni(111)"
-    * **scientific_interest**: (String) Explain *why* this specific structure is scientifically interesting based on the provided textual analysis and novelty insights, and what DFT simulation could provide. Explicitly link to the novel aspects where appropriate.
+
+        **Be conservative about unstated parameters.** Don't invent material details that the cached analysis doesn't establish — use generic descriptors when in doubt and let the downstream structure agent apply defaults. If you must make a non-obvious assumption to produce a buildable structure, flag it with an "Assumption:" prefix in `scientific_interest`.
+    * **scientific_interest**: (String) Explain *why* this specific structure is scientifically interesting based on the provided textual analysis and novelty insights, and what DFT simulation could provide. Explicitly link to the novel aspects where appropriate. Record any "Assumption:" lines here flagging inferred parameters in the description.
     * **priority**: (Integer) A number from 1 (highest) to 10 (lowest) indicating the importance or interest level for simulating this structure.
 
 Focus on recommending structures that are computationally feasible for DFT and capture the most scientifically significant features highlighted in the text. Prioritize recommendations that address the 'Special Considerations'. Ensure the final output is ONLY the JSON object and nothing else.
