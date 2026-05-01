@@ -1134,6 +1134,32 @@ class SimulationOrchestratorTools:
     # Helpers used by tool closures
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _print_validation_results(val_result: Dict[str, Any], cycle_num: int) -> None:
+        """Mirror DFTOrchestrator._print_validation_results so the simulate
+        orchestrator's chat shows the same structured assessment / issues /
+        improvements block users are used to from analyze→DFT runs."""
+        if val_result.get("status") == "success":
+            print(f"    ✅ Validation passed (cycle {cycle_num})")
+            return
+
+        issues = val_result.get("all_identified_issues", []) or []
+        hints = val_result.get("script_modification_hints", []) or []
+        assessment = val_result.get("overall_assessment", "No assessment provided")
+
+        print(f"    ⚠️  Validation (cycle {cycle_num}) found {len(issues)} issue(s):")
+        print(f"\n    📋 Overall Assessment:")
+        print(f"       {assessment}")
+        if issues:
+            print(f"\n    🔍 Specific Issues:")
+            for i, issue in enumerate(issues, 1):
+                print(f"       {i}. {issue}")
+        if hints:
+            print(f"\n    💡 Suggested Improvements:")
+            for i, hint in enumerate(hints, 1):
+                print(f"       {i}. {hint}")
+        print()
+
     def _validate_refine_loop(self, record: Dict[str, Any], sg,
                               original_request: str,
                               skill_content: Optional[str],
@@ -1145,10 +1171,10 @@ class SimulationOrchestratorTools:
         attempt and ``validation`` holds the latest validator output.
 
         Mirrors DFTOrchestrator._generate_and_validate_structure's
-        circuit-breakers (unchanged-script and plateau-vs-divergence) so a
-        validator looping on cosmetic complaints accepts the structure
-        rather than burning the cycle budget — same fixes that landed in
-        the mp-tool-resolver branch.
+        circuit-breakers (unchanged-script and plateau-vs-divergence) AND
+        its progress-reporting format so users see the same "📋 Assessment
+        / 🔍 Issues / 💡 Improvements" block they're used to from
+        analyze-mode DFT runs.
 
         Returns: (cycles_used, warning_or_None).
         """
@@ -1170,7 +1196,7 @@ class SimulationOrchestratorTools:
         prev_script = record.get("script_content")
 
         for cycle in range(1, max_cycles + 1):
-            # Validate the current state of the record.
+            print(f"🔍 Validating structure (cycle {cycle}/{max_cycles})...")
             val = validator.validate_structure_and_script(
                 structure_file_path=record["poscar_path"],
                 generating_script_content=record["script_content"],
@@ -1183,6 +1209,8 @@ class SimulationOrchestratorTools:
                 "hints": list(val.get("script_modification_hints", []) or []),
             })
 
+            self._print_validation_results(val, cycle)
+
             if val.get("status") == "success":
                 return cycle, None
 
@@ -1193,25 +1221,33 @@ class SimulationOrchestratorTools:
                 n_prev2 = len(attempt_history[-3]["issues"])
                 if n_now >= n_prev and n_prev >= n_prev2:
                     if n_now > n_prev2:
-                        return cycle, (
+                        msg = (
                             f"Refinement stopped: validator complaints "
                             f"diverging ({n_prev2} → {n_prev} → {n_now}). "
                             f"Structure may have substantial unresolved "
                             f"issues; review before proceeding to VASP."
                         )
-                    return cycle, (
+                        print(f"🛑 {msg}")
+                        return cycle, msg
+                    msg = (
                         "Refinement stopped: issue count plateaued "
                         "(likely cosmetic)."
                     )
+                    print(f"🛑 {msg}")
+                    return cycle, msg
 
-            # Out of budget — stop without refining further.
             if cycle >= max_cycles:
-                return cycle, (
+                msg = (
                     f"Max refinement cycles ({max_cycles}) reached; "
                     f"structure has unresolved validation issues."
                 )
+                print(f"⚠️  {msg}")
+                return cycle, msg
 
             # Refine.
+            n_issues = len(val.get("all_identified_issues", []) or [])
+            print(f"🔄 Refining structure (cycle {cycle + 1}/{max_cycles}) — "
+                  f"addressing {n_issues} issue(s)")
             refine_result = sg.generate_script(
                 original_user_request=original_request,
                 attempt_number_overall=cycle + 1,
@@ -1222,24 +1258,41 @@ class SimulationOrchestratorTools:
                 skill_content=skill_content,
             )
             if refine_result.get("status") != "success":
-                return cycle, (
-                    f"Refinement failed on cycle {cycle + 1}: "
-                    f"{refine_result.get('message') or refine_result.get('last_error')}"
+                # Surface the actual underlying error (often a truncated
+                # Python traceback from the failed inner-retry loop), and
+                # make it explicit that we're keeping the prior good state
+                # so the user knows the cycle-N structure is still usable.
+                last_err = (
+                    refine_result.get("last_error")
+                    or refine_result.get("message")
+                    or "(no detail captured)"
                 )
+                err_snippet = str(last_err).strip()
+                if len(err_snippet) > 800:
+                    err_snippet = err_snippet[:800] + "\n   [... truncated ...]"
+                print(f"❌ Refinement attempt for cycle {cycle + 1} failed.")
+                print(f"   Underlying error:\n   {err_snippet.replace(chr(10), chr(10) + '   ')}")
+                print(f"   Keeping the structure from cycle {cycle} "
+                      f"(POSCAR: {record['poscar_path']}).")
+                msg = (
+                    f"Refinement failed on cycle {cycle + 1} (kept the "
+                    f"structure from cycle {cycle}, which IS usable as a "
+                    f"DFT starting geometry — the failure was in the "
+                    f"validator-driven rewrite, not in the original build)."
+                )
+                return cycle, msg
 
             new_script = refine_result["final_script_content"]
-            # Generator returned same script → nothing left to fix.
             if new_script == prev_script:
-                return cycle, (
-                    "Refinement stopped: generator made no further changes."
-                )
+                msg = "Refinement stopped: generator made no further changes."
+                print(f"🛑 {msg}")
+                return cycle, msg
 
             record["poscar_path"] = refine_result["output_file"]
             record["script_path"] = refine_result["final_script_path"]
             record["script_content"] = new_script
             prev_script = new_script
 
-        # Loop exit without explicit return — should not happen, but be safe.
         return max_cycles, None
 
     def _load_skill_content(self, skill_name: str) -> Optional[str]:
