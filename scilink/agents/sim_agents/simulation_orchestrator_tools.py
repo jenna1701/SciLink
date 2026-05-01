@@ -89,12 +89,16 @@ class SimulationOrchestratorTools:
         # =====================================================================
         # 1. GENERATE STRUCTURE
         # =====================================================================
-        def generate_structure(description: str) -> str:
+        def generate_structure(description: str, skill: str = None) -> str:
             from .structure_agent import StructureGenerator
 
             slug = self._make_slug(description)
             workdir = self.orch.structures_dir / slug
             workdir.mkdir(parents=True, exist_ok=True)
+
+            # Resolve skill content if requested (best-effort; structure-gen
+            # falls through to a generic prompt on lookup failure).
+            skill_content = self._load_skill_content(skill) if skill else None
 
             try:
                 sg = StructureGenerator(
@@ -119,6 +123,7 @@ class SimulationOrchestratorTools:
                 original_user_request=request,
                 attempt_number_overall=1,
                 is_refinement_from_validation=False,
+                skill_content=skill_content,
             )
 
             if result.get("status") != "success":
@@ -140,6 +145,7 @@ class SimulationOrchestratorTools:
                 "poscar_path": poscar_path,
                 "script_path": script_path,
                 "script_content": script_content,
+                "skill": skill,
                 "incar_path": None,
                 "kpoints_path": None,
                 "vasp_summary": None,
@@ -155,6 +161,7 @@ class SimulationOrchestratorTools:
                 "poscar_path": poscar_path,
                 "script_path": script_path,
                 "n_atoms": n_atoms,
+                "skill_used": skill,
                 "next_steps": (
                     "Optionally call validate_structure(poscar_path=..., "
                     "original_request=...) to review the geometry, or "
@@ -174,7 +181,11 @@ class SimulationOrchestratorTools:
                 "`validate_structure` and `refine_structure` for review/"
                 "refinement, and with `generate_vasp_inputs` afterward. "
                 "For the one-shot pipeline (structure + VASP inputs "
-                "together) use `run_complete_dft_workflow` instead."
+                "together) use `run_complete_dft_workflow` instead.\n\n"
+                "Set `skill='aimsgb'` for grain boundaries / bicrystals / "
+                "coincident-site-lattice constructions to load curated "
+                "library guidance. Skip the `skill` parameter for plain "
+                "ASE / pymatgen workflows."
             ),
             parameters={
                 "description": {
@@ -185,6 +196,17 @@ class SimulationOrchestratorTools:
                         "'rutile TiO2', 'wurtzite GaN'), supercell size, "
                         "defects, and other modifications. Materials Project "
                         "lookup is automatic when MP_API_KEY is configured."
+                    ),
+                },
+                "skill": {
+                    "type": "string",
+                    "description": (
+                        "Optional name of a built-in structure-generation "
+                        "skill to load as additional library guidance. "
+                        "Currently available: 'aimsgb' (for grain "
+                        "boundaries / bicrystals / Σ-value parametrized "
+                        "interfaces). Omit when no specialized library is "
+                        "needed."
                     ),
                 },
             },
@@ -559,12 +581,17 @@ class SimulationOrchestratorTools:
             if "poscar" not in request.lower():
                 request = request + ". Save the structure in POSCAR format."
 
+            # Re-apply the same skill (if any) the original generation used,
+            # so the refinement prompt has the same library guidance available.
+            skill_content = self._load_skill_content(record.get("skill")) if record.get("skill") else None
+
             result = sg.generate_script(
                 original_user_request=request,
                 attempt_number_overall=2,  # refinement cycle
                 is_refinement_from_validation=True,
                 previous_script_content=prior_script,
                 validator_feedback=validator_feedback,
+                skill_content=skill_content,
             )
 
             if result.get("status") != "success":
@@ -1064,6 +1091,54 @@ class SimulationOrchestratorTools:
     # ------------------------------------------------------------------
     # Helpers used by tool closures
     # ------------------------------------------------------------------
+
+    def _load_skill_content(self, skill_name: str) -> Optional[str]:
+        """Resolve a skill name to its content, formatted as a single block.
+
+        Resolution order:
+          1. Built-in skills under scilink/skills/structure_generation/
+          2. User-registered skills via orchestrator.register_skill()
+
+        Returns None on any failure (fail-closed; the structure-gen prompt
+        falls through to the generic template). Doesn't raise.
+        """
+        if not skill_name:
+            return None
+        try:
+            from scilink.skills.loader import load_skill
+            parsed = load_skill(skill_name, domain="structure_generation")
+        except FileNotFoundError:
+            # Fall back to user-registered skills (orchestrator-level)
+            user_skills = getattr(self.orch, "_custom_skills", {}) or {}
+            path = user_skills.get(skill_name)
+            if not path:
+                self.logger.warning(
+                    f"Skill '{skill_name}' not found in built-ins or "
+                    "user-registered skills. Proceeding without skill content."
+                )
+                return None
+            try:
+                from scilink.skills.loader import load_skill as _load
+                parsed = _load(path)
+            except Exception as e:
+                self.logger.warning(f"Failed to load user skill '{skill_name}': {e}")
+                return None
+        except Exception as e:
+            self.logger.warning(f"Failed to load skill '{skill_name}': {e}")
+            return None
+
+        # Concatenate the populated sections in a stable order.
+        section_order = ["overview", "planning", "implementation",
+                         "validation", "interpretation", "analysis"]
+        chunks = []
+        for sec in section_order:
+            body = (parsed.get(sec) or "").strip()
+            if body:
+                chunks.append(f"### {sec.capitalize()}\n\n{body}")
+        if not chunks:
+            return None
+        header = f"# Skill: {parsed.get('name') or skill_name}"
+        return header + "\n\n" + "\n\n".join(chunks)
 
     def _make_slug(self, description: str) -> str:
         """Build a unique short slug from a description for use as a

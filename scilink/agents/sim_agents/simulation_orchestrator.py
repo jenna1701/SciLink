@@ -115,6 +115,18 @@ inside `generate_structure` when MP_API_KEY is available.
 """
 
 
+def _list_builtin_structure_skills() -> list:
+    """List built-in skills under scilink/skills/structure_generation/.
+
+    Returns an empty list on any error (the system prompt simply omits the
+    section when there's nothing to show)."""
+    try:
+        from scilink.skills.loader import list_skills
+        return list_skills(domain="structure_generation") or []
+    except Exception:
+        return []
+
+
 def get_system_prompt(
     simulation_mode: SimulationMode,
     external_tools: Optional[list] = None,
@@ -139,6 +151,26 @@ def get_system_prompt(
     body = _SYSTEM_PROMPT_BODY.format(
         tools_section="(see tool definitions provided to the model)"
     )
+
+    # Surface available built-in structure-generation skills so the LLM knows
+    # to pass `skill='aimsgb'` (etc.) to generate_structure / refine_structure
+    # when the request matches the skill's domain.
+    builtin_skills = _list_builtin_structure_skills()
+    if builtin_skills:
+        body += (
+            "\n**BUILT-IN STRUCTURE-GENERATION SKILLS (load via the `skill` "
+            "parameter on generate_structure / refine_structure):**\n"
+        )
+        for name in builtin_skills:
+            body += f"  * `{name}`\n"
+        body += (
+            "These are curated library-guidance blocks loaded into the "
+            "structure-generation prompt only when the user's request "
+            "matches the skill's domain (e.g., grain boundaries → "
+            "`skill='aimsgb'`). Skip the parameter entirely for plain "
+            "ASE / pymatgen workflows.\n"
+        )
+
     if external_tools:
         lines = ["\n**CUSTOM TOOLS (registered externally, call directly by name):**"]
         for t in external_tools:

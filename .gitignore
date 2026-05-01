@@ -193,3 +193,4 @@ kb_storage/
 test_*/
 tests/_e2e_runs/
 tests/_simulate_runs/
+simulate_session_*/
