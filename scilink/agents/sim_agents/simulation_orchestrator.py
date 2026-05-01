@@ -327,23 +327,121 @@ class SimulationOrchestratorAgent:
     def run_task(self, task: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Non-interactive entry point — used by the future meta agent.
 
-        Runs the task in autonomous mode and returns a structured summary:
+        Runs the task in autonomous mode (regardless of the agent's current
+        configured mode) and returns a structured summary that's easy to
+        consume programmatically:
 
             {
-                "summary": str,
-                "files_produced": List[str],     # absolute paths
-                "key_findings": List[str],
+                "status": "success" | "error",
+                "summary": str,                    # the agent's final reply
+                "files_produced": List[str],       # absolute paths
+                "key_findings": List[str],         # extracted from validations
                 "suggested_followups": List[str],
+                "structures": List[dict],          # session record snapshot
+                "warnings": List[str],
+                "task": str,                       # echoed input
             }
 
-        TODO(step 7): full implementation. For now, raises NotImplementedError
-        so callers fail loudly rather than silently using the chat surface.
+        The implementation pins the agent into AUTONOMOUS mode for the
+        duration of the call, runs the chat loop once with the task as
+        user input, then derives the structured summary from the
+        post-call session state. The original autonomy mode is restored
+        on exit so an interactive session is unaffected.
         """
-        raise NotImplementedError(
-            "run_task is not yet implemented (planned for step 7 of the "
-            "simulate-orchestrator branch). Use chat() in autonomous mode "
-            "as a workaround until then."
-        )
+        # Build a self-contained prompt that includes the optional context.
+        prompt = task
+        if context:
+            try:
+                ctx_str = json.dumps(context, indent=2, default=str)
+            except (TypeError, ValueError):
+                ctx_str = repr(context)
+            prompt = (
+                f"{task}\n\n"
+                f"Context provided by the caller (e.g., upstream agent's findings):\n"
+                f"```\n{ctx_str}\n```\n\n"
+                "Use this context together with your tools to complete the task."
+            )
+
+        # Snapshot prior state so we can compute "what was produced *during*
+        # this call" rather than "everything in the session."
+        structures_before = list(self.generated_structures or [])
+        n_before = len(structures_before)
+
+        # Pin autonomy to AUTONOMOUS for the duration of this call so the
+        # agent doesn't pause to ask the (nonexistent) user for confirmation.
+        original_mode = self.simulation_mode
+        try:
+            self.set_simulation_mode(SimulationMode.AUTONOMOUS)
+            try:
+                summary_text = self.chat(prompt)
+                status = "success"
+                error_msg: Optional[str] = None
+            except Exception as e:
+                self.logger.exception(f"run_task failed: {e}")
+                summary_text = ""
+                status = "error"
+                error_msg = str(e)
+        finally:
+            # Always restore the original mode, even if chat() raised.
+            self.set_simulation_mode(original_mode)
+
+        # Derive the structured summary from session state.
+        new_structures = (self.generated_structures or [])[n_before:]
+
+        files_produced: List[str] = []
+        key_findings: List[str] = []
+        for s in new_structures:
+            for key in ("poscar_path", "incar_path", "kpoints_path", "script_path"):
+                p = s.get(key)
+                if p:
+                    files_produced.append(p)
+            val = s.get("validation") or {}
+            for issue in val.get("all_identified_issues", []) or []:
+                key_findings.append(f"[{s.get('slug')}] {issue}")
+            assessment = val.get("overall_assessment")
+            if assessment:
+                key_findings.append(f"[{s.get('slug')}] {assessment}")
+
+        warnings: List[str] = []
+        for s in new_structures:
+            val = s.get("validation") or {}
+            if val.get("status") == "needs_correction":
+                warnings.append(
+                    f"Structure {s.get('slug')} has unresolved validation issues."
+                )
+
+        # Heuristic: a "follow-up" is a structure that has a POSCAR but no
+        # INCAR/KPOINTS yet — natural next step for the caller is to
+        # generate VASP inputs for it.
+        suggested_followups: List[str] = []
+        for s in new_structures:
+            if s.get("poscar_path") and not s.get("incar_path"):
+                suggested_followups.append(
+                    f"Generate VASP inputs for {s.get('slug')} "
+                    f"(POSCAR at {s.get('poscar_path')})."
+                )
+
+        result = {
+            "status": status,
+            "task": task,
+            "summary": summary_text,
+            "files_produced": files_produced,
+            "key_findings": key_findings,
+            "suggested_followups": suggested_followups,
+            "structures": [
+                {
+                    "slug": s.get("slug"),
+                    "description": s.get("description"),
+                    "poscar_path": s.get("poscar_path"),
+                    "incar_path": s.get("incar_path"),
+                    "kpoints_path": s.get("kpoints_path"),
+                } for s in new_structures
+            ],
+            "warnings": warnings,
+        }
+        if error_msg:
+            result["error"] = error_msg
+        return result
 
     def set_simulation_mode(self, mode: SimulationMode) -> None:
         """Change autonomy at runtime."""
