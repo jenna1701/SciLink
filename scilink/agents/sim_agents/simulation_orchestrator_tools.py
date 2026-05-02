@@ -309,18 +309,11 @@ class SimulationOrchestratorTools:
                 "based_on_slug": {
                     "type": "string",
                     "description": (
-                        "Optional. When the user's request is clearly a "
-                        "variant of a structure already built in this "
-                        "session (e.g., 'now add a vacancy to the structure "
-                        "you just built', 'same but with a different "
-                        "supercell size'), pass the slug of the prior "
-                        "structure here. The script generator will then "
-                        "apply the request as a minimal delta to the prior "
-                        "script rather than rewriting from scratch — more "
-                        "reliable, fewer tokens, preserves any working "
-                        "lattice setup. Get available slugs from "
-                        "list_generated_structures or session_status. Omit "
-                        "when starting fresh on an unrelated material."
+                        "Optional slug of a structure already built in this "
+                        "session. When set, the script generator applies "
+                        "the request as a minimal delta to that structure's "
+                        "prior script instead of rewriting from scratch. "
+                        "Available slugs from list_generated_structures."
                     ),
                 },
             },

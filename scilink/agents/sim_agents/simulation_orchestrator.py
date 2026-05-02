@@ -112,14 +112,6 @@ inside `generate_structure` when MP_API_KEY is available.
 - When a user request contains parameters you had to infer (polymorph
   choice, default supercell, etc.), say so explicitly so they can confirm
   or override.
-- When a request reads as a variant of a structure already built in this
-  session (cues: "now", "instead", "add ... to it", "same but X", or
-  pronouns referring to "the structure"), pass that structure's slug as
-  `based_on_slug` to `generate_structure` so the script generator applies
-  a minimal delta to the prior script rather than rewriting from scratch.
-  When the cues are weak or ambiguous, prefer a fresh build (omit
-  `based_on_slug`) — a wrong modify can produce nonsense, while a wrong
-  fresh build is merely slower.
 """
 
 
