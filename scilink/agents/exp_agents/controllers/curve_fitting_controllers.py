@@ -1328,6 +1328,23 @@ class UnifiedSeriesProcessingController:
     DEFAULT_MAX_MODEL_RETRIES = 1
     DEFAULT_OUTLIER_SIGMA = 2.0
     DEFAULT_MAX_VERIFICATION_ITERATIONS = 7
+    # Maximum width (in R² units) of the soft band below the acceptance
+    # threshold.  A flat 0.05 doesn't scale: at r2_threshold=0.999 it
+    # would put the hard-reject floor at 0.949, making 50× the gap-to-
+    # perfection eligible for soft-band acceptance.  See _r2_soft_margin.
+    SOFT_BAND_MAX_WIDTH = 0.05
+
+    @classmethod
+    def _r2_soft_margin(cls, r2_threshold: float) -> float:
+        """Width of the soft band below the acceptance threshold.
+
+        Width is capped at ``SOFT_BAND_MAX_WIDTH`` (0.05 — preserves
+        backward-compatible behavior at the default threshold of 0.95)
+        and at ``1 - r2_threshold`` (the gap to perfection — keeps the
+        band narrow when the user demands very high R², e.g. 0.999 for
+        XRD).  Always non-negative.
+        """
+        return max(min(cls.SOFT_BAND_MAX_WIDTH, 1.0 - r2_threshold), 0.0)
 
     JUDGE_PROMPT = '''You are a scientific data fitting expert acting as a judge.
 
@@ -2039,7 +2056,7 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
             n_components=n_components,
             parameters=params_str,
             accept_threshold=self.r2_threshold,
-            reject_threshold=self.r2_threshold - 0.05,
+            reject_threshold=self.r2_threshold - self._r2_soft_margin(self.r2_threshold),
             prior_best_section=prior_best_section,
         )
 
@@ -2187,7 +2204,7 @@ Return JSON with the refined fitting approach:
             best_r2=best_result.get("fit_quality", {}).get("r_squared", 0),
             threshold=self.r2_threshold,
             models_tried=models_tried,
-            example_threshold=self.r2_threshold - 0.05,
+            example_threshold=self.r2_threshold - self._r2_soft_margin(self.r2_threshold),
         )
         print(prompt)
         
@@ -2422,7 +2439,7 @@ Return JSON with:
                     # Catastrophic regressions (script bugs, complete failure)
                     # are always rejected; small dips are admissible if the
                     # verifier signals physical improvement.
-                    R2_FLOOR = max(self.r2_threshold - 0.05, 0.0)
+                    R2_FLOOR = max(self.r2_threshold - self._r2_soft_margin(self.r2_threshold), 0.0)
 
                     for verification_iter in range(self.max_verification_iterations):
                         self.logger.info(f"   Verification {verification_iter + 1}/{self.max_verification_iterations} (annealing level {_annealing_level})...")
@@ -3139,10 +3156,10 @@ Return JSON with:
         self.logger.info("")
         self.logger.info(f"⚙️ FITTING: {mode_str}")
         _accept = float(self.r2_threshold)
-        _floor = max(_accept - 0.05, 0.0)
+        _floor = max(_accept - self._r2_soft_margin(_accept), 0.0)
         self.logger.info(
-            f"   R² targets: accept ≥ {_accept:.2f} (with clean residuals); "
-            f"hard-reject below {_floor:.2f}; soft band {_floor:.2f}–{_accept:.2f} "
+            f"   R² targets: accept ≥ {_accept:.3f} (with clean residuals); "
+            f"hard-reject below {_floor:.3f}; soft band {_floor:.3f}–{_accept:.3f} "
             f"(verifier may reject on physics)"
         )
         self.logger.info(f"   Max verification iterations: {self.max_verification_iterations}")

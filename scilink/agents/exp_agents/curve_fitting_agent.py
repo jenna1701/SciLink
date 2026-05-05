@@ -475,12 +475,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         self.logger.info("")
         self.logger.info(f"📈 CURVE FITTING ANALYSIS - {num_spectra} spectrum{'s' if num_spectra > 1 else ''}")
+        from .controllers.curve_fitting_controllers import UnifiedSeriesProcessingController as _USPC
         _accept = float(effective_r2_threshold)
-        _floor = max(_accept - 0.05, 0.0)
+        _floor = max(_accept - _USPC._r2_soft_margin(_accept), 0.0)
         self.logger.info(
-            f"   Quality: R² ≥ {_accept:.2f} accepts (with clean residuals); "
-            f"R² < {_floor:.2f} hard-rejects; "
-            f"{_floor:.2f}–{_accept:.2f} is a soft band where the verifier "
+            f"   Quality: R² ≥ {_accept:.3f} accepts (with clean residuals); "
+            f"R² < {_floor:.3f} hard-rejects; "
+            f"{_floor:.3f}–{_accept:.3f} is a soft band where the verifier "
             f"can reject on physics grounds (systematic residuals, missing features)"
         )
         if not is_single_spectrum:
