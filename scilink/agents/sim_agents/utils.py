@@ -121,6 +121,13 @@ class MaterialsProjectHelper:
         self.enabled = MP_API_AVAILABLE and bool(self.api_key)
         self.logger = logging.getLogger(__name__)
 
+        # Per-instance cache of MP record lookups. Keyed by (chemical_query,
+        # search_type, spacegroup_symbol, crystal_system). Survives the
+        # lifetime of the helper — when the orchestrator reuses the same
+        # StructureGenerator across calls, the same MP query doesn't hit
+        # the network twice in a session.
+        self._record_cache: Dict[tuple, Optional[Dict]] = {}
+
         if self.enabled:
             self.logger.info("Materials Project helper enabled and API key found for mp-id search.")
         else:
@@ -275,9 +282,20 @@ class MaterialsProjectHelper:
         Used by the structure agent's pre-script tool-resolution step so the
         LLM can verify it got the polymorph it asked for without a second
         round-trip to MP.
+
+        Results are cached per (query, search_type, spacegroup, crystal_system)
+        for the lifetime of this helper instance — so when the orchestrator
+        reuses the same StructureGenerator across `generate_structure` calls
+        for variants of the same material, the second and subsequent lookups
+        hit the cache rather than the MP API.
         """
         if not self.enabled or not chemical_query:
             return None
+
+        cache_key = (chemical_query, search_type, spacegroup_symbol, crystal_system)
+        if cache_key in self._record_cache:
+            self.logger.info(f"MP cache hit for {cache_key}")
+            return self._record_cache[cache_key]
 
         self.logger.info(
             f"Searching MP record for '{chemical_query}' ({search_type}"
@@ -306,9 +324,11 @@ class MaterialsProjectHelper:
                     )
                 else:
                     self.logger.error(f"Invalid search_type: {search_type}")
+                    # Don't cache invalid-input failures (caller can fix and retry).
                     return None
 
                 if not results:
+                    self._record_cache[cache_key] = None
                     return None
 
                 best = sorted(
@@ -326,17 +346,20 @@ class MaterialsProjectHelper:
                 if sym is not None:
                     sg_symbol = getattr(sym, "symbol", None)
 
-                return {
+                record = {
                     "material_id": str(best.material_id),
                     "formula_pretty": best.formula_pretty,
                     "energy_above_hull": best.energy_above_hull,
                     "spacegroup_symbol": sg_symbol,
                 }
+                self._record_cache[cache_key] = record
+                return record
         except Exception as e:
             self.logger.error(
                 f"MP search_material_record error for '{chemical_query}': {e}",
                 exc_info=True,
             )
+            # Don't cache transient API/network errors — let the next call retry.
             return None
 
 
@@ -388,9 +411,17 @@ def ask_user_proceed_or_refine(validation_feedback, structure_file):
 
 
 def generate_structure_views(structure_path: str, output_dir: str = None) -> Dict[str, str]:
-    """
-    Reads a structure file and saves images of the structure along the x, y, and z axes.
-    Now with automatic centering for better visualization.
+    """Render PNG views of a structure for the validator and the user.
+
+    Picks rotations adaptively via ``_get_optimal_rotations``: slab
+    structures get a top-down + two edge views (so stacking is visible),
+    layered structures get layer-perpendicular views, anisotropic cells
+    get views aligned with the principal directions, and everything else
+    falls back to plain X/Y/Z orthogonal views.
+
+    The dict keys are semantic labels ('surface', 'edge1', 'layers', 'x',
+    etc.) — they're surfaced to the validator as "View ({label}):" so the
+    multimodal prompt knows which view it's looking at.
     """
     if not ASE_AVAILABLE:
         logging.warning("ASE not found, skipping image generation for validation.")
@@ -398,13 +429,10 @@ def generate_structure_views(structure_path: str, output_dir: str = None) -> Dic
 
     logger = logging.getLogger(__name__)
     image_paths = {}
-    
+
     try:
         atoms = ase_read(structure_path)
-        
-        # Center the structure for better visualization
         atoms = _center_structure_for_visualization(atoms)
-        
     except Exception as e:
         logger.error(f"Failed to read structure file {structure_path} with ASE: {e}")
         return image_paths
@@ -415,22 +443,30 @@ def generate_structure_views(structure_path: str, output_dir: str = None) -> Dic
 
     base_name = os.path.splitext(os.path.basename(structure_path))[0]
 
-    # Rotations for views along major axes
-    rotations = {
-        'x': '0y,90x,0z',  # View from +x
-        'y': '-90x,0y,0z', # View from +y
-        'z': '0x,0y,0z'    # View from +z (default)
-    }
-
-    logger.info(f"Generating structure view images for {structure_path}...")
-    for axis, rotation in rotations.items():
+    rotations = _get_optimal_rotations(atoms)
+    logger.info(
+        f"Generating {len(rotations)} structure view image(s) for "
+        f"{structure_path} (view labels: {list(rotations)})..."
+    )
+    # ASE PNG render tuning (Option 1 from the visualization-practices
+    # discussion): smaller atomic spheres so underlying lattice topology
+    # is visible (oversized spheres were a big factor in why broken
+    # honeycombs looked superficially OK), draw cell box for orientation
+    # cues, and bump the pixels-per-Å scale so fine features are legible.
+    render_kwargs = dict(
+        radii=0.5,        # half-default; prevents sphere overlap from hiding pattern
+        show_unit_cell=2, # draw cell edges (0=none, 1=plain, 2=fancy)
+        scale=20,         # pixels per Å — default is ~10
+    )
+    for label, rotation in rotations.items():
         try:
-            output_path = os.path.join(output_dir, f"{base_name}_view_{axis}.png")
-            ase_write(output_path, atoms, format='png', rotation=rotation)
-            image_paths[axis] = output_path
+            output_path = os.path.join(output_dir, f"{base_name}_view_{label}.png")
+            ase_write(output_path, atoms, format='png',
+                      rotation=rotation, **render_kwargs)
+            image_paths[label] = output_path
             logger.info(f"Saved structure view: {output_path}")
         except Exception as e:
-            logger.error(f"Failed to write image for {axis}-axis view: {e}")
+            logger.error(f"Failed to write image for {label} view: {e}")
 
     return image_paths
 
@@ -481,12 +517,15 @@ def _get_optimal_rotations(atoms):
         }
 
 def _is_slab_structure(cell, positions):
-    """Detect slab by checking for vacuum gap > 5 Å"""
+    """Detect slab by checking for a >5 Å vacuum gap along any axis.
+
+    Compares each cell length against the atomic extent along the SAME
+    axis (not just z), so slabs with vacuum along a or b are detected
+    correctly and anisotropic crystals without vacuum aren't false-
+    positive."""
     cell_lengths = np.linalg.norm(cell, axis=1)
-    z_extent = positions[:, 2].max() - positions[:, 2].min()
-    
-    # If cell is much larger than atomic extent in one direction = slab
-    return any(length > z_extent + 5.0 for length in cell_lengths)
+    extents = positions.max(axis=0) - positions.min(axis=0)
+    return any(length > extent + 5.0 for length, extent in zip(cell_lengths, extents))
 
 def _get_slab_rotations(cell):
     """Views optimized for slab structures"""

@@ -7,6 +7,8 @@ First, think step-by-step about how you would create this structure:
 3. What defects, substitutions, or other modifications need to be applied?
 4. What atomic constraints are physically appropriate for this model? (e.g., fixing the bottom layers of a slab to mimic bulk).
 5. How should the materials be combined? (For interfaces/heterostructures, do NOT invent supercell sizes by hand — that frequently produces unphysical strain. Use `pymatgen.analysis.interfaces.zsl.ZSLGenerator` (or `CoherentInterfaceBuilder`) to enumerate lattice-matched supercell combinations and pick one with low strain (typically <5%). If the user pinned specific supercell sizes that don't lattice-match, prefer the user's explicit request only if the resulting strain is reasonable; otherwise raise an error explaining the mismatch rather than producing a 50%+-strain structure.)
+
+For **2D materials** (monolayers / bilayers / few-layer structures), prefer manual construction over fetching the 3D parent from Materials Project and extracting a layer. Build the basis explicitly in a hexagonal (or appropriate) cell with known lattice parameters and add vacuum along the perpendicular axis. The bulk → monolayer extraction path is error-prone: γ-convention mismatches between the parent's stored cell and the extracted layer, and confusion between inter-layer-stacking basis vs in-layer basis, produce structures with unphysical short interatomic distances (a tell-tale sign is a min pairwise distance well below the expected nearest-neighbor bond length, often a constant fraction of the lattice parameter).
 6. If the user requests an **amorphous** material as a substrate or component, do NOT fake it by adding small random displacements to a crystalline polymorph — that produces a disordered crystal, not a true amorphous network with proper coordination chemistry. A real amorphous structure requires melt-quench molecular dynamics (out of scope for a one-shot script). Either (a) raise a `NotImplementedError` explaining that a pre-equilibrated amorphous structure file should be supplied by the user, or (b) build with a crystalline polymorph and **explicitly disclose in a printed message** that the substrate is crystalline, not amorphous as requested. Do not silently produce a "pseudo-amorphous" structure.
 7. **Stacking convention** for substrate-on-overlayer geometries: the named *substrate* (the material the user says the overlayer is "on") must occupy the lower z-range of the cell, and the *overlayer* must occupy the higher z-range above it. Vacuum goes above the overlayer. Surface passivation (e.g., H termination) goes on the substrate's bottom surface (its z-min side, away from the overlayer). After assembling the structure, verify this with explicit min/max z prints per species before saving — getting this inverted is a common failure.
 8. In what order should these steps be performed?
@@ -20,6 +22,38 @@ Then, generate a *complete* and *executable* Python script implementing your app
 6. Ensure the script handles potential issues gracefully if possible (e.g., checks for valid indices if modifying atoms).
 7. Call the '{tool_name}' function/tool with the *entire generated Python script content* as the 'script_content' argument. Do not add any explanatory text before or after the function call itself in your response.
 """
+
+MODIFICATION_PROMPT_TEMPLATE = """
+The user previously built an atomic structure with this script:
+
+```python
+{prior_script}
+```
+
+The user is now asking to modify that structure. Their description of the
+desired change:
+
+"{description}"
+
+Your task:
+1. Read the prior script carefully and understand what it built.
+2. Apply the requested change as a **minimal delta** to the prior script —
+   preserve lattice parameters, supercell size, vacuum, naming conventions,
+   and helper logic that don't need to change. The goal is the smallest
+   correct edit, not a rewrite. If you find yourself rewriting more than
+   half the script, stop and reconsider whether the prior script's setup is
+   actually being kept.
+3. The modified script MUST still save the final `Atoms` (or pymatgen
+   `Structure`) object to a file and print *exactly* `STRUCTURE_SAVED:<filename.ext>`
+   on success — same contract as the original.
+4. Use ASE as the primary structure library; pull in pymatgen, aimsgb, etc.
+   only as already used in the prior script (don't introduce new
+   dependencies for a simple delta).
+5. Call the '{tool_name}' function/tool with the *entire modified Python script
+   content* as the 'script_content' argument. No explanatory text around the
+   function call.
+"""
+
 
 CORRECTION_PROMPT_TEMPLATE = """
 The user's original request was: "{original_request}"
@@ -41,7 +75,20 @@ Call the '{tool_name}' function/tool again, providing the entire corrected Pytho
 
 
 VALIDATOR_PROMPT_TEMPLATE = """You are an expert materials scientist and computational modeling specialist.
-Your task is to critically review an unrelaxed atomic structure generated by a Python script. This structure is intended as an initial input for DFT relaxation. Therefore, the purpose is to create a reasonable starting geometry, not a perfect relaxed structure. If this is a grain boundary, interface, or surface structure, be aware that atomic clashes and close contacts (<1.0 Å) are NORMAL and EXPECTED in unrelaxed interfaces, and should not be considered as major issues needed to be fixed.
+Your task is to critically review an unrelaxed atomic structure generated by a Python script. This structure is intended as an initial input for DFT relaxation. Therefore, the purpose is to create a reasonable starting geometry, not a perfect relaxed structure.
+
+**Trust the STRUCTURE STATS section over the images.** The numerical stats are computed directly from the POSCAR and are decisive; the PNG renders are bond-free and easy to misread. When a stat contradicts what the image looks like, trust the stat. Use images as a confirmatory aid, not the primary source of truth.
+
+**What's NORMAL and should NOT be flagged as issues in an unrelaxed structure:**
+- Atomic clashes and close contacts (<1.0 Å) at grain boundaries, interfaces, or surface terminations — these resolve during DFT relaxation.
+- Absence of explicit defect bond reconstruction. DFT relaxation introduces such relaxations from a sensible unrelaxed starting geometry; the script doesn't need to pre-apply them.
+- Atoms placed on ideal lattice sites near defects rather than displaced toward final relaxed positions.
+- Vacuum thicknesses anywhere from 12 Å upward (15 Å is a common but not strict requirement).
+- Minor coordinate-wrap artifacts that don't change the periodic image of the structure.
+
+Flag ONLY substantive issues: wrong composition, wrong supercell size relative to the request, missing requested defects, fundamentally wrong bonding indicative of a script bug, severely insufficient vacuum (<10 Å), gross stoichiometry errors. When the structure is a reasonable starting point for DFT, prefer reporting fewer issues over more — refinement cycles are expensive.
+
+**Crucially: do NOT report issues you walk back.** If your reasoning about a candidate issue concludes it's acceptable, normal, or definitionally ambiguous, omit the entry — the issues list is for confident, decisive complaints. Uncertainty about whether something counts as a problem means it doesn't.
 
 {tool_documentation}
 
@@ -74,52 +121,14 @@ Ensure your output is ONLY the valid JSON object described above. Do not include
 """
 
 
-DOCS_ENHANCED_INITIAL_PROMPT_TEMPLATE = """
-## SPECIALIZED LIBRARY DOCUMENTATION:
-{documentation}
-
-## USER REQUEST:
-"{description}"
-
-## YOUR TASK:
-Based on the specialized library documentation provided above, generate a Python script to fulfill the user request:
-
-1. Parse the user request and use the exact syntax, classes, and methods shown in the documentation above
-2. Generate a *complete* and *executable* Python script with proper imports as documented
-3. The script MUST save the final structure to a file
-4. CRITICALLY: Print exactly: `STRUCTURE_SAVED:<filename.ext>` after successful saving
-5. Call the '{tool_name}' function with the complete script as 'script_content'
-
-Follow the patterns, syntax, and best practices shown in the documentation above.
-"""
-
-
-DOCS_ENHANCED_CORRECTION_PROMPT_TEMPLATE = """
-## SPECIALIZED LIBRARY DOCUMENTATION:
-{documentation}
-
-## ORIGINAL REQUEST:
-"{original_request}"
-
-## FAILED SCRIPT:
-```python
-{failed_script}
-```
-
-## ERROR MESSAGE:
-{error_message}
-
-## YOUR TASK:
-Using the specialized library documentation above, generate a corrected script that:
-
-1. Fixes the specific error shown above
-2. Uses proper syntax and methods as documented above
-3. Fulfills the original request: "{original_request}"
-4. Saves the structure and prints 'STRUCTURE_SAVED:<filename>'
-5. Call the '{tool_name}' function with the corrected script content
-
-Reference the documentation above for correct usage patterns and syntax.
-"""
+# NOTE: DOCS_ENHANCED_INITIAL_PROMPT_TEMPLATE and
+# DOCS_ENHANCED_CORRECTION_PROMPT_TEMPLATE used to live here. They were the
+# specialized-library counterparts to the regular templates above, picked
+# via keyword-routed TOOL_CONFIGS in StructureGenerator. That routing has
+# been replaced by an explicit `skill` parameter on the simulate-orchestrator's
+# tools (see scilink/skills/structure_generation/aimsgb.md and
+# StructureGenerator._format_skill_block). The skill content is now appended
+# as a section to the regular templates rather than swapping the whole prompt.
 
 
 SCRIPT_CORRECTION_FROM_VALIDATION_TEMPLATE = """

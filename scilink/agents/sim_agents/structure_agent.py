@@ -8,11 +8,10 @@ from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 
 from .instruct import (
-    INITIAL_PROMPT_TEMPLATE, 
-    CORRECTION_PROMPT_TEMPLATE, 
+    INITIAL_PROMPT_TEMPLATE,
+    CORRECTION_PROMPT_TEMPLATE,
     SCRIPT_CORRECTION_FROM_VALIDATION_TEMPLATE,
-    DOCS_ENHANCED_INITIAL_PROMPT_TEMPLATE,
-    DOCS_ENHANCED_CORRECTION_PROMPT_TEMPLATE
+    MODIFICATION_PROMPT_TEMPLATE,
 )
 from .utils import save_generated_script, MaterialsProjectHelper, MP_SEARCH_TOOL_SCHEMA
 from ...executors import ScriptExecutor, DEFAULT_TIMEOUT
@@ -23,18 +22,6 @@ from ._deprecation import normalize_params
 MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS = 5
 MAX_MP_RESOLVER_ITERATIONS = 3
 
-# Tool configurations for keyword matching and documentation
-TOOL_CONFIGS = {
-    "GrainBoundary": {
-        "docs_path": "docs/aimsgb.txt",
-        "keywords": ["grain boundary", "grain-boundary", "gb ", "sigma", "csl", 
-                     "twist", "tilt", "bicrystal", "rotation axis", "aimsgb"],
-    },
-    "ASE": {
-        "docs_path": None,
-        "keywords": [],
-    }
-}
 
 JSON_OUTPUT_INSTRUCTION = """
 
@@ -101,90 +88,42 @@ class StructureGenerator:
 
         # Executor Setup
         self.ase_executor = ScriptExecutor(timeout=executor_timeout, mp_api_key=mp_api_key)
-        
-        # Load tool configurations
-        self.tool_configs = self._load_tool_configs()
+
         self.mp_helper = MaterialsProjectHelper(api_key=mp_api_key)
-        
+
         # Initialization message
-        tools_with_docs = [name for name, cfg in self.tool_configs.items() if cfg.get("docs_content")]
         print(f"🔧 Structure Generator Ready ({model_name})")
-        print(f"   📚 Available tools: ASE (default)" + (f", {', '.join(tools_with_docs)}" if tools_with_docs else ""))
         if self.mp_helper.enabled:
             print(f"   🗃️  Materials Project: Connected")
         else:
             print(f"   🗃️  Materials Project: Not configured")
 
-    def _load_tool_configs(self) -> dict:
-        """Load tool configurations and their documentation."""
-        configs = {}
-        for name, config in TOOL_CONFIGS.items():
-            configs[name] = {
-                "keywords": config.get("keywords", []),
-                "docs_content": self._load_docs(config.get("docs_path"))
-            }
-        return configs
+    @staticmethod
+    def _format_skill_block(skill_content: Optional[str]) -> str:
+        """Render a skill content block into a labeled prompt section, or
+        empty string if no skill is provided."""
+        if not skill_content:
+            return ""
+        return (
+            "\n\n## SPECIALIZED LIBRARY GUIDANCE (skill loaded for this request):\n"
+            f"{skill_content}\n"
+            "Use the patterns and constraints above when relevant.\n"
+        )
 
-    def _load_docs(self, docs_path: Optional[str]) -> Optional[str]:
-        """Load documentation from file if it exists."""
-        if not docs_path:
-            return None
-            
-        possible_paths = [
-            docs_path,
-            os.path.join(os.path.dirname(__file__), docs_path),
-            os.path.join(os.path.dirname(__file__), "../..", docs_path),
-        ]
-        
-        for path in possible_paths:
-            if os.path.exists(path):
-                try:
-                    with open(path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    max_length = 60000
-                    if len(content) > max_length:
-                        content = content[:max_length] + "\n\n[... Documentation truncated ...]"
-                    self.logger.info(f"Loaded docs from: {path}")
-                    return content
-                except Exception as e:
-                    self.logger.error(f"Failed to read docs from {path}: {e}")
-        return None
+    def _build_initial_prompt(self, description: str,
+                              skill_content: Optional[str] = None) -> str:
+        """Build the initial script-generation prompt.
 
-    def _select_tool(self, request_text: str) -> str:
-        """Select the appropriate tool based on request content."""
-        request_lower = request_text.lower()
-        
-        for name, config in self.tool_configs.items():
-            keywords = config.get("keywords", [])
-            if keywords and any(kw in request_lower for kw in keywords):
-                self.logger.info(f"Selected {name} tool based on keywords")
-                return name
-        
-        self.logger.info("Selected default ASE tool")
-        return "ASE"
-
-    def _get_tool_docs(self, tool_name: str) -> Optional[str]:
-        """Get documentation for a tool."""
-        return self.tool_configs.get(tool_name, {}).get("docs_content")
-
-    def _build_initial_prompt(self, description: str, tool_name: str) -> str:
-        """Build initial prompt with tool-specific documentation and MP integration."""
-        docs_content = self._get_tool_docs(tool_name)
-
-        if docs_content and self.mp_helper.enabled:
-            docs_content += self.mp_helper.get_common_materials_info()
-
-        if docs_content:
-            base_prompt = DOCS_ENHANCED_INITIAL_PROMPT_TEMPLATE.format(
-                description=description,
-                tool_name=tool_name,
-                documentation=docs_content
-            )
-        else:
-            base_prompt = INITIAL_PROMPT_TEMPLATE.format(
-                description=description,
-                tool_name=tool_name
-            )
+        skill_content is an optional curated guidance block (e.g. an aimsgb
+        skill loaded by the simulate orchestrator) that is appended verbatim
+        before the script-gen instructions. The MP-resolver block (if MP is
+        configured) goes first as ground truth.
+        """
+        base_prompt = INITIAL_PROMPT_TEMPLATE.format(
+            description=description,
+            tool_name="ASE",
+        )
+        base_prompt = base_prompt + self._format_skill_block(skill_content)
 
         # Pre-resolve any named materials in the request to mp-ids via tool
         # calls, then inject the resolved facts as ground truth before the
@@ -196,38 +135,42 @@ class StructureGenerator:
 
         return base_prompt + JSON_OUTPUT_INSTRUCTION
 
-    def _build_correction_prompt(self, original_request: str, failed_script: str, 
-                                 error_message: str, tool_name: str) -> str:
-        """Build correction prompt with tool-specific documentation if available."""
+    def _build_modification_prompt(self, prior_script: str, description: str,
+                                   skill_content: Optional[str] = None) -> str:
+        """Build a prompt that asks the LLM to modify a prior script as a
+        minimal delta rather than write a new script from scratch. Used when
+        the user request is a variant of an already-generated structure
+        (e.g., 'now add a single vacancy to the structure I just built')."""
+        base_prompt = MODIFICATION_PROMPT_TEMPLATE.format(
+            prior_script=prior_script,
+            description=description,
+            tool_name="ASE",
+        )
+        base_prompt = base_prompt + self._format_skill_block(skill_content)
+        return base_prompt + JSON_OUTPUT_INSTRUCTION
+
+    def _build_correction_prompt(self, original_request: str, failed_script: str,
+                                 error_message: str,
+                                 skill_content: Optional[str] = None) -> str:
+        """Build correction prompt for the inner script-execution retry loop."""
         max_error_len = 2000
         if len(error_message) > max_error_len:
             error_message = error_message[:max_error_len] + "\n[... Error message truncated ...]"
-        
-        docs_content = self._get_tool_docs(tool_name)
-        
-        if docs_content:
-            base_prompt = DOCS_ENHANCED_CORRECTION_PROMPT_TEMPLATE.format(
-                original_request=original_request,
-                failed_script=failed_script,
-                error_message=error_message,
-                tool_name=tool_name,
-                documentation=docs_content
-            )
-        else:
-            base_prompt = CORRECTION_PROMPT_TEMPLATE.format(
-                original_request=original_request,
-                failed_script=failed_script,
-                error_message=error_message,
-                tool_name=tool_name
-            )
-        
+
+        base_prompt = CORRECTION_PROMPT_TEMPLATE.format(
+            original_request=original_request,
+            failed_script=failed_script,
+            error_message=error_message,
+            tool_name="ASE",
+        )
+        base_prompt = base_prompt + self._format_skill_block(skill_content)
         return base_prompt + JSON_OUTPUT_INSTRUCTION
 
     def _build_validation_correction_prompt(self, original_request: str,
                                             attempted_script_content: str,
                                             validator_feedback: dict,
-                                            tool_name: str,
-                                            attempt_history: Optional[list] = None) -> str:
+                                            attempt_history: Optional[list] = None,
+                                            skill_content: Optional[str] = None) -> str:
         """Build validation correction prompt, optionally with prior-cycle history."""
         validator_issues = validator_feedback.get("all_identified_issues", [])
         validator_hints = validator_feedback.get("script_modification_hints", [])
@@ -258,8 +201,9 @@ class StructureGenerator:
             validator_specific_issues=issues_str,
             validator_script_hints=hints_str,
             prior_attempts_summary=prior_block,
-            tool_name=tool_name,
+            tool_name="ASE",
         )
+        base_prompt = base_prompt + self._format_skill_block(skill_content)
 
         return base_prompt + JSON_OUTPUT_INSTRUCTION
 
@@ -562,32 +506,58 @@ class StructureGenerator:
                         is_refinement_from_validation: bool = False,
                         previous_script_content: Optional[str] = None,
                         validator_feedback: Optional[dict] = None,
-                        attempt_history: Optional[list] = None) -> dict:
-        """Generate or refine a script using appropriate tool and documentation.
+                        attempt_history: Optional[list] = None,
+                        skill_content: Optional[str] = None,
+                        prior_script_to_modify: Optional[str] = None) -> dict:
+        """Generate, refine, or modify a structure-building script.
+
+        Three mutually-exclusive modes:
+          - INITIAL (default): write a new script from scratch.
+          - REFINEMENT (`is_refinement_from_validation=True`): re-write to
+            address validator feedback. Requires `previous_script_content`
+            and `validator_feedback`.
+          - MODIFICATION (`prior_script_to_modify` set, refinement flag off):
+            apply a minimal delta to a prior script instead of rewriting.
+            Used when the user request is a variant of an already-built
+            structure (e.g., "now add a vacancy to the structure I just
+            built").
 
         Args:
             attempt_history: Optional list of {script, issues, hints} dicts from
                 all prior cycles in this refinement loop. Lets the generator
                 detect recurring/cosmetic complaints and stop chasing them.
+            skill_content: Optional curated library-guidance block (loaded
+                from a built-in skill, e.g. "aimsgb" for grain boundaries) to
+                inject into the script-generation prompt as a "specialized
+                library guidance" section. When None, the prompt is generic.
+            prior_script_to_modify: Optional prior-cycle script content. When
+                set (and refinement mode off), the LLM is asked to apply
+                `original_user_request` as a minimal delta to this script
+                rather than write from scratch.
         """
-
-        # Select tool based on request
-        tool_name = self._select_tool(original_user_request)
-
         if is_refinement_from_validation:
-            print(f"   🔄 Refining script using {tool_name} (cycle {attempt_number_overall})")
+            print(f"   🔄 Refining script (cycle {attempt_number_overall})")
             if not previous_script_content or not validator_feedback:
                 return {"status": "error", "message": "Internal error: Refinement requires previous script and validation feedback."}
             current_prompt = self._build_validation_correction_prompt(
                 original_request=original_user_request,
                 attempted_script_content=previous_script_content,
                 validator_feedback=validator_feedback,
-                tool_name=tool_name,
                 attempt_history=attempt_history,
+                skill_content=skill_content,
+            )
+        elif prior_script_to_modify:
+            print(f"   📝 Modifying prior script (cycle {attempt_number_overall})")
+            current_prompt = self._build_modification_prompt(
+                prior_script=prior_script_to_modify,
+                description=original_user_request,
+                skill_content=skill_content,
             )
         else:
-            print(f"   🤖 Generating script using {tool_name} (cycle {attempt_number_overall})")
-            current_prompt = self._build_initial_prompt(original_user_request, tool_name)
+            print(f"   🤖 Generating script (cycle {attempt_number_overall})")
+            current_prompt = self._build_initial_prompt(
+                original_user_request, skill_content=skill_content,
+            )
 
         last_error_message = "No attempts made yet."
         current_script = previous_script_content if is_refinement_from_validation else None
@@ -649,7 +619,6 @@ class StructureGenerator:
                             "output_file": full_output_path,
                             "final_script_path": final_script_path,
                             "final_script_content": current_script,
-                            "tool_used": tool_name,
                             "execution_attempts": attempt
                         }
                     else:
@@ -670,7 +639,7 @@ class StructureGenerator:
                     original_request=original_user_request,
                     failed_script=current_script,
                     error_message=last_error_message,
-                    tool_name=tool_name
+                    skill_content=skill_content,
                 )
 
             except Exception as e:
@@ -688,7 +657,6 @@ class StructureGenerator:
             "last_error": last_error_message,
             "last_attempted_script_path": final_script_path,
             "last_attempted_script_content": current_script,
-            "tool_attempted": tool_name
         }
 
     def _summarize_error(self, error_message: str) -> str:
