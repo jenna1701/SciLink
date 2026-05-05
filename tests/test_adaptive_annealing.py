@@ -793,6 +793,114 @@ def test_hot_annealing_reached_when_best_stalls_above_threshold():
     print("  Hot annealing reached when best stalls: PASS")
 
 
+def test_soft_margin_scales_with_threshold():
+    """
+    Soft-band width must shrink as r2_threshold approaches 1, otherwise
+    a fixed 0.05 margin makes the floor absurdly far below the
+    acceptance bar (e.g. r2_threshold=0.999 → floor=0.949 with the old
+    rule, putting fits 50× the gap-to-perfection in the soft band).
+    """
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import (
+        UnifiedSeriesProcessingController as C,
+    )
+
+    # ≤ 0.95: backward-compatible pin at 0.05
+    assert C._r2_soft_margin(0.50) == 0.05
+    assert C._r2_soft_margin(0.85) == 0.05
+    assert C._r2_soft_margin(0.95) == 0.05
+
+    # > 0.95: scales to (1 - threshold)
+    assert abs(C._r2_soft_margin(0.99) - 0.01) < 1e-12
+    assert abs(C._r2_soft_margin(0.995) - 0.005) < 1e-12
+    assert abs(C._r2_soft_margin(0.999) - 0.001) < 1e-12
+
+    # At threshold == 1, no soft band
+    assert C._r2_soft_margin(1.0) == 0.0
+
+    # Never negative even if user passes something silly
+    assert C._r2_soft_margin(1.1) == 0.0
+    print("  Soft margin scales with threshold: PASS")
+
+
+def test_floor_uses_scaled_margin_at_high_threshold():
+    """
+    With r2_threshold=0.999 (XRD-style), an in-band refit at R²=0.96
+    must hard-reject (below the 0.998 floor), not get treated as a
+    soft-band candidate the way the old fixed-0.05 margin would have.
+    """
+    import numpy as np
+
+    ctrl = make_controller(
+        r2_threshold=0.999,           # XRD-like high bar
+        max_verification_iterations=3,
+        max_model_retries=0,
+    )
+
+    # Initial above threshold (good); refit drops to 0.96 — well below
+    # the new floor of 0.998 but above the OLD floor of 0.949.
+    r2_seq = iter([0.9995, 0.96])
+
+    def mock_fit(state, curve_data, data_path, spectrum_name, spectrum_idx,
+                 base_script=None, refine_from_script=None,
+                 refine_from_r2=0.0, refine_from_issues=None):
+        try:
+            r2 = next(r2_seq)
+        except StopIteration:
+            return {"success": False, "error": "exhausted",
+                    "fit_quality": {}, "parameters": {},
+                    "script": "", "script_errors": []}
+        return {
+            "success": True, "error": None,
+            "fit_quality": {"r_squared": r2},
+            "parameters": {}, "model_type": "test",
+            "visualization_path": None, "visualization_bytes": b"",
+            "statistics": {}, "script": f"# r2={r2:.4f}",
+            "script_errors": [],
+        }
+
+    # Verifier (mistakenly) signals physics improvement.  Floor must
+    # override regardless.
+    def mock_verify(state, fit_result, history=None,
+                    verification_iter=0, annealing_level=None,
+                    best_result=None, best_verification=None):
+        return {
+            "fit_acceptable": False,
+            "issues_found": [{"problem": "test"}],
+            "spurious_components": [], "missing_features": [],
+            "physically_better_than_best": True,
+            "comparison_note": "false positive — fit is well below floor",
+            "overall_assessment": "test", "recommended_action": "x",
+        }
+
+    config_counter = iter(range(100))
+    ctrl._fit_single_spectrum = mock_fit
+    ctrl._verify_fit_with_llm = mock_verify
+    ctrl._apply_llm_verification_feedback = (
+        lambda s, v: {**s.get("locked_fitting_config", {}), "_t": next(config_counter)}
+    )
+    ctrl._log_verification_issues = MagicMock()
+    ctrl._build_quality_history = MagicMock(return_value={})
+    ctrl._judge_select_best_fit = MagicMock(return_value={
+        "selected_index": None, "acceptable": False, "reasoning": "mock",
+    })
+
+    state = {"locked_fitting_config": {"physical_model": "test", "_t": -1}}
+    result = ctrl._fit_with_quality_control(
+        state=state,
+        curve_data=np.array([[0.0, 1.0], [1.0, 2.0]]),
+        data_path="/tmp/x", spectrum_name="x", spectrum_idx=0,
+        is_regime_anchor=True,
+    )
+
+    final_r2 = result.get("fit_quality", {}).get("r_squared")
+    print(f"  Final R² with threshold=0.999: {final_r2} (refit at 0.96 should be rejected)")
+    assert final_r2 == 0.9995, (
+        f"Expected initial 0.9995 to survive. Got {final_r2}.  "
+        f"Refit at 0.96 should be below the 0.998 floor for r2_threshold=0.999."
+    )
+    print("  Floor uses scaled margin at high threshold: PASS")
+
+
 def test_state_isolation_across_sequential_refits():
     """
     Series-context regression test.  AdaptiveRefitController calls
@@ -1047,6 +1155,8 @@ if __name__ == "__main__":
         test_hot_annealing_reached_when_best_stalls_above_threshold,
         test_floor_blocks_catastrophic_regression,
         test_state_isolation_across_sequential_refits,
+        test_soft_margin_scales_with_threshold,
+        test_floor_uses_scaled_margin_at_high_threshold,
     ])
     total_pass += p
     total_fail += f
