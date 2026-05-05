@@ -185,6 +185,7 @@ CoREMOF*/
 # Session outputs
 planning_session_*/
 analysis_*/
+simulate_session_*/
 campaign_outputs/
 image_analysis_output/
 kb_storage/
@@ -193,4 +194,6 @@ kb_storage/
 test_*/
 tests/_e2e_runs/
 tests/_simulate_runs/
-simulate_session_*/
+
+# Office autosave temp files (Word/Excel/PowerPoint)
+~$*
