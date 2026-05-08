@@ -24,7 +24,7 @@ from scilink.hpc.scheduler import (
     detect_scheduler,
 )
 
-from scilink.ui.components.sim_workflow import render_agent_workflow
+from scilink.ui.components.engines import get_engine, get_engines
 
 import logging
 
@@ -134,7 +134,7 @@ def render_simulations_tab() -> None:
         submit = monitor = terminal = files = None
 
     with gen:
-        render_agent_workflow()
+        _render_engine_selector_and_dispatch()
 
     with dash:
         if has_hpc:
@@ -160,6 +160,52 @@ def render_simulations_tab() -> None:
     if files is not None:
         with files:
             _render_remote_files()
+
+# ── Engine selector ───────────────────────────────────────────
+
+# Phase / artifact keys cleared when the user switches engines, to avoid
+# bleeding LAMMPS state into a VASP run (and vice versa).
+_PHASE_KEYS_TO_CLEAR_ON_ENGINE_CHANGE = (
+    "hpc_workflow_phase",
+    "hpc_gen_run_script",
+    "hpc_gen_slurm_script",
+    "hpc_gen_remote_work_dir",
+    "hpc_gen_job_name",
+    "hpc_gen_vasp_files",
+)
+
+
+def _render_engine_selector_and_dispatch() -> None:
+    engines = get_engines()
+    if not engines:
+        st.error("No simulation engines registered.")
+        return
+
+    keys = [e.key for e in engines]
+    current = st.session_state.get("hpc_engine", keys[0])
+    if current not in keys:
+        current = keys[0]
+
+    sel_col, _ = st.columns([1, 4])
+    with sel_col:
+        chosen = st.selectbox(
+            "Engine",
+            keys,
+            index=keys.index(current),
+            format_func=lambda k: f"{get_engine(k).icon} {get_engine(k).label}",
+            key="hpc_engine_select",
+        )
+
+    if chosen != current:
+        for k in _PHASE_KEYS_TO_CLEAR_ON_ENGINE_CHANGE:
+            st.session_state.pop(k, None)
+        st.session_state.hpc_engine = chosen
+        st.rerun()
+    else:
+        st.session_state.hpc_engine = chosen
+
+    get_engine(chosen).render_workflow()
+
 
 # ── Connection bar ────────────────────────────────────────────
 
