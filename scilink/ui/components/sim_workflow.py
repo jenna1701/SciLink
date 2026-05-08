@@ -1017,7 +1017,7 @@ def _render_review_scripts() -> None:
                         conn, slurm_script,
                         f"{remote_dir}/submit.sh",
                     )
-                    conn.run(f"chmod +x {_q(remote_dir + '/submit.sh')}")
+                    conn.run(f"chmod +x {_q(remote_dir + '/submit.sh')}", timeout=30)
 
                     # Submit
                     job_id = sched.submit(f"{remote_dir}/submit.sh", work_dir=remote_dir)

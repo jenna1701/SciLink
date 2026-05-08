@@ -560,12 +560,12 @@ def _render_review_inputs() -> None:
 
             try:
                 with st.spinner("Uploading inputs and submitting job…"):
-                    conn.run(f"mkdir -p {_q(remote_dir)}")
+                    conn.run(f"mkdir -p {_q(remote_dir)}", timeout=30)
                     _upload_text(conn, poscar_edit, f"{remote_dir}/POSCAR")
                     _upload_text(conn, incar_edit, f"{remote_dir}/INCAR")
                     _upload_text(conn, kpoints_edit, f"{remote_dir}/KPOINTS")
                     _upload_text(conn, slurm_edit, f"{remote_dir}/submit.sh")
-                    conn.run(f"chmod +x {_q(remote_dir + '/submit.sh')}")
+                    conn.run(f"chmod +x {_q(remote_dir + '/submit.sh')}", timeout=30)
 
                     job_id = sched.submit(
                         f"{remote_dir}/submit.sh", work_dir=remote_dir,
