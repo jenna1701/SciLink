@@ -93,7 +93,7 @@ def load_image_file(image_path: str) -> np.ndarray:
     ``load_image_data`` from tools first, then falls back to cv2/PIL.
     """
     try:
-        from ...tools.image_analysis_tools import load_image_data
+        from ...skills._shared.image_analysis_tools import load_image_data
         return load_image_data(image_path)
     except ImportError:
         pass
@@ -237,11 +237,11 @@ def _append_auxiliary_context(prompt: list, state: dict) -> None:
 def _append_tool_inventory(prompt: list, agent: str = "image_analysis") -> None:
     """Append the registered tool inventory and library list for ``agent``.
 
-    Tools come from ``scilink.tools._registry.get_tools_for(agent)``; libraries
+    Tools come from ``scilink.skills._shared._registry.get_tools_for(agent)``; libraries
     come from ``IMAGE_ANALYSIS_LIBRARIES``. Injected before skill context so
     skill prose can reference tools introduced here by name.
     """
-    from ....tools._registry import (
+    from ....skills._shared._registry import (
         format_library_inventory,
         get_tools_for,
     )
@@ -1772,7 +1772,7 @@ class UnifiedImageProcessingController:
         # T=0 strict
         "\n**Registered tool constraints:**\n"
         "When the pipeline uses a registered tool (any function imported from "
-        "`scilink.tools.*`), your suggested fixes must be achievable via that "
+        "`scilink.skills.*`), your suggested fixes must be achievable via that "
         "tool's documented parameters OR via preprocessing / postprocessing that "
         "happens OUTSIDE the tool call. Do not suggest modifications to the "
         "tool's internal algorithm. If the tool's documented parameters cannot "
@@ -1999,7 +1999,7 @@ Your guidance: '''
                         lines.append(f"- `{path_str}`")
                 context_parts.append("\n".join(lines))
 
-        from ....tools._registry import format_tool_inventory
+        from ....skills._shared._registry import format_tool_inventory
 
         format_kwargs = dict(
             analysis_approach=config.get("analysis_approach", "Analyze the image"),
@@ -2040,7 +2040,7 @@ Your guidance: '''
             explanation of what went wrong and how it was fixed, or None.
         """
         config = state.get("locked_analysis_config", {})
-        from ....tools._registry import format_tool_inventory
+        from ....skills._shared._registry import format_tool_inventory
 
         prompt = self.correction_instructions.format(
             analysis_approach=config.get("analysis_approach", ""),

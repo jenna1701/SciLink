@@ -20,7 +20,7 @@ from ...skills.loader import load_skill, list_skills
 
 # ── SKILL INTEGRATION ── amber tools (conditional import)
 try:
-    from ...tools import amber_tools
+    from ...skills.force_field.amber import amber as amber_tools
     _AMBER_TOOLS_AVAILABLE = True
 except ImportError:
     _AMBER_TOOLS_AVAILABLE = False
@@ -931,7 +931,7 @@ Provide a brief summary of what the results mean and any actions needed.
 
     def _convert_amber_to_lammps_inline(self, prmtop, inpcrd):
         output_data = os.path.join(self.working_dir, "system.data")
-        from ...tools.amber_tools import convert_amber_to_lammps
+        from ...skills.force_field.amber.amber import convert_amber_to_lammps
         return convert_amber_to_lammps(prmtop, inpcrd, output_data)
 
     # ================================================================

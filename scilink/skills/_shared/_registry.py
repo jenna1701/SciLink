@@ -1,11 +1,13 @@
-"""Auto-discovery registry for ``scilink.tools`` modules.
+"""Auto-discovery registry for skill helper modules.
 
-Walks ``scilink/tools/`` once, collects ``TOOL_SPEC`` (single) or
-``TOOL_SPECS`` (list) attributes from each public module, filters by agent
-tag, and caches the result.
+Walks ``scilink/skills/_shared/`` and every per-skill bundle once, collects
+``TOOL_SPEC`` (single) or ``TOOL_SPECS`` (list) attributes from each public
+module, filters by agent tag, and caches the result.
 
 Adding a new tool:
-    1. Write the function in a module under ``scilink/tools/``.
+    1. Write the function as a module either under ``scilink/skills/_shared/``
+       (cross-skill helper) or inside the relevant ``scilink/skills/<domain>/<name>/``
+       skill bundle (skill-specific helper).
     2. Add ``TOOL_SPEC = ToolSpec(...)`` (or append to ``TOOL_SPECS``) with
        ``agents=["image_analysis", ...]``.
     3. Done — no central list to edit.
@@ -88,24 +90,46 @@ def _collect_specs_from_module(mod) -> list[ToolSpec]:
 
 @lru_cache(maxsize=None)
 def _all_specs() -> tuple[ToolSpec, ...]:
-    """Walk scilink.tools once and collect every declared ToolSpec.
+    """Walk scilink.skills._shared and every per-skill bundle, collecting
+    every declared ToolSpec.
 
     Cached for the life of the process. Module import failures are logged
     and skipped — an optional heavy dependency should not prevent discovery
     of the other tools.
     """
-    from . import __path__ as _tools_path  # local import to avoid cycles
+    from . import __path__ as _shared_path  # scilink/skills/_shared/
 
     collected: list[ToolSpec] = []
-    for info in pkgutil.iter_modules(_tools_path):
+
+    # 1. Cross-skill helpers under scilink/skills/_shared/
+    for info in pkgutil.iter_modules(_shared_path):
         if info.name.startswith("_"):
             continue
+        module_path = f"scilink.skills._shared.{info.name}"
         try:
-            mod = importlib.import_module(f"scilink.tools.{info.name}")
+            mod = importlib.import_module(module_path)
         except Exception as exc:
-            _logger.debug("Skipping scilink.tools.%s: %s", info.name, exc)
+            _logger.debug("Skipping %s: %s", module_path, exc)
             continue
         collected.extend(_collect_specs_from_module(mod))
+
+    # 2. Per-skill helpers under scilink/skills/<domain>/<name>/*.py
+    from scilink.skills.loader import list_all_skills, _SKILLS_DIR
+
+    for domain, names in list_all_skills().items():
+        for name in names:
+            skill_dir = _SKILLS_DIR / domain / name
+            for py_file in sorted(skill_dir.glob("*.py")):
+                if py_file.stem.startswith("_"):
+                    continue
+                module_path = f"scilink.skills.{domain}.{name}.{py_file.stem}"
+                try:
+                    mod = importlib.import_module(module_path)
+                except Exception as exc:
+                    _logger.debug("Skipping %s: %s", module_path, exc)
+                    continue
+                collected.extend(_collect_specs_from_module(mod))
+
     return tuple(collected)
 
 

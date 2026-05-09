@@ -21,8 +21,8 @@ from .pipelines.hyperspectral_pipelines import (
     create_hyperspectral_iteration_pipeline,
     create_hyperspectral_synthesis_pipeline
 )
-from ...tools.image_processor import load_image, convert_numpy_to_jpeg_bytes
-from ...tools.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
+from ...skills._shared.image_processor import load_image, convert_numpy_to_jpeg_bytes
+from ...skills._shared.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
 from ...executors import require_sandbox_approval
 from ...skills.loader import load_skill
 
@@ -467,7 +467,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if lower.endswith('.npy'):
                 data = np.load(data_path)
             elif lower.endswith(('.h5', '.hdf5')):
-                from ...tools.hdf5_utils import load_hdf5_signal
+                from ...utils.hdf5_utils import load_hdf5_signal
                 data = load_hdf5_signal(data_path)
             else:
                 raise ValueError(

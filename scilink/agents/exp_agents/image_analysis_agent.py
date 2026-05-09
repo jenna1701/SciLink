@@ -38,7 +38,7 @@ from ...executors import ScriptExecutor, require_sandbox_approval
 from ..lit_agents.literature_agent import FittingModelLiteratureAgent
 from .pipelines.image_analysis_pipelines import create_unified_image_analysis_pipeline
 from .controllers.image_analysis_controllers import compute_image_statistics
-from ...tools.image_analysis_tools import (
+from ...skills._shared.image_analysis_tools import (
     load_image_data,
     image_to_thumbnail_bytes,
     create_image_montage,
@@ -635,7 +635,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 result["auxiliary_mime_type"] = "image/jpeg"
 
             elif ext in curve_extensions:
-                from ...tools.curve_fitting_tools import (
+                from ...skills._shared.curve_fitting_tools import (
                     load_curve_data,
                     plot_curve_to_bytes,
                 )

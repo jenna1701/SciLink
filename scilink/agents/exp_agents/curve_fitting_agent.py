@@ -38,7 +38,7 @@ from ...executors import ScriptExecutor, require_sandbox_approval
 from ..lit_agents.literature_agent import FittingModelLiteratureAgent
 from .preprocess import CurvePreprocessingAgent
 from .pipelines.curve_fitting_pipelines import create_unified_curve_fitting_pipeline
-from ...tools.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
+from ...skills._shared.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
 from ._deprecation import normalize_params
 from ...skills.loader import load_skill
 
@@ -806,7 +806,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 result["auxiliary_mime_type"] = "image/png"
 
             elif is_image:
-                from ...tools.image_processor import (
+                from ...skills._shared.image_processor import (
                     load_image,
                     convert_numpy_to_jpeg_bytes,
                 )
