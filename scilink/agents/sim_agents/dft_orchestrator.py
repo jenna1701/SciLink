@@ -10,7 +10,12 @@ from pathlib import Path
 
 from ase.io import read as ase_read
 
-from ...auth import get_api_key, APIKeyNotFoundError
+from ...auth import (
+    get_api_key,
+    get_internal_proxy_key,
+    infer_provider,
+    APIKeyNotFoundError,
+)
 from ._deprecation import normalize_params
 from .structure_agent import StructureGenerator
 from .val_agent import StructureValidatorAgent, IncarValidatorAgent
@@ -78,11 +83,15 @@ class DFTOrchestrator:
             source="DFTOrchestrator",
         )
 
-        # Auto-discover API keys
+        # Auto-discover API keys: infer provider from the generator model
+        # (LiteLLM routes by model prefix, so the key must match the
+        # model's provider). Fall back to the internal-proxy key
+        # (SCILINK_API_KEY) when no provider-specific key is set.
         if api_key is None and base_url is None:
-            api_key = get_api_key('google')
+            provider = infer_provider(generator_model) or 'google'
+            api_key = get_api_key(provider) or get_internal_proxy_key()
             if not api_key:
-                raise APIKeyNotFoundError('google')
+                raise APIKeyNotFoundError(provider)
 
         if futurehouse_api_key is None:
             futurehouse_api_key = get_api_key('futurehouse')
