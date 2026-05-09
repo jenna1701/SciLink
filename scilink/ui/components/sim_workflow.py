@@ -1179,8 +1179,9 @@ def _render_monitoring() -> None:
         with t_files:
             _render_remote_output_files(_conn, _job)
 
-        # ── Transition to results when terminal ───────────
-        if _job.status.is_terminal and not old_status.is_terminal:
+        # Rerun the parent on any status change so the connection-bar
+        # job counts (rendered outside this fragment) stay fresh.
+        if _job.status != old_status:
             st.rerun(scope="app")
 
     _monitor_fragment()

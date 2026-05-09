@@ -550,8 +550,9 @@ def _render_monitor() -> None:
                 if v:
                     st.text(f"{k:>14}: {v}")
 
-        # Trigger full rerun when job transitions to terminal
-        if fresh.status.is_terminal and not old_status.is_terminal:
+        # Rerun the parent on any status change so the connection-bar
+        # job counts (rendered outside this fragment) stay fresh.
+        if fresh.status != old_status:
             st.rerun(scope="app")
 
     _live_output()
