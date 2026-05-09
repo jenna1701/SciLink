@@ -105,63 +105,74 @@ def build_submit_script(
     vasp_command: str = SLURM_DEFAULT_VASP_CMD,
 ) -> str:
     """One submit.sh per case. Pseudo-dir + module loads are settings the
-    user must adapt to their cluster — defaults are placeholders."""
+    user must adapt to their cluster — defaults are placeholders.
+
+    Note: do not use textwrap.dedent here. Multi-line substitutions
+    (e.g. `{modules}`) only get indented on the first line, which
+    breaks dedent's "common leading whitespace" inference and leaves
+    the script's `#!/bin/bash` on column 8. sbatch then rejects it.
+    Plain f-string with everything anchored at column 0 sidesteps
+    the whole class of bug.
+    """
     job_name = f"scilink_{case.label}"
-    return textwrap.dedent(f"""\
-        #!/bin/bash
-        #SBATCH --job-name={job_name}
-        #SBATCH --time={case.walltime}
-        #SBATCH --nodes={case.nodes}
-        #SBATCH --ntasks-per-node={case.ntasks_per_node}
-        #SBATCH --output={job_name}_%j.out
-        #SBATCH --error={job_name}_%j.err
+    return f"""#!/bin/bash
+#SBATCH --job-name={job_name}
+#SBATCH --time={case.walltime}
+#SBATCH --nodes={case.nodes}
+#SBATCH --ntasks-per-node={case.ntasks_per_node}
+#SBATCH --output={job_name}_%j.out
+#SBATCH --error={job_name}_%j.err
 
-        set -e
-        cd "$SLURM_SUBMIT_DIR"
+set -e
+cd "$SLURM_SUBMIT_DIR"
 
-        # ---- Module environment (edit to match your cluster) ----
-        {modules}
+# ---- Module environment (edit to match your cluster) ----
+{modules}
 
-        # ---- Assemble POTCAR from pseudo dir ----
-        # EDIT THIS: path to potpaw_PBE on your cluster
-        PSEUDO_DIR="{pseudo_dir}"
+# ---- Assemble POTCAR from pseudo dir ----
+# EDIT THIS: path to potpaw_PBE on your cluster
+PSEUDO_DIR="{pseudo_dir}"
 
-        ELEMENTS=($(sed -n '6p' POSCAR))
-        if [ ${{#ELEMENTS[@]}} -eq 0 ]; then
-            echo "No elements parsed from POSCAR; aborting." >&2
-            exit 1
-        fi
-        : > POTCAR
-        for e in "${{ELEMENTS[@]}}"; do
-            if [ ! -f "$PSEUDO_DIR/$e/POTCAR" ]; then
-                echo "Missing POTCAR for element $e at $PSEUDO_DIR/$e/POTCAR" >&2
-                exit 1
-            fi
-            cat "$PSEUDO_DIR/$e/POTCAR" >> POTCAR
-        done
+ELEMENTS=($(sed -n '6p' POSCAR))
+if [ ${{#ELEMENTS[@]}} -eq 0 ]; then
+    echo "No elements parsed from POSCAR; aborting." >&2
+    exit 1
+fi
+: > POTCAR
+for e in "${{ELEMENTS[@]}}"; do
+    if [ ! -f "$PSEUDO_DIR/$e/POTCAR" ]; then
+        echo "Missing POTCAR for element $e at $PSEUDO_DIR/$e/POTCAR" >&2
+        exit 1
+    fi
+    cat "$PSEUDO_DIR/$e/POTCAR" >> POTCAR
+done
 
-        # ---- Run VASP ----
-        {vasp_command}
-    """)
+# ---- Run VASP ----
+{vasp_command}
+"""
 
 
 def build_submit_all_script(case_labels: List[str]) -> str:
-    """One driver script that submits every case from the cluster side."""
+    """One driver script that submits every case from the cluster side.
+
+    Plain f-string (no textwrap.dedent) for the same reason as
+    build_submit_script -- the multi-line `{sbatch_lines}` substitution
+    breaks dedent's whitespace inference.
+    """
     sbatch_lines = "\n".join(
         f'( cd "$BASE/{label}" && sbatch submit.sh )' for label in case_labels
     )
-    return textwrap.dedent(f"""\
-        #!/bin/bash
-        # Submit every case in this benchmark dir. Run from the parent of
-        # the per-case subdirs (i.e. the dir that contains all the labels).
-        set -e
-        BASE="$(cd "$(dirname "$0")" && pwd)"
-        echo "Submitting all cases under $BASE"
+    return f"""#!/bin/bash
+# Submit every case in this benchmark dir. Run from the parent of
+# the per-case subdirs (i.e. the dir that contains all the labels).
+set -e
+BASE="$(cd "$(dirname "$0")" && pwd)"
+echo "Submitting all cases under $BASE"
 
-        {sbatch_lines}
+{sbatch_lines}
 
-        echo "All cases submitted. Use 'squeue -u $USER' to monitor."
-    """)
+echo "All cases submitted. Use 'squeue -u $USER' to monitor."
+"""
 
 
 # ══════════════════════════════════════════════════════════════
