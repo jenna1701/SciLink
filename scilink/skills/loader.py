@@ -40,22 +40,27 @@ _logger = logging.getLogger(__name__)
 def list_skills(domain: str = "curve_fitting") -> list:
     """Return names of available built-in skills for a domain.
 
+    A built-in skill is a folder ``<domain>/<name>/`` containing a
+    matching ``<name>.md`` (Anthropic-Skills-style bundle). Folders
+    starting with ``_`` or ``.`` (e.g. ``_shared/``) are skipped.
+
     Args:
         domain: Skill domain subdirectory (default: "curve_fitting").
 
     Returns:
-        Sorted list of skill name strings (file stems).
+        Sorted list of skill name strings.
     """
     skills_dir = _SKILLS_DIR / domain
     if not skills_dir.is_dir():
         return []
-    return sorted(p.stem for p in skills_dir.glob("*.md"))
+    return sorted(_iter_skill_names(skills_dir))
 
 
 def list_all_skills() -> dict:
     """Auto-discover all built-in skill domains and their skills.
 
-    Scans subdirectories of the skills package directory for ``.md`` files.
+    Scans subdirectories of the skills package directory for skill
+    bundles (folders named ``<skill>/`` containing ``<skill>.md``).
 
     Returns:
         Dict mapping domain names to sorted lists of skill names,
@@ -66,10 +71,19 @@ def list_all_skills() -> dict:
     for sub in sorted(_SKILLS_DIR.iterdir()):
         if not sub.is_dir() or sub.name.startswith(("_", ".")):
             continue
-        names = sorted(p.stem for p in sub.glob("*.md"))
+        names = sorted(_iter_skill_names(sub))
         if names:
             result[sub.name] = names
     return result
+
+
+def _iter_skill_names(domain_dir: Path):
+    """Yield skill names found as ``<domain_dir>/<name>/<name>.md`` bundles."""
+    for child in domain_dir.iterdir():
+        if not child.is_dir() or child.name.startswith(("_", ".")):
+            continue
+        if (child / f"{child.name}.md").exists():
+            yield child.name
 
 
 def load_skill(skill: str, domain: str = "curve_fitting") -> Dict:
@@ -107,19 +121,24 @@ def load_skill(skill: str, domain: str = "curve_fitting") -> Dict:
 
 
 def _resolve_skill_path(skill: str, domain: str) -> Path:
-    """Resolve a skill name or path to an actual file path."""
+    """Resolve a skill name or path to an actual file path.
+
+    Built-in skills live at ``<skills>/<domain>/<name>/<name>.md`` (Tier C
+    bundle layout). User-provided skills can be passed as a direct ``.md``
+    path; that case bypasses the bundle lookup.
+    """
     candidate = Path(skill)
     if candidate.suffix.lower() == ".md":
         if candidate.exists():
             return candidate
         raise FileNotFoundError(f"Skill file not found: {candidate}")
 
-    built_in = _SKILLS_DIR / domain / f"{skill}.md"
+    built_in = _SKILLS_DIR / domain / skill / f"{skill}.md"
     if built_in.exists():
         return built_in
 
-    available_dir = _SKILLS_DIR / domain
-    available = sorted(p.stem for p in available_dir.glob("*.md")) if available_dir.is_dir() else []
+    domain_dir = _SKILLS_DIR / domain
+    available = sorted(_iter_skill_names(domain_dir)) if domain_dir.is_dir() else []
     raise FileNotFoundError(
         f"Skill '{skill}' not found. Available built-in skills for '{domain}': {available}"
     )

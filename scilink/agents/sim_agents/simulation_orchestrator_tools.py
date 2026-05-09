@@ -1837,7 +1837,7 @@ class SimulationOrchestratorTools:
         """Resolve a skill name to its content, formatted as a single block.
 
         Resolution order:
-          1. Built-in skills under scilink/skills/structure_generation/
+          1. Built-in skills under scilink/skills/structure_generation/<name>/
           2. User-registered skills via orchestrator.register_skill()
 
         Returns None on any failure (fail-closed; the structure-gen prompt

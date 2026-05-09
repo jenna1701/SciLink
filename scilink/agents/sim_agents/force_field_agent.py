@@ -37,7 +37,8 @@ class ForceFieldAgent:
     4. Validates parameters for scientific rigor
 
     Now skill-aware: loads domain-specific knowledge from
-    scilink/skills/force_field/*.md and uses it as LLM context (RAG)
+    scilink/skills/force_field/<name>/<name>.md bundles and uses it as
+    LLM context (RAG)
     to make better decisions. When AmberTools are available and the AMBER
     skill is active, delegates to the full AMBER pipeline
     (antechamber → tleap → ParmEd → LAMMPS data file).
