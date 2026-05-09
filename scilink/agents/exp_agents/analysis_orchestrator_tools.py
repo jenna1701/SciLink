@@ -79,14 +79,21 @@ def _build_skill_description(agent_registry: dict = None,
         if supported:
             parts.append(f"Supported by: {', '.join(supported)}.")
 
-    # Auto-discover all built-in skill domains with descriptions
+    # Auto-discover all built-in skill domains with descriptions.
+    # Prefer the frontmatter `description` field when present; fall back
+    # to the first line of the overview section.
     for domain, names in list_all_skills().items():
         skill_descs = []
         for name in names:
             try:
                 parsed = load_skill(name, domain=domain)
-                overview = parsed.get("overview", "").split("\n")[0].strip()
-                skill_descs.append(f"'{name}' — {overview}")
+                desc = (parsed.get("meta") or {}).get("description")
+                if not desc:
+                    desc = parsed.get("overview", "").split("\n")[0].strip()
+                # Trim trailing punctuation so the join with ". " below
+                # doesn't produce ".." or ".;".
+                desc = desc.rstrip(".;,") if desc else desc
+                skill_descs.append(f"'{name}' — {desc}" if desc else f"'{name}'")
             except Exception:
                 skill_descs.append(f"'{name}'")
         parts.append(f"Built-in {domain} skills: {'; '.join(skill_descs)}.")

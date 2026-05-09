@@ -1868,7 +1868,9 @@ class SimulationOrchestratorTools:
             self.logger.warning(f"Failed to load skill '{skill_name}': {e}")
             return None
 
-        # Concatenate the populated sections in a stable order.
+        # Concatenate the populated sections in a stable order, then any
+        # non-canonical sections captured under ``extras`` so author-written
+        # content (e.g. "Common pitfalls") isn't silently dropped.
         section_order = ["overview", "planning", "implementation",
                          "validation", "interpretation", "analysis"]
         chunks = []
@@ -1876,6 +1878,10 @@ class SimulationOrchestratorTools:
             body = (parsed.get(sec) or "").strip()
             if body:
                 chunks.append(f"### {sec.capitalize()}\n\n{body}")
+        for heading, body in (parsed.get("extras") or {}).items():
+            body = (body or "").strip()
+            if body:
+                chunks.append(f"### {heading.capitalize()}\n\n{body}")
         if not chunks:
             return None
         header = f"# Skill: {parsed.get('name') or skill_name}"

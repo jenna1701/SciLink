@@ -4,15 +4,37 @@ Skill loader for domain-specific knowledge files.
 Skills are markdown files with structured sections (## headings) that provide
 domain-specific guidance for LLM-driven analysis pipelines. They can be
 built-in (shipped with the package) or user-provided (custom .md files).
+
+A skill file may optionally begin with a YAML frontmatter block delimited by
+``---`` lines, e.g.::
+
+    ---
+    description: One-line LLM-facing blurb
+    domain: force_field
+    applies_to: [amber, gaff2, ff14sb]
+    ---
+    ## overview
+    ...
+
+Frontmatter, when present, is exposed under the ``meta`` key of the parsed
+skill. Sections whose heading isn't in the canonical vocabulary are preserved
+under the ``extras`` key (lowercased heading → body) and a warning is logged.
 """
 
+import logging
 import re
 from pathlib import Path
 from typing import Dict
 
+import yaml
+
 _SKILLS_DIR = Path(__file__).parent
 
 _KNOWN_SECTIONS = {"overview", "planning", "analysis", "interpretation", "validation", "implementation"}
+
+_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+_logger = logging.getLogger(__name__)
 
 
 def list_skills(domain: str = "curve_fitting") -> list:
@@ -50,7 +72,7 @@ def list_all_skills() -> dict:
     return result
 
 
-def load_skill(skill: str, domain: str = "curve_fitting") -> Dict[str, str]:
+def load_skill(skill: str, domain: str = "curve_fitting") -> Dict:
     """Load and parse a skill markdown file.
 
     Args:
@@ -60,8 +82,10 @@ def load_skill(skill: str, domain: str = "curve_fitting") -> Dict[str, str]:
         domain: Skill domain subdirectory (default: "curve_fitting").
 
     Returns:
-        Dict with keys: name, overview, planning, analysis, interpretation,
-        validation. Missing sections default to empty string.
+        Dict with keys: ``name`` (file stem), ``meta`` (frontmatter dict,
+        empty if no frontmatter), one entry per canonical section in
+        :data:`_KNOWN_SECTIONS` (missing sections default to empty string),
+        and ``extras`` (dict of non-canonical-heading → body).
 
     Raises:
         FileNotFoundError: If the skill file cannot be found.
@@ -73,8 +97,12 @@ def load_skill(skill: str, domain: str = "curve_fitting") -> Dict[str, str]:
     if not text.strip():
         raise ValueError(f"Skill file is empty: {path}")
 
-    sections = _parse_sections(text)
+    meta, body = _split_frontmatter(text, source=str(path))
+    sections, extras = _parse_sections(body, source=str(path))
+
     sections["name"] = path.stem
+    sections["meta"] = meta
+    sections["extras"] = extras
     return sections
 
 
@@ -97,9 +125,46 @@ def _resolve_skill_path(skill: str, domain: str) -> Path:
     )
 
 
-def _parse_sections(text: str) -> Dict[str, str]:
-    """Parse markdown into sections keyed by ``## heading`` name."""
+def _split_frontmatter(text: str, source: str = "<skill>") -> tuple[dict, str]:
+    """Strip an optional leading ``---``-fenced YAML frontmatter block.
+
+    Returns ``(meta_dict, remaining_text)``. If no frontmatter is present,
+    returns ``({}, text)``. Malformed YAML logs a warning and yields an
+    empty meta dict but does not raise — the body is returned with the
+    frontmatter stripped so section parsing can proceed.
+    """
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return {}, text
+
+    raw = m.group(1)
+    try:
+        parsed = yaml.safe_load(raw) or {}
+    except yaml.YAMLError as e:
+        _logger.warning("Malformed frontmatter in %s: %s", source, e)
+        return {}, text[m.end():]
+
+    if not isinstance(parsed, dict):
+        _logger.warning(
+            "Frontmatter in %s did not parse to a mapping (got %s); ignoring.",
+            source, type(parsed).__name__,
+        )
+        return {}, text[m.end():]
+
+    return parsed, text[m.end():]
+
+
+def _parse_sections(text: str, source: str = "<skill>") -> tuple[Dict[str, str], Dict[str, str]]:
+    """Parse markdown into sections keyed by ``## heading`` name.
+
+    Returns ``(known_sections, extras)`` where ``known_sections`` covers
+    the canonical vocabulary (missing entries default to empty string) and
+    ``extras`` captures any other ``## ...`` sections (lowercased heading
+    → body). Unknown headings emit a warning so authors get feedback when
+    content would otherwise be silently dropped.
+    """
     sections = {k: "" for k in _KNOWN_SECTIONS}
+    extras: Dict[str, str] = {}
 
     parts = re.split(r"^##\s+", text, flags=re.MULTILINE)
 
@@ -109,5 +174,12 @@ def _parse_sections(text: str) -> Dict[str, str]:
         body = lines[1].strip() if len(lines) > 1 else ""
         if heading in _KNOWN_SECTIONS:
             sections[heading] = body
+        else:
+            extras[heading] = body
+            _logger.warning(
+                "Skill %s: section '## %s' is not in the canonical vocabulary "
+                "(%s); preserved under 'extras'.",
+                source, heading, sorted(_KNOWN_SECTIONS),
+            )
 
-    return sections
+    return sections, extras

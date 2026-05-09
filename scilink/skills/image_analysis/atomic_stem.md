@@ -1,3 +1,6 @@
+---
+description: Atomic-resolution STEM (HAADF, MAADF) image analysis — column detection, sublattice separation, lattice metrology, and defect identification on zone-axis crystalline materials.
+---
 # STEM Atomic Resolution Image Analysis Skill
 
 ## overview

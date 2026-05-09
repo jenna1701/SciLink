@@ -1,3 +1,6 @@
+---
+description: Segmentation of touching or overlapping objects (grains, particles, droplets, cells, bubbles) — separates detection from instance partitioning when binary masks merge neighbors.
+---
 # Overlapping / Touching Object Segmentation Skill
 
 ## overview
