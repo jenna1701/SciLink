@@ -48,10 +48,11 @@ def _build_skill_description(agent_registry: dict = None,
     import inspect
 
     parts = [
-        "Domain skill name or path to a custom .md skill file. "
-        "For ImageAnalysisAgent, omit this unless the user explicitly "
-        "requests a specific skill — the agent inspects the actual image "
-        "and auto-selects a skill if one is relevant."
+        "Domain skill name or path to a custom .md skill file. May be a "
+        "single string or a list of strings to load multiple skills at once "
+        "(useful for cross-domain tasks). For ImageAnalysisAgent, omit this "
+        "unless the user explicitly requests a specific skill — the agent "
+        "inspects the actual image and auto-selects a skill if one is relevant."
     ]
 
     # Discover which agents support skills from their analyze() signature.
@@ -1925,7 +1926,7 @@ class AnalysisOrchestratorTools:
             hints: str = None,
             auxiliary_data: str = None,
             auxiliary_label: str = None,
-            skill: str = None,
+            skill = None,  # str | list[str] | None (PR 3 multi-skill)
             series_metadata: str = None,
             task_mode: str = None,
             prior_analysis_paths: List[str] = None,
@@ -2381,12 +2382,20 @@ class AnalysisOrchestratorTools:
                 if auxiliary_label is not None:
                     analyze_kwargs["auxiliary_label"] = auxiliary_label
                 if skill is not None:
-                    # Resolve custom skill names to their file paths so the
-                    # agent's load_skill() can locate them.
+                    # PR 3: ``skill`` may be a single name or a list. Resolve
+                    # any custom-skill names to their registered file paths
+                    # so the agent's load_skill() can locate them.
                     custom_skills = getattr(self.orch, "_custom_skills", {})
-                    if skill in custom_skills:
-                        skill = custom_skills[skill]
-                    analyze_kwargs["skill"] = skill
+
+                    def _resolve_one(s):
+                        return custom_skills[s] if s in custom_skills else s
+
+                    if isinstance(skill, str):
+                        analyze_kwargs["skill"] = _resolve_one(skill)
+                    elif isinstance(skill, (list, tuple)):
+                        analyze_kwargs["skill"] = [_resolve_one(s) for s in skill]
+                    else:
+                        analyze_kwargs["skill"] = skill
                 if task_mode is not None:
                     # Currently consumed by CurveFittingAgent; other agents
                     # accept **kwargs and silently ignore unknown parameters,
@@ -2534,7 +2543,13 @@ class AnalysisOrchestratorTools:
                     )
                 },
                 "skill": {
-                    "type": "string",
+                    # Accepts a single skill name (string) or a list of names
+                    # for multi-skill loading. Schema permits both shapes via
+                    # JSON Schema ``oneOf``.
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
                     "description": _build_skill_description(
                         getattr(self.orch, "_agent_registry", None),
                         getattr(self.orch, "_custom_skills", None),

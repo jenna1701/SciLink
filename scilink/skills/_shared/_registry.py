@@ -45,16 +45,22 @@ def format_library_inventory() -> str:
     return "\n".join(lines)
 
 
-def format_tool_inventory(agent: str = "image_analysis") -> str:
+def format_tool_inventory(
+    agent: str = "image_analysis",
+    active_skills: list[str] | None = None,
+) -> str:
     """Render the full tool + library inventory for ``agent`` as one string.
 
     Used by prompts that need a drop-in ``{tool_inventory}`` substitution
     (code-gen, script-correction) — complements ``_append_tool_inventory``
     which is list-based for multi-part prompts. Both draw from the same
     registry so there is a single source of truth.
+
+    ``active_skills`` controls which per-skill bundle tools are visible;
+    see :func:`get_tools_for`.
     """
     parts: list[str] = []
-    specs = get_tools_for(agent)
+    specs = get_tools_for(agent, active_skills=active_skills)
     if specs:
         parts.append("## Available Tools")
         parts.append(
@@ -89,10 +95,10 @@ def _collect_specs_from_module(mod) -> list[ToolSpec]:
 
 
 @lru_cache(maxsize=None)
-def _all_specs() -> tuple[ToolSpec, ...]:
-    """Walk scilink.skills._shared and every per-skill bundle, collecting
-    every declared ToolSpec.
+def _shared_specs() -> tuple[ToolSpec, ...]:
+    """Specs declared by modules under ``scilink/skills/_shared/``.
 
+    These are cross-skill helpers; visibility is gated by the ``agents=`` tag.
     Cached for the life of the process. Module import failures are logged
     and skipped — an optional heavy dependency should not prevent discovery
     of the other tools.
@@ -100,8 +106,6 @@ def _all_specs() -> tuple[ToolSpec, ...]:
     from . import __path__ as _shared_path  # scilink/skills/_shared/
 
     collected: list[ToolSpec] = []
-
-    # 1. Cross-skill helpers under scilink/skills/_shared/
     for info in pkgutil.iter_modules(_shared_path):
         if info.name.startswith("_"):
             continue
@@ -112,13 +116,23 @@ def _all_specs() -> tuple[ToolSpec, ...]:
             _logger.debug("Skipping %s: %s", module_path, exc)
             continue
         collected.extend(_collect_specs_from_module(mod))
+    return tuple(collected)
 
-    # 2. Per-skill helpers under scilink/skills/<domain>/<name>/*.py
+
+@lru_cache(maxsize=None)
+def _per_skill_specs() -> dict[tuple[str, str], tuple[ToolSpec, ...]]:
+    """Specs declared inside skill bundles, keyed by ``(domain, skill_name)``.
+
+    Visibility is gated by *bundle membership*, not the ``agents=`` tag —
+    a tool living inside a skill folder is implicitly scoped to that skill.
+    """
     from scilink.skills.loader import list_all_skills, _SKILLS_DIR
 
+    result: dict[tuple[str, str], list[ToolSpec]] = {}
     for domain, names in list_all_skills().items():
         for name in names:
             skill_dir = _SKILLS_DIR / domain / name
+            specs: list[ToolSpec] = []
             for py_file in sorted(skill_dir.glob("*.py")):
                 if py_file.stem.startswith("_"):
                     continue
@@ -128,11 +142,37 @@ def _all_specs() -> tuple[ToolSpec, ...]:
                 except Exception as exc:
                     _logger.debug("Skipping %s: %s", module_path, exc)
                     continue
-                collected.extend(_collect_specs_from_module(mod))
+                specs.extend(_collect_specs_from_module(mod))
+            if specs:
+                result[(domain, name)] = specs
+    return {k: tuple(v) for k, v in result.items()}
 
-    return tuple(collected)
+
+def _all_specs() -> tuple[ToolSpec, ...]:
+    """Every declared ToolSpec, shared + per-skill. Used by tests / introspection."""
+    out: list[ToolSpec] = list(_shared_specs())
+    for specs in _per_skill_specs().values():
+        out.extend(specs)
+    return tuple(out)
 
 
-def get_tools_for(agent: str) -> list[ToolSpec]:
-    """Return every registered ToolSpec tagged for ``agent``."""
-    return [spec for spec in _all_specs() if agent in spec.agents]
+def get_tools_for(agent: str, active_skills: list[str] | None = None) -> list[ToolSpec]:
+    """Return ToolSpecs visible to ``agent`` given the currently-active skills.
+
+    Visibility rules:
+      * Specs from ``_shared/`` are always considered, filtered by the spec's
+        ``agents=`` tag.
+      * Specs from a skill bundle are considered only when the skill's name
+        appears in ``active_skills``. The bundle's location implies scope —
+        the spec's ``agents=`` field is ignored for per-skill specs.
+
+    Passing ``active_skills=None`` returns only shared specs (no skill is
+    loaded). Pass an empty list for the same behavior.
+    """
+    visible = [s for s in _shared_specs() if agent in s.agents]
+    if active_skills:
+        active_set = set(active_skills)
+        for (_domain, name), specs in _per_skill_specs().items():
+            if name in active_set:
+                visible.extend(specs)
+    return visible

@@ -382,17 +382,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     f"   📎 Auxiliary data loaded: {aux_state['auxiliary_label']}"
                 )
 
-        # Load skill if provided
-        skill_state = {"skill_name": None, "skill_sections": None}
-        if skill:
-            try:
-                parsed = load_skill(skill, domain="image_analysis")
-                skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
-                self.logger.info(f"   📖 Skill loaded: {parsed['name']}")
-            except FileNotFoundError:
-                self.logger.warning(
-                    f"   Skill '{skill}' not found — proceeding without domain skill"
-                )
+        # Load skill(s) if provided. Accepts a single name/path or a list
+        # — see PR 3 multi-skill support.
+        skill_state = self._load_skills_to_state(skill, domain="image_analysis")
 
         # Extract series metadata from system_info if not provided explicitly
         handled_system_info = self._handle_system_info(system_info)
