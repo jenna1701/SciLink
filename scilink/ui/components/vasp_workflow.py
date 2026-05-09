@@ -22,6 +22,10 @@ from scilink.ui.components.sim_workflow import (
     _upload_text,
     _q,
 )
+from scilink.ui.components.wizard_state import (
+    apply_vasp_defaults,
+    save_vasp,
+)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -130,6 +134,10 @@ def render_agent_workflow() -> None:
 # ══════════════════════════════════════════════════════════════
 
 def _render_configure() -> None:
+    # Pre-fill infrastructure fields from the last successful Generate
+    # before any widget is created.
+    apply_vasp_defaults()
+
     st.subheader("⚛️ VASP DFT Simulation")
 
     cfg = st.session_state.get("agent_config", {})
@@ -334,6 +342,7 @@ def _render_configure() -> None:
         disabled=not can_proceed,
         key="vasp_generate_btn",
     ):
+        save_vasp()
         try:
             with st.spinner(
                 "Asking SimulationOrchestratorAgent to build POSCAR / INCAR / KPOINTS…"
