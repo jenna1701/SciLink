@@ -212,13 +212,19 @@ class ForceFieldAgent:
 
     def _auto_select_skill(self, force_field: str) -> bool:
         """
-        Automatically select and load the best skill for a force field.
+        Automatically select and load the best skill(s) for a force field.
+
+        A single ``force_field`` description may mention multiple families
+        (e.g., "AMBER ff14SB protein with GAFF small molecule"); every
+        family whose keywords match is loaded so the LLM gets context for
+        each. With only AMBER currently shipped, the multi-load path is
+        speculative but exercised by tests.
 
         Args:
             force_field: Force field name from LLM selection.
 
         Returns:
-            True if a skill was loaded.
+            True if at least one skill was loaded.
         """
         if self.skills:
             self.logger.info(
@@ -237,14 +243,18 @@ class ForceFieldAgent:
             # "opls": ["opls", "opls-aa"],
         }
 
+        matched: list[str] = []
         for skill_name, keywords in skill_map.items():
             if any(kw in ff_lower for kw in keywords):
                 if skill_name in self._available_ff_skills:
-                    return self._load_skill(skill_name)
+                    matched.append(skill_name)
                 else:
                     self.logger.info(
                         f"Skill '{skill_name}' would match but is not installed"
                     )
+
+        if matched:
+            return self._load_skill(matched)
 
         self.logger.info(f"No matching skill for '{force_field}'")
         return False
@@ -1142,8 +1152,11 @@ Provide a brief summary of what the results mean and any actions needed.
         # ── SKILL INTEGRATION ── Auto-select skill if not already loaded
         self._auto_select_skill(force_field)
 
-        # ── SKILL INTEGRATION ── Route to AMBER pipeline if skill + tools available
-        if self.skill_name == "amber" and self._is_amber_force_field(force_field):
+        # ── SKILL INTEGRATION ── Route to AMBER pipeline if skill + tools available.
+        # Use ``active_skill_names`` rather than the ``skill_name`` property so
+        # the gate works correctly when a non-AMBER skill is loaded first
+        # alongside ``amber`` (multi-skill support).
+        if "amber" in self.active_skill_names and self._is_amber_force_field(force_field):
             tools_status = self._check_amber_tools_available()
 
             if tools_status["available"] and pdb_file:
@@ -1947,7 +1960,7 @@ Include only the JSON response with no additional text.
                 validation["passed"] = False
 
             # ── SKILL INTEGRATION ── skill-informed range checks
-            if skill_validation and self.skill_name == "amber":
+            if skill_validation and "amber" in self.active_skill_names:
                 if epsilon > 0.5 and props.get("name", "") not in ["X", "?"]:
                     validation["warnings"].append(
                         f"Epsilon {epsilon} for type {atom_type} exceeds typical AMBER range (0-0.5 kcal/mol)"
