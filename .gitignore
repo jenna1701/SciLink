@@ -194,7 +194,7 @@ kb_storage/
 test_*/
 tests/_e2e_runs/
 tests/_simulate_runs/
-benchmark_results/
+benchmark_suite_*/
 
 # Office autosave temp files (Word/Excel/PowerPoint)
 ~$*
