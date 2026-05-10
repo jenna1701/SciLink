@@ -1,17 +1,18 @@
-To analyze the example data, run
-```bash
-scilink analyze --data data/YBCO_tem.tif --metadata data/YBCO_tem.json
-```
+Each example lives in its own subfolder, with a short README, a data
+file, and a metadata sidecar:
 
-Or launch a full session with
+- `polycrystalline_grains_demo/` — optical microscopy, grain analysis
+- `eels_plasmons_demo/` — hyperspectral EELS, plasmon mapping
+- `eels_identification_demo/` — synthetic core-loss EELS, curve-fitting agent in identification mode
+
+To launch a chat session and pick the data interactively, run
 
 ```bash
 scilink analyze
 ```
 
-And follow the instructions/hints to launch the analysis.
-
 To generate an example AMBER force field, run
-```bash 
+
+```bash
 scilink prepare-ff --test --solvate --goal "Test solvated system"
 ```
