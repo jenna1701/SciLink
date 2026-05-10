@@ -49,7 +49,10 @@ from ...skills.loader import load_skill, list_skills
 from ._deprecation import normalize_params
 
 try:
-    from ...tools import mlip_tools
+    # mlip_tools is a multi-backend dispatcher (MACE / NequIP / DeePMD)
+    # used across the machine_learning_potentials skill bundles, so it
+    # lives in skills/_shared/ rather than under any one skill bundle.
+    from ...skills._shared import mlip_tools
     _MLIP_TOOLS_AVAILABLE = True
 except ImportError:
     _MLIP_TOOLS_AVAILABLE = False
