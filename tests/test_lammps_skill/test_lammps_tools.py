@@ -7,7 +7,7 @@ No LLM calls — these are fast, deterministic, and run in CI.
 """
 
 import pytest
-from scilink.tools.molecular_dynamics import lammps_tools
+from scilink.skills.molecular_dynamics.lammps import lammps as lammps_tools
 
 
 # =====================================================================

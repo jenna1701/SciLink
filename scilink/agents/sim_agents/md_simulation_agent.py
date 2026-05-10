@@ -9,11 +9,11 @@ import json
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-from .base_simulation_agent import SimulationAgent
+from .base_agent import SimulationAgent
 
 _TOOL_REGISTRY: Dict[str, Any] = {}
 try:
-    from ...tools import lammps_tools
+    from ...skills.molecular_dynamics.lammps import lammps as lammps_tools
     _TOOL_REGISTRY["lammps"] = lammps_tools
 except ImportError:
     pass
