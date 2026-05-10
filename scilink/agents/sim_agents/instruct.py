@@ -443,3 +443,79 @@ Include thorough comments explaining each section and its purpose. The script sh
 
 IMPORTANT: Return ONLY the raw LAMMPS script content without any markdown formatting, code block markers, or backticks.
 """
+
+
+# ── Skill graduation (sim-agents) ─────────────────────────────────────
+# Used by VaspUpdater / VaspQualityAgent (and any future sim agent) via
+# scilink/agents/sim_agents/skill_graduation.py to crystallize a recorded
+# observation into a reusable skill .md file. Mirrors the planning side's
+# PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS / PLANNING_SKILL_UPDATE_INSTRUCTIONS
+# but tailored to VASP / sim-side vocabulary.
+
+VASP_KNOWLEDGE_TO_SKILL_INSTRUCTIONS = """You are an expert VASP computational materials scientist. \
+Convert accumulated VASP-running knowledge into a structured, reusable skill document for downstream agents.
+
+**Skill Name:** {skill_name}
+**Domain:** {domain}
+
+**Source Knowledge:**
+{knowledge_text}
+
+**Instructions:**
+Begin the document with a YAML frontmatter block containing a single one-line `description:` field — \
+a self-contained sentence that lets a downstream agent decide whether this skill is relevant. \
+Do not end the description with a period. Then organize the knowledge into exactly five sections, \
+each containing actionable, specific guidance derived from the source knowledge. Use markdown formatting.
+
+---
+description: <one-line, self-contained, no trailing period>
+---
+
+## overview
+What kinds of VASP calculations or error patterns this skill covers, and when to apply it.
+
+## planning
+INCAR parameter rules, parameter compatibility constraints, and decision criteria for choosing settings. \
+Be specific. Example: "ALGO = All is incompatible with ISMEAR = -5 (tetrahedron is not variational); \
+when both an algorithm change and tetrahedron smearing are wanted, use ALGO = Normal, or switch ISMEAR = 0 first."
+
+## implementation
+Concrete fix recipes — the specific INCAR keys and values to set when each pattern is detected. \
+Include actual parameter values that worked. Reference the original error pattern by its log substring \
+where possible.
+
+## interpretation
+What outputs / log lines / convergence patterns indicate this rule applies. Include short log-message \
+excerpts where helpful so future agents can match the same situation.
+
+## validation
+Sanity checks after applying the rule, expected outcomes, and known interactions with other settings.
+
+Output ONLY the skill document content in markdown, starting with the `---` frontmatter block followed \
+by `## overview`. Do not wrap in code blocks."""
+
+
+VASP_SKILL_UPDATE_INSTRUCTIONS = """You are an expert VASP computational materials scientist. \
+Update an existing VASP skill document with new knowledge while preserving what is already correct.
+
+**Skill Name:** {skill_name}
+
+**Existing Skill Content:**
+{existing_skill}
+
+**New Knowledge to Incorporate:**
+{new_knowledge}
+
+**Instructions:**
+1. Review the existing skill content carefully.
+2. Integrate the new finding into the appropriate section. Consolidate related rules — \
+   prefer merging into an existing rule over restating in a new sentence.
+3. Do NOT remove existing content unless the new knowledge explicitly contradicts it.
+4. When there is a conflict, prefer the newer knowledge but note the discrepancy briefly.
+5. Maintain the five-section structure (overview, planning, implementation, interpretation, validation).
+6. Preserve the YAML frontmatter at the top (the `---`-delimited block). If the new knowledge \
+   materially changes the skill's purpose, update the `description:` field; otherwise leave it intact.
+7. Keep prose tight. The skill is read into LLM context every time, so length matters.
+
+Output ONLY the updated skill document content in markdown, starting with the `---` frontmatter \
+block. Do not wrap in code blocks."""

@@ -6,6 +6,16 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from .vasp_agent import VaspInputAgent
 from ._deprecation import normalize_params
+from .skill_graduation import (
+    KnowledgeStore,
+    format_graduated_skills_block,
+    graduate_to_skill_file,
+    load_graduated_skills,
+)
+from .instruct import (
+    VASP_KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+    VASP_SKILL_UPDATE_INSTRUCTIONS,
+)
 
 
 # Known error patterns with deterministic fixes.
@@ -106,6 +116,63 @@ class VaspUpdater:
             model_name=model_name,
             base_url=base_url
         )
+
+        # In-session observations awaiting graduation. Cleared on
+        # process exit unless explicitly graduated to skill files.
+        self.knowledge_store = KnowledgeStore()
+
+    # ── On-the-fly skill graduation ──────────────────────────
+
+    def record_knowledge(self, observation: Dict[str, Any]) -> str:
+        """Record a VASP observation for later graduation into a skill.
+
+        `observation` is a free-form dict; common keys include
+        `summary`, `error_pattern`, `proposed_fix`, `verified_outcome`.
+        Returns the auto-assigned id."""
+        return self.knowledge_store.record(observation)
+
+    def list_knowledge(self) -> List[Dict[str, Any]]:
+        """Return all session-scoped observations."""
+        return self.knowledge_store.list()
+
+    def clear_knowledge(self, knowledge_id: Optional[str] = None) -> int:
+        """Drop one or all session observations. Returns count removed."""
+        return self.knowledge_store.remove(knowledge_id)
+
+    def graduate_to_skill(
+        self,
+        knowledge_id: str,
+        skill_name: str = "vasp_learned_fixes",
+    ) -> Dict[str, Any]:
+        """Crystallize a recorded observation into a graduated skill file.
+
+        Persistent across sessions: written to
+        ~/.scilink/graduated_skills/vasp/<skill_name>/<skill_name>.md.
+        Existing skills with the same name are merged via the LLM
+        (see VASP_SKILL_UPDATE_INSTRUCTIONS), not appended."""
+        entry = self.knowledge_store.get(knowledge_id)
+        if entry is None:
+            return {
+                "status": "error",
+                "message": f"Knowledge id not found: {knowledge_id}",
+            }
+
+        def _llm_call(prompt: str) -> str:
+            response = self.vasp_agent.model.generate_content(
+                prompt, generation_config=None
+            )
+            return response.text
+
+        return graduate_to_skill_file(
+            knowledge_entry=entry,
+            skill_name=skill_name,
+            domain="vasp",
+            llm_call=_llm_call,
+            fresh_template=VASP_KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+            update_template=VASP_SKILL_UPDATE_INSTRUCTIONS,
+        )
+
+    # ── Internals ──────────────────────────────────────────────
 
     def _extract_errors(self, log: str) -> str:
         """Extract error and warning lines from VASP output."""
@@ -392,10 +459,18 @@ class VaspUpdater:
                 f"{fixes_desc}\n\n"
             )
 
+        # Inject any graduated-skill rules so the LLM has prior learnings
+        # in context when proposing a fix. Empty string when nothing has
+        # been graduated yet.
+        graduated_block = format_graduated_skills_block(
+            load_graduated_skills("vasp"),
+        )
+
         prompt = (
             allowed_line
             + already_fixed
             + advice_line
+            + graduated_block
             + f'The VASP run for "{original_request}" failed with:\n\n{snippet}\n\n'
             + f"Current INCAR (with deterministic fixes already applied):\n{working_incar}\n\n"
             + f"Current KPOINTS:\n{kpoints_txt}\n\n"

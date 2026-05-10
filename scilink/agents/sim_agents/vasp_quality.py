@@ -33,7 +33,17 @@ from ...skills.loader import load_skill
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ._deprecation import normalize_params
+from .instruct import (
+    VASP_KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+    VASP_SKILL_UPDATE_INSTRUCTIONS,
+)
 from .post_run_analysis import analyze_run_directory
+from .skill_graduation import (
+    KnowledgeStore,
+    format_graduated_skills_block,
+    graduate_to_skill_file,
+    load_graduated_skills,
+)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -193,6 +203,59 @@ class VaspQualityAgent:
 
         self.generation_config = None
 
+        # In-session observations awaiting graduation (e.g. "noticed
+        # ALGO=All + ISMEAR=-5 produced tetrahedron warning").
+        self.knowledge_store = KnowledgeStore()
+
+    # ── On-the-fly skill graduation ──────────────────────────
+
+    def record_knowledge(self, observation: Dict[str, Any]) -> str:
+        """Record a quality-side observation for later graduation.
+
+        Free-form dict; common keys: `summary`, `incar_snapshot`,
+        `flagged_combination`, `recommended_fix`. Returns the assigned id."""
+        return self.knowledge_store.record(observation)
+
+    def list_knowledge(self) -> List[Dict[str, Any]]:
+        return self.knowledge_store.list()
+
+    def clear_knowledge(self, knowledge_id: Optional[str] = None) -> int:
+        return self.knowledge_store.remove(knowledge_id)
+
+    def graduate_to_skill(
+        self,
+        knowledge_id: str,
+        skill_name: str = "vasp_quality_heuristics",
+    ) -> Dict[str, Any]:
+        """Crystallize a quality-side observation into a graduated skill.
+
+        Default skill name is `vasp_quality_heuristics`, which keeps the
+        post-run quality rules separate from the input-fix rules
+        (`vasp_learned_fixes`). Both end up under
+        ~/.scilink/graduated_skills/vasp/, so the loader picks them up
+        automatically next session."""
+        entry = self.knowledge_store.get(knowledge_id)
+        if entry is None:
+            return {
+                "status": "error",
+                "message": f"Knowledge id not found: {knowledge_id}",
+            }
+
+        def _llm_call(prompt: str) -> str:
+            response = self.model.generate_content(
+                prompt, generation_config=self.generation_config
+            )
+            return response.text
+
+        return graduate_to_skill_file(
+            knowledge_entry=entry,
+            skill_name=skill_name,
+            domain="vasp",
+            llm_call=_llm_call,
+            fresh_template=VASP_KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+            update_template=VASP_SKILL_UPDATE_INSTRUCTIONS,
+        )
+
     # ── Public entry point ─────────────────────────────────────
 
     def run_quality_check(
@@ -305,6 +368,11 @@ class VaspQualityAgent:
         facts_str = json.dumps(facts, indent=2, default=str)
         det_issues_str = json.dumps(det_issues, indent=2, default=str)
         skill_block = f"\nVASP CONVENTIONS (from skill):\n{skill_text}\n" if skill_text else ""
+        # Graduated rules (e.g. "ALGO=All + ISMEAR=-5 is incompatible")
+        # — empty string when nothing has been graduated yet.
+        learned_block = format_graduated_skills_block(
+            load_graduated_skills("vasp"),
+        )
 
         prompt = f"""Assess the post-run quality of a VASP calculation against the research goal.
 
@@ -316,7 +384,7 @@ FACTS FROM THE RUN (parsed from vasprun.xml + log tails):
 
 DETERMINISTIC GUARDRAILS ALREADY FLAGGED (do not duplicate; supplement):
 {det_issues_str}
-{skill_block}
+{skill_block}{learned_block}
 Assess:
 1. Overall status — "healthy" (everything looks right), "warning" (minor
    physics concerns), or "critical" (the calculation cannot be trusted).
