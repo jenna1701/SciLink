@@ -11,13 +11,13 @@ the output dir over.
 Usage (locally, where SCILINK_API_KEY is set):
 
     # Generate inputs for the default case set:
-    python examples/run_benchmark_suite.py
+    python examples/vasp/benchmark_suite.py
 
     # Custom output dir + only run a subset:
-    python examples/run_benchmark_suite.py --output bench_run_2/ --only si_bulk mgo
+    python examples/vasp/benchmark_suite.py --output bench_run_2/ --only si_bulk mgo
 
     # Different model:
-    python examples/run_benchmark_suite.py --model gemini-2.5-pro
+    python examples/vasp/benchmark_suite.py --model gemini-2.5-pro
 """
 from __future__ import annotations
 

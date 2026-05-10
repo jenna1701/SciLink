@@ -469,16 +469,65 @@ analysis_session/
 
 ---
 
-# Simulation Agents *(Coming Soon)*
+# Simulation Agents
 
-The Simulation Agents module will provide AI-powered computational modeling, bridging experimental observations with atomistic simulations.
+Drives atomistic simulations from natural-language research goals. The DFT (VASP) side is the most developed; LAMMPS-side agents (`LAMMPSSimulationAgent`, `LAMMPSAnalysisAgent`, `LAMMPSOrchestrator`) provide an analogous structure for classical MD.
+
+## DFT (VASP)
 
 | Agent | Purpose |
 |-------|---------|
-| **DFTAgent** | Density Functional Theory workflow automation |
-| **MDAgent** | Classical molecular dynamics simulations via LAMMPS |
-| **SimulationRecommendationAgent** | Recommends structures and simulation objectives based on experimental analysis |
+| `DFTOrchestrator` | Generate POSCAR / INCAR / KPOINTS from a natural-language description |
+| `VaspUpdater` | Recover from failed runs by proposing corrected inputs from VASP error logs |
+| `VaspQualityAgent` | Post-run quality assessment with structured findings + recommendations |
 
-Key planned features include experiment-to-simulation pipelines, defect modeling, and direct integration with the Analysis Agents.
+### Skill graduation
 
-> **Note**: This module is currently being refactored. Check back for updates.
+Sim-side agents support **on-the-fly skill graduation** — record an observation during a run, crystallize it into a Markdown skill that's automatically loaded into agent context on subsequent runs. No code changes needed to teach the agents new domain rules.
+
+```python
+qa = VaspQualityAgent()
+kid = qa.record_knowledge({
+    "summary": "ALGO=All + ISMEAR=-5 produces a tetrahedron-not-variational warning",
+    "fix": "Use ALGO=Normal with tetrahedron, or switch ISMEAR=0 with ALGO=All",
+})
+qa.graduate_to_skill(kid)
+# → ~/.scilink/graduated_skills/vasp/<name>/<name>.md, auto-loaded next run
+```
+
+### Python API
+
+```python
+from scilink.agents.sim_agents.dft_orchestrator import DFTOrchestrator
+from scilink.agents.sim_agents.vasp_quality import VaspQualityAgent
+from scilink.agents.sim_agents.vasp_updater import VaspUpdater
+
+# Generate inputs from a description
+orch = DFTOrchestrator(generator_model="claude-opus-4-6")
+result = orch.run_complete_workflow(
+    "diamond Si, 2-atom primitive cell, ground-state SCF"
+)
+
+# Quality check on a converged run
+qa = VaspQualityAgent()
+quality = qa.run_quality_check(
+    output_dir=result["output_directory"],
+    research_goal="diamond Si ground-state SCF",
+)
+
+# Recover from a failure
+updater = VaspUpdater()
+fix = updater.refine_inputs(
+    poscar_path="POSCAR", incar_path="INCAR", kpoints_path="KPOINTS",
+    vasp_log=open("vasp.out").read(),
+    original_request="diamond Si ground-state SCF",
+)
+```
+
+### Example scripts
+
+End-to-end pipelines under [`examples/vasp/`](examples/vasp/):
+
+- `benchmark_suite.py` — generate VASP inputs for a registry of systems + per-case SLURM scripts.
+- `breakage_benchmark.py` — engineered-failure harness for testing `VaspUpdater` against known error classes.
+- `e2e_pipeline.py` — post-cluster pipeline: classify each result, run the quality agent or updater, optionally graduate observations to skills.

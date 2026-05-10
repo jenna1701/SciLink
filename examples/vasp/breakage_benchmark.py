@@ -9,13 +9,13 @@ the deterministic-fix layer should produce.
 Two stages:
 
   PREP -- generate broken inputs + per-case submit scripts:
-    python examples/run_breakage_benchmark.py prep \\
+    python examples/vasp/breakage_benchmark.py prep \\
       --baseline ~/scilink_baseline_si \\
       --pseudo-dir /share/apps/vasp/potpaw_PBE.54
 
   ANALYZE -- after submitting on the cluster and the jobs fail, run
   the updater on each captured failure log:
-    python examples/run_breakage_benchmark.py analyze \\
+    python examples/vasp/breakage_benchmark.py analyze \\
       --output breakage_<timestamp>/
 
 PREP writes:
@@ -366,7 +366,7 @@ def cmd_prep(args: argparse.Namespace) -> int:
     print(f"  ssh alle927@deception.pnl.gov 'cd /people/alle927/{parent.name} && bash submit_all.sh'")
     print(f"  # wait for failures, then:")
     print(f"  rsync -av alle927@deception.pnl.gov:/people/alle927/{parent.name}/ {parent}/")
-    print(f"  python examples/run_breakage_benchmark.py analyze --output {parent}")
+    print(f"  python examples/vasp/breakage_benchmark.py analyze --output {parent}")
 
     return 0
 

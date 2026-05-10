@@ -1,6 +1,6 @@
 """End-to-end post-run pipeline for the VASP agentic workflow.
 
-Takes a benchmark output directory (produced by run_benchmark_suite.py)
+Takes a benchmark output directory (produced by benchmark_suite.py)
 where each subdirectory holds the input files + the captured outputs
 of one VASP run, and ties the agents together:
 
@@ -16,12 +16,12 @@ of one VASP run, and ties the agents together:
       print the per-case summary
 
 Skips the cluster-side submit / poll / pull-back step on purpose --
-that's covered by run_benchmark_suite.py + sbatch. This script is the
+that's covered by benchmark_suite.py + sbatch. This script is the
 "once results are back, what does the agent system do with them" piece.
 
 Usage:
 
-    python examples/run_e2e_pipeline.py \\
+    python examples/vasp/e2e_pipeline.py \\
         --output benchmark_suite_20260510_135123/ \\
         --pseudo-dir /share/apps/vasp/potpaw_PBE.54 \\
         --modules "module purge\\nmodule load openmpi/5.0.7"
@@ -215,7 +215,7 @@ def _build_submit_fix_script(
     vasp_command: str,
     walltime: str = "00:15:00",
 ) -> str:
-    """Mirror of run_breakage_benchmark.build_submit_fix_script -- kept
+    """Mirror of breakage_benchmark.build_submit_fix_script -- kept
     inline here so this script is usable on its own without importing
     a sibling example file."""
     job_name = f"scilink_e2e_fix_{case_label}"
@@ -385,7 +385,7 @@ def find_case_dirs(parent: Path) -> List[Path]:
 
 
 def load_research_goal_for_case(case_dir: Path, *, manifest: Dict[str, Any]) -> str:
-    """Pull the per-case description from the manifest (run_benchmark_suite
+    """Pull the per-case description from the manifest (benchmark_suite
     writes one). Falls back to a generic goal if the manifest is missing
     or lacks the case."""
     label = case_dir.name
@@ -400,7 +400,7 @@ def main() -> int:
     parser.add_argument(
         "--output",
         required=True,
-        help="Benchmark output dir from run_benchmark_suite.py.",
+        help="Benchmark output dir from benchmark_suite.py.",
     )
     parser.add_argument(
         "--pseudo-dir",
@@ -411,7 +411,7 @@ def main() -> int:
         "--modules",
         default="# module load <vasp>",
         help='Module-load block for submit_fix.sh. Same "\\n -> newline" '
-             "translation as run_benchmark_suite.py.",
+             "translation as benchmark_suite.py.",
     )
     parser.add_argument(
         "--vasp-cmd",
@@ -459,7 +459,7 @@ def main() -> int:
         print(f"No case directories found under {parent}", flush=True)
         return 1
 
-    # Optional manifest from run_benchmark_suite -- gives per-case
+    # Optional manifest from benchmark_suite -- gives per-case
     # research goals to feed the quality agent.
     manifest_path = parent / "manifest.json"
     manifest = (
