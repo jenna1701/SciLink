@@ -489,7 +489,10 @@ def main() -> int:
     p_prep.add_argument(
         "--modules",
         default=None,
-        help="Module-load block to bake into submit.sh (newline-separated).",
+        help='Module-load block to bake into submit.sh. Pass either with '
+             'real newlines (e.g. via $\'module purge\\nmodule load X\') or '
+             'with literal backslash-n sequences -- both forms are accepted '
+             'and converted to real newlines in the generated script.',
     )
     p_prep.set_defaults(func=cmd_prep)
 
@@ -505,6 +508,10 @@ def main() -> int:
     p_an.set_defaults(func=cmd_analyze)
 
     args = parser.parse_args()
+    # Bash's double-quoted "\n" is a literal backslash-n, not a newline.
+    # Accept the obvious-looking shell invocation and translate before use.
+    if getattr(args, "modules", None):
+        args.modules = args.modules.replace("\\n", "\n")
     return args.func(args)
 
 
