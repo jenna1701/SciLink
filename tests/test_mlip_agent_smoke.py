@@ -135,6 +135,134 @@ def test_mlip_unknown_backend_raises():
             raise AssertionError("Unknown backend should raise ValueError")
 
 
+def test_ase_script_generation_nvt():
+    from scilink.skills._shared import mlip_tools
+
+    with tempfile.TemporaryDirectory() as td:
+        path = mlip_tools.generate_ase_script(
+            backend="mace",
+            model_name="mace-mp-0",
+            elements=["Cu"],
+            working_dir=td,
+            structure_file="cu_bulk.data",
+            timestep=1.0,
+            temperature=300.0,
+            pressure=None,
+            n_steps=100,
+            output_interval=10,
+            device="cuda",
+        )
+
+        content = Path(path).read_text()
+        assert Path(path).name == "run_md.py"
+
+        for required in (
+            "from mace.calculators import mace_mp",
+            "mace_mp(",
+            "from ase.md.langevin import Langevin",
+            "Langevin(",
+            "MaxwellBoltzmannDistribution",
+            "Trajectory(\"traj.traj\"",
+            "thermo.log",
+            "dyn.run(100)",
+            "read_lammps_data('cu_bulk.data'",
+            "ELEMENTS = ['Cu']",
+        ):
+            assert required in content, (
+                f"ASE script missing expected token: {required!r}"
+            )
+
+        assert "from ase.md.npt import NPT" not in content, (
+            "NVT requested (pressure=None) but NPT import slipped in"
+        )
+
+
+def test_ase_script_generation_npt():
+    from scilink.skills._shared import mlip_tools
+
+    with tempfile.TemporaryDirectory() as td:
+        path = mlip_tools.generate_ase_script(
+            backend="mace",
+            model_name="mace-mp-0",
+            elements=["Cu"],
+            working_dir=td,
+            timestep=1.0,
+            temperature=300.0,
+            pressure=1.0,
+        )
+        content = Path(path).read_text()
+        assert "from ase.md.npt import NPT" in content
+        assert "externalstress=1.0 * units.bar" in content
+
+
+def test_ase_script_mace_off_model():
+    """mace-off23 should pick the mace_off loader, not mace_mp."""
+    from scilink.skills._shared import mlip_tools
+
+    with tempfile.TemporaryDirectory() as td:
+        path = mlip_tools.generate_ase_script(
+            backend="mace",
+            model_name="mace-off23",
+            elements=["C", "H", "O"],
+            working_dir=td,
+        )
+        content = Path(path).read_text()
+        assert "from mace.calculators import mace_off" in content
+        assert "mace_off(" in content
+        assert "mace_mp(" not in content, (
+            "off23 model should not use mace_mp loader"
+        )
+
+
+def test_ase_runner_unknown_backend():
+    from scilink.skills._shared import mlip_tools
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            mlip_tools.generate_ase_script(
+                backend="nequip",
+                model_name="whatever",
+                elements=["Cu"],
+                working_dir=td,
+            )
+        except ValueError as exc:
+            assert "mace" in str(exc).lower()
+        else:
+            raise AssertionError("Non-mace backend should raise ValueError")
+
+
+def test_agent_runner_validation():
+    """Early kwargs validation in deploy_pretrained -- no LLM/MACE needed."""
+    from scilink.agents.sim_agents.mlip_agent import MLIPAgent
+
+    with tempfile.TemporaryDirectory() as td:
+        agent = MLIPAgent(working_dir=td, **_agent_kwargs())
+
+        try:
+            agent.deploy_pretrained(
+                system_info={"elements": {"Cu": 4}, "n_atoms": 4},
+                research_goal="test",
+                runner="not_a_runner",
+            )
+        except ValueError as exc:
+            assert "runner" in str(exc)
+        else:
+            raise AssertionError("Invalid runner should raise ValueError")
+
+        try:
+            agent.deploy_pretrained(
+                system_info={"elements": {"Cu": 4}, "n_atoms": 4},
+                research_goal="test",
+                runner="ase",
+            )
+        except ValueError as exc:
+            assert "structure_file" in str(exc)
+        else:
+            raise AssertionError(
+                "runner='ase' without structure_file should raise"
+            )
+
+
 if __name__ == "__main__":
     print("=== smoke 1: MLIPAgent assembly + skill load ===")
     test_mlip_agent_assembly()

@@ -270,6 +270,8 @@ Return JSON:
         system_info: Dict[str, Any],
         research_goal: str,
         simulation_params: Optional[Dict[str, Any]] = None,
+        runner: str = "lammps",
+        structure_file: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Deploy a pretrained foundation model.  This is the primary entry
@@ -279,27 +281,40 @@ Return JSON:
             system_info: From ForceFieldAgent._analyze_system_composition()
                          or any dict with "elements" and "n_atoms" keys
             research_goal: What the simulation should achieve
-            simulation_params: Optional LAMMPS settings:
-                {"temperature": 300, "pressure": 1.0, "timestep": 0.5}
+            simulation_params: Optional MD settings (keys depend on runner):
+                LAMMPS: {"temperature": 300, "pressure": 1.0, "timestep": 0.5}
+                ASE:    {"temperature": 300, "pressure": 1.0, "timestep": 1.0,
+                         "n_steps": 1000, "output_interval": 50,
+                         "device": "cuda"}
+            runner: "lammps" (default) emits a LAMMPS input file; "ase"
+                emits a runnable Python MD script using the MACE ASE
+                calculator. ASE is useful when LAMMPS+MACE isn't built
+                yet or for quick prototyping.
+            structure_file: Path to a LAMMPS data file. Required for
+                runner="ase" (the script reads from this path at run
+                time). Ignored for runner="lammps".
 
-        Returns:
-            {
-                "model_file": str,
-                "backend": str,
-                "model_name": str,
-                "lammps_input": str,
-                "pair_style": str,
-                "pair_coeff": str,
-                "notes": str,
-            }
+        Returns dict with keys depending on runner:
+            common: model_file, backend, model_name, elements, selection,
+                    runner, notes
+            lammps: lammps_input, pair_style, pair_coeff
+            ase:    ase_script
         """
         if not _MLIP_TOOLS_AVAILABLE:
             raise ImportError(
                 "mlip_tools required. Install mace-torch: pip install mace-torch"
             )
+        if runner not in ("lammps", "ase"):
+            raise ValueError(
+                f"runner must be 'lammps' or 'ase', got {runner!r}"
+            )
+        if runner == "ase" and not structure_file:
+            raise ValueError(
+                "runner='ase' requires a structure_file (LAMMPS data file path)"
+            )
 
         self.logger.info("=" * 60)
-        self.logger.info("DEPLOYING PRETRAINED MLIP")
+        self.logger.info(f"DEPLOYING PRETRAINED MLIP (runner={runner})")
         self.logger.info("=" * 60)
 
         elements = sorted(system_info.get("elements", {}).keys())
@@ -315,7 +330,7 @@ Return JSON:
         # Load backend-specific skill
         self._load_backend_skill(backend)
 
-        # Deploy
+        # Deploy -- caches model weights, validates the install
         deployment = mlip_tools.deploy_pretrained(
             backend=backend,
             model_name=model_name,
@@ -323,35 +338,66 @@ Return JSON:
             working_dir=self.working_dir,
         )
 
-        # Generate LAMMPS input
         sim = simulation_params or {}
-        lammps_input = mlip_tools.generate_lammps_input(
-            backend=backend,
-            model_file=deployment["model_file"],
-            elements=elements,
-            working_dir=self.working_dir,
-            timestep=sim.get("timestep", 0.5),
-            temperature=sim.get("temperature", 300.0),
-            pressure=sim.get("pressure"),
-        )
-
-        result = {
-            "model_file":  deployment["model_file"],
-            "backend":     backend,
-            "model_name":  model_name,
-            "elements":    elements,
-            "lammps_input": lammps_input,
-            "pair_style":  f"{backend} no_domain_decomposition",
-            "pair_coeff":  f"* * {deployment['model_file']} {' '.join(elements)}",
-            "selection":   selection,
-            "notes": (
-                f"Pretrained {model_name} deployed. Units: metal (eV, Å, ps). "
-                f"Run simulation, then call evaluate_simulation_quality() "
-                f"to check if refinement is needed."
-            ),
+        result: Dict[str, Any] = {
+            "model_file": deployment["model_file"],
+            "backend":    backend,
+            "model_name": model_name,
+            "elements":   elements,
+            "selection":  selection,
+            "runner":     runner,
         }
 
-        # Save
+        if runner == "lammps":
+            lammps_input = mlip_tools.generate_lammps_input(
+                backend=backend,
+                model_file=deployment["model_file"],
+                elements=elements,
+                working_dir=self.working_dir,
+                timestep=sim.get("timestep", 0.5),
+                temperature=sim.get("temperature", 300.0),
+                pressure=sim.get("pressure"),
+            )
+            result.update(
+                lammps_input=lammps_input,
+                pair_style=f"{backend} no_domain_decomposition",
+                pair_coeff=(
+                    f"* * {deployment['model_file']} {' '.join(elements)}"
+                ),
+                notes=(
+                    f"Pretrained {model_name} deployed. Units: metal "
+                    f"(eV, Å, ps). Run simulation, then call "
+                    f"evaluate_simulation_quality() to check if "
+                    f"refinement is needed."
+                ),
+            )
+            self.logger.info(f"LAMMPS input: {lammps_input}")
+        else:  # runner == "ase"
+            ase_script = mlip_tools.generate_ase_script(
+                backend=backend,
+                model_name=model_name,
+                elements=elements,
+                working_dir=self.working_dir,
+                structure_file=structure_file,
+                timestep=sim.get("timestep", 1.0),
+                temperature=sim.get("temperature", 300.0),
+                pressure=sim.get("pressure"),
+                n_steps=sim.get("n_steps", 1000),
+                output_interval=sim.get("output_interval", 50),
+                device=sim.get("device", "cuda"),
+            )
+            result.update(
+                ase_script=ase_script,
+                notes=(
+                    f"Pretrained {model_name} deployed via ASE+MACE. "
+                    f"Run `python run_md.py` in the working dir; outputs "
+                    f"thermo.log + traj.traj. Then call "
+                    f"evaluate_simulation_quality() to check if "
+                    f"refinement is needed."
+                ),
+            )
+            self.logger.info(f"ASE script: {ase_script}")
+
         with open(os.path.join(self.working_dir, "deployment.json"), "w") as f:
             json.dump(
                 {k: v for k, v in result.items()
@@ -360,7 +406,6 @@ Return JSON:
             )
 
         self.logger.info(f"Model: {deployment['model_file']}")
-        self.logger.info(f"LAMMPS input: {lammps_input}")
         self.logger.info("=" * 60)
         return result
 
