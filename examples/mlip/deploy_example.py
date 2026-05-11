@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 from ase import Atoms
-from ase.build import bulk
+from ase.build import bulk, fcc111, molecule
 from ase.io.lammpsdata import write_lammps_data
 
 
@@ -72,7 +72,156 @@ def mos2_monolayer():
     }
 
 
-SYSTEMS = {"cu": cu_bulk_system, "mos2": mos2_monolayer}
+def cu_co_slab():
+    """Cu(111) 2x2x3 slab with one CO molecule atop a surface Cu atom.
+
+    Classic heterogeneous catalysis benchmark; water-gas-shift relevant.
+    Expected behavior: CO stays adsorbed atop, Cu-C ~1.85 A, C-O ~1.15 A.
+    """
+    slab = fcc111("Cu", size=(2, 2, 3), a=3.615, vacuum=8.0)
+    top_z = slab.positions[:, 2].max()
+    top_atom = slab.positions[slab.positions[:, 2].argmax()]
+    co = Atoms(
+        "CO",
+        positions=[
+            [top_atom[0], top_atom[1], top_z + 1.85],
+            [top_atom[0], top_atom[1], top_z + 1.85 + 1.15],
+        ],
+    )
+    slab += co
+    return {
+        "name": "cu_co_slab",
+        "atoms": slab,
+        "elements": sorted(set(slab.get_chemical_symbols())),
+        "research_goal": (
+            "Equilibrate CO on Cu(111) at 300 K and verify atop binding "
+            "geometry consistent with water-gas-shift catalysis."
+        ),
+    }
+
+
+def licoo2_bulk():
+    """LiCoO2 in the R-3m (alpha-NaFeO2) structure -- canonical Li-ion cathode."""
+    from ase.spacegroup import crystal
+    licoo2 = crystal(
+        ["Li", "Co", "O"],
+        basis=[(0, 0, 0), (0, 0, 0.5), (0, 0, 0.2604)],
+        spacegroup=166,
+        cellpar=[2.815, 2.815, 14.05, 90, 90, 120],
+    )
+    return {
+        "name": "licoo2_bulk",
+        "atoms": licoo2,
+        "elements": sorted(set(licoo2.get_chemical_symbols())),
+        "research_goal": (
+            "Equilibrate the R-3m LiCoO2 cathode at 300 K and verify the "
+            "c/a ratio remains within 1% of the experimental value (~4.99)."
+        ),
+    }
+
+
+def mos2_vacancy():
+    """2x2 2H-MoS2 monolayer with one S atom removed (single S vacancy)."""
+    base = mos2_monolayer()["atoms"]
+    super_cell = base * (2, 2, 1)
+    s_indices = [i for i, s in enumerate(super_cell.get_chemical_symbols())
+                 if s == "S"]
+    del super_cell[s_indices[0]]
+    return {
+        "name": "mos2_vacancy",
+        "atoms": super_cell,
+        "elements": sorted(set(super_cell.get_chemical_symbols())),
+        "research_goal": (
+            "Equilibrate a S-vacancy defect in MoS2 monolayer at 300 K "
+            "and characterize local distortion around the vacancy site."
+        ),
+    }
+
+
+def methanol_cluster():
+    """A small cluster of 5 methanol molecules in a cubic box.
+
+    Battery electrolyte / biomass-conversion solvent. All-organic
+    composition (C/H/O) routes the agent to mace-off23.
+    """
+    n_mols = 5
+    box = 10.0
+    rng = np.random.default_rng(0)
+    template = molecule("CH3OH")
+    cluster = Atoms(cell=[box, box, box], pbc=[True, True, True])
+    for _ in range(n_mols):
+        m = template.copy()
+        m.translate(rng.uniform(2.0, box - 2.0, size=3) - m.get_center_of_mass())
+        cluster += m
+    return {
+        "name": "methanol_cluster",
+        "atoms": cluster,
+        "elements": sorted(set(cluster.get_chemical_symbols())),
+        "research_goal": (
+            "Equilibrate liquid methanol at 300 K and verify hydrogen-bonded "
+            "network forms with expected O-H...O distances near 1.9 A."
+        ),
+    }
+
+
+def alanine_dipeptide():
+    """N-acetyl-L-alanine-N'-methylamide (Ac-Ala-NHMe) -- 22 atoms.
+
+    Textbook Ramachandran / peptide-MD benchmark molecule. All-organic
+    (C/H/N/O) routes the agent to mace-off23.
+
+    Coordinates are an approximate alpha-helix-like conformation
+    (phi~-60, psi~-45); mace-off23 will relax to the local minimum
+    within ~50-100 fs of MD.
+    """
+    symbols = "CHHHCONHCHCHHHCONHCHHH"
+    positions = np.array([
+        [-3.00, 1.50,  0.00],   # acetyl methyl C
+        [-3.40, 1.00,  0.90],   #   H
+        [-3.40, 2.50,  0.10],   #   H
+        [-3.40, 1.00, -0.90],   #   H
+        [-1.50, 1.50,  0.00],   # acetyl carbonyl C
+        [-0.90, 2.50,  0.00],   #   =O
+        [-0.70, 0.30,  0.00],   # amide N
+        [-1.20,-0.50,  0.00],   #   H
+        [ 0.70, 0.30,  0.00],   # alpha C
+        [ 1.00, 0.80,  0.90],   #   H
+        [ 1.30,-1.10,  0.00],   # methyl side-chain C
+        [ 2.40,-1.10,  0.00],   #   H
+        [ 1.00,-1.60,  0.90],   #   H
+        [ 1.00,-1.60, -0.90],   #   H
+        [ 1.20, 1.10, -1.10],   # second carbonyl C
+        [ 0.70, 1.30, -2.20],   #   =O
+        [ 2.30, 1.90, -0.70],   # second amide N
+        [ 2.70, 1.80,  0.20],   #   H
+        [ 3.20, 2.90, -1.40],   # NHMe methyl C
+        [ 2.70, 3.80, -1.60],   #   H
+        [ 4.10, 3.00, -0.90],   #   H
+        [ 3.40, 2.60, -2.40],   #   H
+    ])
+    atoms = Atoms(symbols=symbols, positions=positions)
+    atoms.center(vacuum=5.0)
+    return {
+        "name": "alanine_dipeptide",
+        "atoms": atoms,
+        "elements": sorted(set(atoms.get_chemical_symbols())),
+        "research_goal": (
+            "Equilibrate alanine dipeptide at 300 K and characterize "
+            "phi/psi backbone dynamics consistent with the conformational "
+            "sampling expected for an isolated peptide."
+        ),
+    }
+
+
+SYSTEMS = {
+    "cu":            cu_bulk_system,
+    "mos2":          mos2_monolayer,
+    "cu_co":         cu_co_slab,
+    "licoo2":        licoo2_bulk,
+    "mos2_vac":      mos2_vacancy,
+    "meoh":          methanol_cluster,
+    "ala":           alanine_dipeptide,
+}
 
 
 def print_section(title):
@@ -218,8 +367,11 @@ def run_without_mace(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--systems", nargs="+", default=["cu", "mos2"],
+        "--systems", nargs="+",
+        default=["cu_co", "licoo2", "mos2_vac", "meoh", "ala"],
         choices=list(SYSTEMS.keys()),
+        help="Demo lineup defaults to the five PNNL-relevant systems; "
+             "first three route to mace-mp-0, last two to mace-off23.",
     )
     parser.add_argument("--temperature", type=float, default=300.0)
     parser.add_argument("--pressure", type=float, default=None,
