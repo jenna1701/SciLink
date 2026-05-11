@@ -1067,10 +1067,16 @@ DEVICE = os.environ.get("MACE_DEVICE", {device!r})
 def main():
     atoms = read_lammps_data({structure_file!r}, style="atomic", sort_by_id=True)
     if ELEMENTS:
-        type_to_sym = {{i + 1: ELEMENTS[i] for i in range(len(ELEMENTS))}}
-        atoms.set_chemical_symbols(
-            [type_to_sym[t] for t in atoms.get_atomic_numbers()]
-        )
+        # write_lammps_data(masses=True) lets ASE infer real elements from
+        # masses on read, so atoms.numbers will be true Zs (29 for Cu, etc.)
+        # in the typical case. Only fall back to type-index remap if ASE's
+        # mass-based inference didn't recover the expected element set.
+        actual_syms = sorted(set(atoms.get_chemical_symbols()))
+        expected_syms = sorted(set(ELEMENTS))
+        if actual_syms != expected_syms:
+            type_to_sym = {{i + 1: ELEMENTS[i] for i in range(len(ELEMENTS))}}
+            nums = atoms.get_atomic_numbers()
+            atoms.set_chemical_symbols([type_to_sym[int(n)] for n in nums])
 
     print(f"system:  {{len(atoms)}} atoms "
           f"({{sorted(set(atoms.get_chemical_symbols()))}})")
