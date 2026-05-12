@@ -1,6 +1,7 @@
 from .structure_agent import StructureGenerator
 from .val_agent import StructureValidatorAgent, IncarValidatorAgent
-from .vasp_agent import VaspInputAgent
+from .periodic_dft_agent import PeriodicDFTAgent
+from .vasp_agent import VaspInputAgent  # backward-compat alias
 from .vasp_quality import VaspQualityAgent
 from .base_agent import SimulationAgent
 from .md_simulation_agent import MDSimulationAgent
