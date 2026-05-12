@@ -1,0 +1,18 @@
+{
+  "experiment_type": "Spectroscopy",
+  "experiment": {
+    "technique": "EELS core-loss spectroscopy"
+  },
+  "sample": {
+    "material": "Unknown — to be identified from spectral features"
+  },
+  "energy_range": {
+    "start": 350.0,
+    "end": 861.75,
+    "units": "eV"
+  },
+  "data_columns": [
+    {"name": "Energy loss", "units": "eV"},
+    {"name": "Intensity", "units": "counts"}
+  ]
+}
