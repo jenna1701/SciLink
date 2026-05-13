@@ -272,6 +272,8 @@ Return JSON:
         simulation_params: Optional[Dict[str, Any]] = None,
         runner: str = "lammps",
         structure_file: Optional[str] = None,
+        backend: Optional[str] = None,
+        model_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Deploy a pretrained foundation model.  This is the primary entry
@@ -319,10 +321,19 @@ Return JSON:
 
         elements = sorted(system_info.get("elements", {}).keys())
 
-        # LLM selects the best pretrained model
-        selection = self._select_pretrained_model(elements, research_goal)
+        # If the caller explicitly forces a backend, skip the LLM
+        # selection step entirely — useful for benchmarks, regression
+        # tests, and demos that want to exercise a specific engine.
+        if backend is not None:
+            selection = {
+                "backend":       backend,
+                "model_name":    model_name or backend,
+                "justification": f"caller-forced via backend={backend!r}",
+            }
+        else:
+            selection = self._select_pretrained_model(elements, research_goal)
         backend = selection.get("backend", "mace")
-        model_name = selection.get("model_name", "mace-mp-0")
+        model_name = selection.get("model_name") or backend
 
         self.logger.info(f"Selected: {model_name} ({backend})")
         self.logger.info(f"Reason: {selection.get('justification', '')}")

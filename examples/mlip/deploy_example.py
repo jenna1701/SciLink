@@ -265,8 +265,14 @@ def check_mace_availability():
 def run_with_mace(
     agent, system_info_dict, out_dir, temperature, pressure,
     runner, structure_file, n_steps, device,
+    backend=None,
 ):
-    print(f"  MACE available — running deploy_pretrained (runner={runner}).")
+    if backend:
+        print(f"  Running deploy_pretrained (runner={runner}, "
+              f"backend={backend} -- forced, skipping LLM selection).")
+    else:
+        print(f"  Running deploy_pretrained (runner={runner}, "
+              f"backend chosen by LLM).")
     if runner == "lammps":
         sim_params = {
             "timestep": 0.5,            # ps (LAMMPS metal units)
@@ -283,6 +289,8 @@ def run_with_mace(
             "device": device,
         }
         kwargs = dict(runner="ase", structure_file=str(structure_file))
+    if backend:
+        kwargs["backend"] = backend
 
     return agent.deploy_pretrained(
         system_info=system_info_dict,
@@ -401,7 +409,23 @@ def main():
              "in-process (requires MACE installed). Useful for "
              "single-command end-to-end demos on a GPU node.",
     )
+    parser.add_argument(
+        "--backend", choices=["mace", "chgnet"], default=None,
+        help="Force a specific MLIP backend, bypassing the agent's "
+             "LLM-driven model selection. Useful for benchmarking a "
+             "specific engine end-to-end. CHGNet only works with "
+             "--runner ase (no LAMMPS pair_style). Default: let the "
+             "agent's LLM pick.",
+    )
     args = parser.parse_args()
+
+    if args.backend == "chgnet" and args.runner == "lammps":
+        print(
+            "ERROR: --backend chgnet is incompatible with --runner lammps. "
+            "CHGNet has no LAMMPS pair_style; use --runner ase.",
+            file=sys.stderr,
+        )
+        return 2
 
     mace_available, mace_info = check_mace_availability()
     print_section("ENVIRONMENT")
@@ -458,6 +482,7 @@ def main():
                     args.temperature, args.pressure,
                     args.runner, data_path,
                     args.n_steps, args.device,
+                    backend=args.backend,
                 )
             except Exception as exc:
                 print(f"  deploy_pretrained failed: {exc}")
