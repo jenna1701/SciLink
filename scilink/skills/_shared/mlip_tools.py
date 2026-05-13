@@ -101,6 +101,31 @@ def check_backends() -> Dict[str, Dict[str, Any]]:
     except ImportError:
         result["deepmd"] = {"available": False, "version": None, "pretrained": []}
 
+    # ── CHGNet ────────────────────────────────────────────────────
+    # ASE-only — no LAMMPS pair_style. Pretrained on MPtrj (~1.5M
+    # structures); single universal model, no size variants.
+    try:
+        import chgnet
+        result["chgnet"] = {
+            "available": True,
+            "version": getattr(chgnet, "__version__", "unknown"),
+            "lammps_pair_style": None,    # no LAMMPS support
+            "pretrained": [
+                {
+                    "name": "chgnet",
+                    "domain": "universal-inorganic",
+                    "description": (
+                        "Universal MLIP pretrained on MPtrj (~1.5M DFT "
+                        "relaxations). Predicts energies, forces, "
+                        "stresses, and magnetic moments. ASE-only — "
+                        "no LAMMPS pair_style; use runner='ase'."
+                    ),
+                },
+            ],
+        }
+    except ImportError:
+        result["chgnet"] = {"available": False, "version": None, "pretrained": []}
+
     return result
 
 
@@ -120,15 +145,16 @@ def deploy_pretrained(
     No training data or GPU training time required.
 
     Args:
-        backend:    "mace" | "nequip" | "deepmd"
-        model_name: Pretrained model identifier (e.g. "mace-mp-0")
+        backend:    "mace" | "chgnet" | "nequip" | "deepmd"
+        model_name: Pretrained model identifier (e.g. "mace-mp-0", "chgnet")
         elements:   Chemical elements in the system
         working_dir: Output directory
         device:     "cpu" or "cuda"
 
     Returns:
         {
-            "model_file": str,      # path to model artifact
+            "model_file": str,      # path to model artifact (or "" for
+                                    # backends with no persistable file)
             "calculator": object,   # ASE calculator (for validation)
             "metadata": dict,       # model metadata
         }
@@ -137,6 +163,8 @@ def deploy_pretrained(
 
     if backend == "mace":
         return _mace_deploy_pretrained(model_name, elements, working_dir, device)
+    elif backend == "chgnet":
+        return _chgnet_deploy_pretrained(model_name, elements, working_dir, device)
     elif backend == "nequip":
         raise NotImplementedError(
             "NequIP has no foundation models. Use backend='mace' for "
@@ -149,6 +177,39 @@ def deploy_pretrained(
         )
     else:
         raise ValueError(f"Unknown backend: {backend}")
+
+
+def _chgnet_deploy_pretrained(
+    model_name: str,
+    elements: List[str],
+    working_dir: str,
+    device: str,
+) -> Dict[str, Any]:
+    """Deploy the pretrained CHGNet universal model.
+
+    CHGNet has a single pretrained model bundled with the chgnet
+    package; no model file needs to be downloaded or saved to disk.
+    The ``model_file`` key in the return dict is an empty string —
+    the agent / runner constructs ``CHGNetCalculator()`` directly
+    instead of loading from a path.
+    """
+    from chgnet.model.dynamics import CHGNetCalculator
+
+    use_device = device if device in ("cuda", "cpu", "mps") else "cpu"
+    calc = CHGNetCalculator(use_device=use_device)
+
+    logger.info(f"Deployed CHGNet (ASE-only, device={use_device})")
+    return {
+        "model_file": "",     # CHGNet has no externalizable model file
+        "calculator": calc,
+        "metadata": {
+            "backend": "chgnet",
+            "model_name": model_name or "chgnet",
+            "domain": "universal-inorganic",
+            "device": use_device,
+            "elements_requested": elements,
+        },
+    }
 
 
 def _mace_deploy_pretrained(
@@ -799,6 +860,12 @@ def generate_lammps_input(
     if backend == "mace":
         return _mace_lammps_input(model_file, elements, working_dir,
                                    timestep, temperature, pressure)
+    elif backend == "chgnet":
+        raise NotImplementedError(
+            "CHGNet has no LAMMPS pair_style. Use the ASE runner "
+            "instead: MLIPAgent.deploy_pretrained(runner='ase', ...) "
+            "with backend='chgnet'."
+        )
     elif backend == "nequip":
         return _nequip_lammps_input(model_file, elements, working_dir,
                                      timestep, temperature, pressure)
@@ -980,8 +1047,15 @@ def generate_ase_script(
             timestep, temperature, pressure,
             n_steps, output_interval, device,
         )
+    if backend == "chgnet":
+        return _chgnet_ase_script(
+            model_name, elements, working_dir, structure_file,
+            timestep, temperature, pressure,
+            n_steps, output_interval, device,
+        )
     raise ValueError(
-        f"ASE runner only supports backend='mace' for now (got {backend!r})"
+        f"ASE runner does not support backend={backend!r}. "
+        "Supported: 'mace', 'chgnet'."
     )
 
 
@@ -1085,6 +1159,139 @@ def main():
     calc = {mace_loader}(
         model={mace_size!r}, device=DEVICE, default_dtype="float64",
     )
+    atoms.calc = calc
+
+    MaxwellBoltzmannDistribution(atoms, temperature_K={temperature})
+
+    {dynamics_block}
+
+    traj = Trajectory("traj.traj", "w", atoms)
+    dyn.attach(traj.write, interval={output_interval})
+
+    log_file = open("thermo.log", "w")
+    log_file.write("# step time(ps) PE(eV) KE(eV) T(K)\\n")
+    log_file.flush()
+
+    def log_step():
+        epot = atoms.get_potential_energy()
+        ekin = atoms.get_kinetic_energy()
+        temp = atoms.get_temperature()
+        step = dyn.nsteps
+        time_ps = step * {timestep} / 1000.0
+        line = (f"{{step}} {{time_ps:.4f}} {{epot:.6f}} "
+                f"{{ekin:.6f}} {{temp:.2f}}")
+        print(line)
+        log_file.write(line + "\\n")
+        log_file.flush()
+
+    dyn.attach(log_step, interval={output_interval})
+
+    t0 = time.time()
+    print(f"running {n_steps} steps...")
+    dyn.run({n_steps})
+    log_file.close()
+    elapsed = time.time() - t0
+    ms_per_step = 1000 * elapsed / max({n_steps}, 1)
+    print(f"done -- {{elapsed:.1f}}s "
+          f"({{ms_per_step:.2f}} ms/step)")
+
+
+if __name__ == "__main__":
+    main()
+'''
+    path = os.path.join(working_dir, "run_md.py")
+    with open(path, "w") as f:
+        f.write(content)
+    return path
+
+
+def _chgnet_ase_script(
+    model_name, elements, working_dir, structure_file,
+    timestep, temperature, pressure,
+    n_steps, output_interval, device,
+):
+    """Generate a runnable Python MD script using CHGNetCalculator.
+
+    CHGNet has a single universal pretrained model (no size variants);
+    ``model_name`` is accepted only for API symmetry with MACE and is
+    ignored.
+    """
+    el_repr = ", ".join(repr(e) for e in elements)
+    ensemble = "NPT" if pressure is not None else "NVT (Langevin)"
+
+    if pressure is not None:
+        dynamics_block = (
+            "from ase.md.npt import NPT\n"
+            f"    dyn = NPT(\n"
+            f"        atoms,\n"
+            f"        timestep={timestep} * units.fs,\n"
+            f"        temperature_K={temperature},\n"
+            f"        externalstress={pressure} * units.bar,\n"
+            f"        ttime=20.0 * units.fs,\n"
+            f"        pfactor=(2e6 * units.GPa) * (20.0 * units.fs)**2,\n"
+            f"    )"
+        )
+    else:
+        dynamics_block = (
+            "from ase.md.langevin import Langevin\n"
+            f"    dyn = Langevin(\n"
+            f"        atoms,\n"
+            f"        timestep={timestep} * units.fs,\n"
+            f"        temperature_K={temperature},\n"
+            f"        friction=0.01,\n"
+            f"    )"
+        )
+
+    content = f'''"""
+ASE+CHGNet MD script -- generated by SciLink MLIPAgent.
+
+Model:     chgnet (universal MPtrj-pretrained, no size variants)
+Backend:   chgnet (ASE calculator; no LAMMPS pair_style)
+Elements:  {elements}
+Ensemble:  {ensemble}
+Temp:      {temperature} K
+Steps:     {n_steps}
+
+Run:
+    python run_md.py                       # uses default device
+    CHGNET_DEVICE=cpu python run_md.py     # force CPU
+
+Outputs (alongside this script):
+    thermo.log   step / time / PE / KE / T
+    traj.traj    ASE binary trajectory (use ase.io.read to inspect)
+"""
+import os
+import time
+
+from ase import units
+from ase.io.lammpsdata import read_lammps_data
+from ase.io.trajectory import Trajectory
+from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+from chgnet.model.dynamics import CHGNetCalculator
+
+ELEMENTS = [{el_repr}]
+DEVICE = os.environ.get("CHGNET_DEVICE", {device!r})
+
+
+def main():
+    atoms = read_lammps_data({structure_file!r}, style="atomic", sort_by_id=True)
+    if ELEMENTS:
+        # write_lammps_data(masses=True) lets ASE infer real elements from
+        # masses on read, so atoms.numbers will be true Zs in the typical
+        # case. Only fall back to type-index remap if ASE's mass-based
+        # inference didn't recover the expected element set.
+        actual_syms = sorted(set(atoms.get_chemical_symbols()))
+        expected_syms = sorted(set(ELEMENTS))
+        if actual_syms != expected_syms:
+            type_to_sym = {{i + 1: ELEMENTS[i] for i in range(len(ELEMENTS))}}
+            nums = atoms.get_atomic_numbers()
+            atoms.set_chemical_symbols([type_to_sym[int(n)] for n in nums])
+
+    print(f"system:  {{len(atoms)}} atoms "
+          f"({{sorted(set(atoms.get_chemical_symbols()))}})")
+    print(f"device:  {{DEVICE}}")
+    print(f"loading: CHGNetCalculator()  -- universal MPtrj pretrained")
+    calc = CHGNetCalculator(use_device=DEVICE)
     atoms.calc = calc
 
     MaxwellBoltzmannDistribution(atoms, temperature_K={temperature})

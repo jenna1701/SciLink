@@ -263,6 +263,90 @@ def test_agent_runner_validation():
             )
 
 
+def test_chgnet_skill_discoverable():
+    """CHGNet skill bundle should appear in supported_software."""
+    from scilink.skills.loader import list_skills, load_skill
+
+    engines = list_skills(domain="machine_learning_potentials")
+    assert "chgnet" in engines, (
+        f"chgnet bundle not discovered (got {engines}). The skill bundle "
+        "at scilink/skills/machine_learning_potentials/chgnet/chgnet.md "
+        "should be on disk."
+    )
+
+    skill = load_skill("chgnet", domain="machine_learning_potentials")
+    for section in ("planning", "implementation", "validation"):
+        assert skill.get(section), (
+            f"chgnet skill missing the {section!r} section"
+        )
+
+    detect = skill.get("meta", {}).get("detect", {})
+    assert detect.get("python_modules") == ["chgnet"], (
+        "chgnet frontmatter must declare python_modules: [chgnet] so "
+        "AvailableSoftware.detect() picks it up via importlib"
+    )
+
+
+def test_chgnet_ase_script_generation():
+    """ASE-script generation should support backend='chgnet'."""
+    from scilink.skills._shared import mlip_tools
+
+    with tempfile.TemporaryDirectory() as td:
+        path = mlip_tools.generate_ase_script(
+            backend="chgnet",
+            model_name="chgnet",
+            elements=["Cu", "O"],
+            working_dir=td,
+            structure_file="cu_o.data",
+            timestep=1.0,
+            temperature=400.0,
+            pressure=None,
+            n_steps=200,
+            output_interval=20,
+            device="cuda",
+        )
+        content = Path(path).read_text()
+
+        for required in (
+            "from chgnet.model.dynamics import CHGNetCalculator",
+            "CHGNetCalculator(use_device=DEVICE)",
+            "from ase.md.langevin import Langevin",
+            "MaxwellBoltzmannDistribution",
+            "ELEMENTS = ['Cu', 'O']",
+            "dyn.run(200)",
+            "CHGNET_DEVICE",
+        ):
+            assert required in content, (
+                f"CHGNet ASE script missing expected line: {required!r}"
+            )
+
+        # CHGNet's script must NOT import MACE
+        assert "mace_mp" not in content
+        assert "from mace.calculators" not in content
+
+
+def test_chgnet_lammps_input_raises():
+    """CHGNet has no LAMMPS pair_style — generation must raise cleanly."""
+    from scilink.skills._shared import mlip_tools
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            mlip_tools.generate_lammps_input(
+                backend="chgnet",
+                model_file="/fake.pt",
+                elements=["Cu"],
+                working_dir=td,
+            )
+        except NotImplementedError as exc:
+            assert "ASE" in str(exc) or "ase" in str(exc), (
+                "error should point users at the ASE runner"
+            )
+        else:
+            raise AssertionError(
+                "CHGNet via LAMMPS input gen should raise NotImplementedError"
+            )
+
+
 if __name__ == "__main__":
     print("=== smoke 1: MLIPAgent assembly + skill load ===")
     test_mlip_agent_assembly()
