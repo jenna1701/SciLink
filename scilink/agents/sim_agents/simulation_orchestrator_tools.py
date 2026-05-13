@@ -118,6 +118,71 @@ class SimulationOrchestratorTools:
         )
 
         # =====================================================================
+        # 0b. ROUTE SIMULATION  (pick scale + engine for the user's goal)
+        # =====================================================================
+        def route_simulation(user_goal: str,
+                             system_description: str = None) -> str:
+            """Pick (scale, engine) for the user's simulation goal.
+
+            Builds the candidate set from the agent-supports ∩
+            user-available intersection (via skill-bundle discovery
+            and AvailableSoftware probes), then asks the LLM to choose
+            among them based on the goal's physics.
+            """
+            from .simulation_router import SimulationRouter
+            router = SimulationRouter(model=self.orch.model)
+            decision = router.route(
+                user_goal=user_goal,
+                system_description=system_description,
+            )
+            # Stash on the orchestrator so subsequent tool calls / the
+            # chat loop can see what was picked, without re-routing on
+            # every turn.
+            self.orch.routing_decision = decision
+            return json.dumps(decision, indent=2)
+
+        self._register_tool(
+            func=route_simulation,
+            name="route_simulation",
+            description=(
+                "Pick (scale, engine) for the user's simulation goal. "
+                "Returns JSON {scale, engine, reasoning, alternatives, "
+                "candidates_considered}. CALL THIS EARLY in the "
+                "conversation, before generating structures or inputs, "
+                "so subsequent tool calls target the right engine. The "
+                "decision intersects three things: (1) which scale agents "
+                "are loaded, (2) which engines the user has installed "
+                "(per their `available_software.yaml`), (3) the LLM's "
+                "judgment on which scale fits the user's physics goal. "
+                "If the decision picks an engine you don't have a "
+                "concrete dispatch path for (anything other than VASP "
+                "today — LAMMPS / MLIP wiring is in progress), tell the "
+                "user explicitly that the routing matched but the "
+                "dispatch is the next-step follow-up."
+            ),
+            parameters={
+                "user_goal": {
+                    "type": "string",
+                    "description": (
+                        "Natural-language description of what the user "
+                        "wants to simulate (e.g. 'Relax a Cu(111) slab "
+                        "and report a stable lattice constant')."
+                    ),
+                },
+                "system_description": {
+                    "type": "string",
+                    "description": (
+                        "Optional brief description of the system "
+                        "(e.g. 'metallic surface, 16 atoms, includes "
+                        "CO adsorbate'). Helps the router pick the "
+                        "right scale; omit if not yet known."
+                    ),
+                },
+            },
+            required=["user_goal"],
+        )
+
+        # =====================================================================
         # 1. GENERATE STRUCTURE  (build → validate → refine, internal)
         # =====================================================================
         def generate_structure(description: str, skill=None,
