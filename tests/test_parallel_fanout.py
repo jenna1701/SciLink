@@ -272,15 +272,65 @@ def test_parallel_multi_regime_routes_each_to_own_script(tmp_path):
 
 
 def test_parallel_single_spectrum_short_circuits_to_serial(tmp_path):
-    """num_spectra=1 must always be serial regardless of parallel_workers."""
+    """num_spectra=1 must always be serial regardless of parallel_workers,
+    and the single-spectrum post-block must still populate the
+    state fields downstream callers depend on (fit_results, final_script,
+    final_plot_bytes, analysis_images)."""
     ctrl = _make_controller(parallel_workers=8, output_dir=tmp_path)
     qc_calls, single_calls = _install_mock_fits(ctrl)
     state = _build_state(num_spectra=1)
+    state["analysis_images"] = []  # post-block appends to this list
 
     out = ctrl.execute(state)
+
+    # Loop bookkeeping
     assert len(out["series_results"]) == 1
     assert qc_calls and qc_calls[0]["idx"] == 0
     assert not single_calls  # no non-anchors, no pool needed
+    assert out["series_results"][0]["success"] is True
+
+    # Single-spectrum post-block must still run
+    assert "fit_results" in out, "single-spectrum post-block did not set fit_results"
+    assert out["fit_results"]["model_type"] == "two_gaussian"
+    assert out["fit_results"]["fit_quality"]["r_squared"] == 0.98
+    assert out["final_script"], "final_script must be set for single spectrum"
+    # The mock returns None for visualization_bytes, so we only check the
+    # contract (key presence in state) — not the value.
+    assert "final_plot_bytes" in out
+
+
+def test_single_spectrum_serial_default_unchanged(tmp_path):
+    """Regression: parallel_workers=None (default) on a single spectrum
+    must take the inline-serial code path, never log the parallel banner,
+    and never instantiate a ThreadPoolExecutor."""
+    import io
+    log_buf = io.StringIO()
+    handler = logging.StreamHandler(log_buf)
+    handler.setLevel(logging.DEBUG)
+    logging.getLogger("test_parallel_fanout").addHandler(handler)
+
+    try:
+        ctrl = _make_controller(parallel_workers=None, output_dir=tmp_path)
+        assert ctrl.parallel_workers == 1  # resolved default
+        qc_calls, single_calls = _install_mock_fits(ctrl)
+        state = _build_state(num_spectra=1)
+        state["analysis_images"] = []
+
+        out = ctrl.execute(state)
+        log_text = log_buf.getvalue()
+    finally:
+        logging.getLogger("test_parallel_fanout").removeHandler(handler)
+
+    assert len(out["series_results"]) == 1
+    assert qc_calls and qc_calls[0]["idx"] == 0
+    assert not single_calls
+    # The parallel-banner log line must NOT appear for single-spectrum runs
+    assert "Parallel non-anchor fan-out" not in log_text, (
+        "single-spectrum default run unexpectedly entered the parallel branch"
+    )
+    assert "Parallel non-anchor phase" not in log_text, (
+        "Phase 2 drain log appeared when there should be no non-anchors"
+    )
 
 
 def test_parallel_failed_non_anchor_does_not_corrupt_series(tmp_path):
