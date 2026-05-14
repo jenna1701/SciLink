@@ -13,6 +13,7 @@ from .base_agent import SimulationAgent
 
 _TOOL_REGISTRY: Dict[str, Any] = {}
 try:
+    # Tools live alongside the skill bundle (cf. force_field/amber/amber.py).
     from ...skills.molecular_dynamics.lammps import lammps as lammps_tools
     _TOOL_REGISTRY["lammps"] = lammps_tools
 except ImportError:

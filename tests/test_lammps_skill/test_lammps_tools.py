@@ -1,6 +1,6 @@
 # tests/test_lammps_skill/test_lammps_tools.py
 """
-Unit tests for tools/lammps_tools.py.
+Unit tests for the LAMMPS skill's tools module.
 
 Tests every public function against the fixture data files and scripts.
 No LLM calls — these are fast, deterministic, and run in CI.
