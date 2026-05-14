@@ -263,7 +263,7 @@ def check_mace_availability():
 
 
 def run_with_mace(
-    agent, system_info_dict, out_dir, temperature, pressure,
+    agent, system_info_dict, research_goal, out_dir, temperature, pressure,
     runner, structure_file, n_steps, device,
     backend=None,
 ):
@@ -294,7 +294,7 @@ def run_with_mace(
 
     return agent.deploy_pretrained(
         system_info=system_info_dict,
-        research_goal=system_info_dict["research_goal"],
+        research_goal=research_goal,
         simulation_params=sim_params,
         **kwargs,
     )
@@ -478,14 +478,25 @@ def main():
             }
             try:
                 result = run_with_mace(
-                    agent, system_info, system_dir,
+                    agent, system_info, system["research_goal"], system_dir,
                     args.temperature, args.pressure,
                     args.runner, data_path,
                     args.n_steps, args.device,
                     backend=args.backend,
                 )
             except Exception as exc:
-                print(f"  deploy_pretrained failed: {exc}")
+                print(f"  deploy_pretrained failed: {exc!r}")
+                if args.backend:
+                    # An explicit --backend means this run is testing a
+                    # specific engine. Falling back to run_without_mace
+                    # (which is MACE-hardcoded) would mask the failure
+                    # and the test would pass deceptively. Fail loudly.
+                    print(
+                        f"  --backend {args.backend} was forced — NOT "
+                        f"falling back to the MACE deterministic path. "
+                        f"Re-raising so the failure is visible."
+                    )
+                    raise
                 result = run_without_mace(
                     agent, system, system_dir,
                     args.temperature, args.pressure,
