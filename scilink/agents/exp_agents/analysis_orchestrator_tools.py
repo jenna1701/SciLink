@@ -33,6 +33,7 @@ from .metadata_converter import (
     normalize_metadata_dict_with_llm,
 )
 from ..lit_agents import OwlLiteratureAgent, NoveltyScorer, FittingModelLiteratureAgent
+from ..lit_agents.optimize_query_for_analysis import optimize_query_for_analysis
 from .recommendation_agent import RecommendationAgent
 from ...skills.loader import list_skills, list_all_skills, load_skill
 # Note: DFTOrchestrator is imported lazily inside `run_dft_workflow` to avoid
@@ -2977,8 +2978,24 @@ class AnalysisOrchestratorTools:
             except Exception as e:
                 return json.dumps({"status": "error", "message": f"Failed to init Literature Agent: {e}"})
 
+            # Refine the orchestrator-LLM's draft query using the loaded data
+            # preview + metadata (visual + experimental specifics). Best-effort:
+            # falls back to the raw query on any failure.
+            refined_query = optimize_query_for_analysis(
+                raw_query=query,
+                data_type=getattr(self.orch, "current_data_type", None),
+                data_path=getattr(self.orch, "current_data_path", None),
+                metadata=getattr(self.orch, "current_metadata", None),
+                model=self.orch.model,
+            )
+            if refined_query != query:
+                print(f"  🔍 Refined query: {refined_query}")
+                logging.info(f"search_literature: refined query → {refined_query}")
+            else:
+                print(f"  🔍 Using raw query (no refinement applied)")
+
             try:
-                result = lit_agent.query_for_models(query)
+                result = lit_agent.query_for_models(refined_query)
             except Exception as e:
                 logging.error(f"Literature search error: {e}", exc_info=True)
                 return json.dumps({"status": "error", "message": str(e)})
@@ -2991,12 +3008,15 @@ class AnalysisOrchestratorTools:
 
             content = result.get("formatted_answer", "") or ""
 
-            # Hash the query for an idempotent, collision-free filename:
-            # same query → same file (re-runnable), different queries → different files.
+            # Hash the raw query for an idempotent, collision-free filename:
+            # same raw query → same file (re-runnable), different queries → different files.
             query_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:8]
             lit_path = self.orch.base_dir / f"literature_search_{query_hash}.md"
             with open(lit_path, "w") as f:
-                f.write(f"# Literature Search Results\n\n**Query:** {query}\n\n{content}")
+                f.write(f"# Literature Search Results\n\n**Draft query:** {query}\n")
+                if refined_query != query:
+                    f.write(f"**Refined query:** {refined_query}\n")
+                f.write(f"\n{content}")
 
             print(f"  ✅ Literature search completed. Saved to {lit_path.name}")
 

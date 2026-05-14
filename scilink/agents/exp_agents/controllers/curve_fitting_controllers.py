@@ -331,41 +331,18 @@ class SeriesScoutController:
     def _create_overlay_plot(
         scout_curves: list,
         system_info: dict,
-    ) -> bytes:
+    ) -> str:
         """Create a single overlay figure with all scout spectra.
 
-        Args:
-            scout_curves: list of {"label": str, "curve_data": np.ndarray}
-            system_info: metadata dict for axis labels
-        Returns:
-            PNG image bytes.
+        Returns base64-encoded PNG (preserved shape for the existing prompt
+        consumer at `state["scout_overlay_plot"]`). Rendering is delegated
+        to `scilink.utils.curve_preview.render_curve_overlay` so the lit-
+        search optimizer can reuse the same plotting logic.
         """
-        import matplotlib.pyplot as plt
-        import io
+        from ....utils.curve_preview import render_curve_overlay
 
-        fig, ax = plt.subplots(figsize=(10, 6))
-
-        cmap = plt.cm.viridis
-        n = len(scout_curves)
-        for i, entry in enumerate(scout_curves):
-            x, y = SeriesScoutController._extract_xy(entry["curve_data"])
-            color = cmap(i / max(n - 1, 1))
-            ax.plot(x, y, color=color, linewidth=1.2, label=entry["label"])
-
-        ax.set_xlabel(system_info.get("xlabel", "X"))
-        ax.set_ylabel(system_info.get("ylabel", "Y"))
-        ax.set_title(
-            system_info.get("title", "Data")
-            + " — Scout Overlay"
-        )
-        ax.legend(fontsize=8, loc="best")
-        fig.tight_layout()
-
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=120)
-        plt.close(fig)
-        buf.seek(0)
-        return base64.b64encode(buf.read()).decode("utf-8")
+        png_bytes = render_curve_overlay(scout_curves, system_info)
+        return base64.b64encode(png_bytes).decode("utf-8")
 
     def _load_spectrum(self, idx: int, state: dict) -> np.ndarray:
         spectrum_stack = state.get("spectrum_stack")
