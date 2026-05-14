@@ -254,6 +254,12 @@ def _chgnet_deploy(
 
 # MACE foundation-model keywords -> (loader, API size keyword, domain).
 _MACE_FOUNDATION_MODELS = {
+    # Bare backend name -> the default MACE foundation model. Lets
+    # deploy("mace", model="mace", ...) work, symmetric with CHGNet
+    # (whose only model is also named after the backend) — this is the
+    # path taken when a caller forces backend="mace" without naming a
+    # specific model.
+    "mace":             ("mace_mp", "medium", "inorganic"),
     "mace-mp-0":        ("mace_mp", "medium", "inorganic"),
     "mace-mp-0b":       ("mace_mp", "small",  "inorganic"),
     "mace-mp-0-large":  ("mace_mp", "large",  "inorganic"),
