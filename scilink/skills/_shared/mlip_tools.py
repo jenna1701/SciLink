@@ -1139,7 +1139,7 @@ DEVICE = os.environ.get("MACE_DEVICE", {device!r})
 
 
 def main():
-    atoms = read_lammps_data({structure_file!r}, style="atomic", sort_by_id=True)
+    atoms = read_lammps_data({structure_file!r}, atom_style="atomic", sort_by_id=True)
     if ELEMENTS:
         # write_lammps_data(masses=True) lets ASE infer real elements from
         # masses on read, so atoms.numbers will be true Zs (29 for Cu, etc.)
@@ -1274,7 +1274,7 @@ DEVICE = os.environ.get("CHGNET_DEVICE", {device!r})
 
 
 def main():
-    atoms = read_lammps_data({structure_file!r}, style="atomic", sort_by_id=True)
+    atoms = read_lammps_data({structure_file!r}, atom_style="atomic", sort_by_id=True)
     if ELEMENTS:
         # write_lammps_data(masses=True) lets ASE infer real elements from
         # masses on read, so atoms.numbers will be true Zs in the typical
