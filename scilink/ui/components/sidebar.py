@@ -228,8 +228,9 @@ def render_sidebar() -> None:
         if simulate_enabled():
             _render_hpc_connection()
 
-        # Planning mode: embedding model
-        if st.session_state.app_mode == "plan":
+        # Planning + meta modes: embedding model (the meta delegates to a
+        # planning child that uses embeddings for literature / KB retrieval).
+        if st.session_state.app_mode in ("plan", "meta"):
             st.selectbox(
                 "Embedding model",
                 EMBEDDING_MODEL_OPTIONS + ["Custom"],
