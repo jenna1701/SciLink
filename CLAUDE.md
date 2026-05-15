@@ -19,6 +19,16 @@ Anything in scientific workflow falls under one of these three. There will
 **not** be a fourth mode. Future capability growth happens *inside* one of
 the three, or as a meta-agent on top (see below).
 
+## Capability expansion through skills, not new agents
+
+Going forward, SciLink extends its agentic capabilities through skill
+bundles rather than by adding more specialized subagents. New domains,
+techniques, or methods are integrated as skill bundles (knowledge +
+tools, co-located) under an existing subagent whose shape already fits;
+a new subagent class is justified only when its execution structure
+itself cannot be expressed within an existing agent. This applies
+across all three modes.
+
 ## Why no `BaseChatOrchestrator` refactor
 
 The three orchestrators share a near-identical chat-loop / message-history /
