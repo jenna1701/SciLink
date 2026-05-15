@@ -292,8 +292,20 @@ def _build_agent_list_section(agent_registry: dict) -> str:
 # tool errors at call time, so the orchestrator is not told to offer it.
 #
 # This is a workflow GATE, not a tool description: the LLM otherwise chains
-# straight to run_analysis and never offers literature search.
-_LITERATURE_SECTION_AVAILABLE = """
+# straight to run_analysis and never reaches literature search. The gate is
+# mode-aware — CO-PILOT pauses to ask the user; SUPERVISED/AUTONOMOUS decide
+# on their own, since those modes have no interactive user to wait on (and
+# `run_task` pins the orchestrator into AUTONOMOUS).
+_LIT_TOOL_BLURB = (
+    "`search_literature` queries the FutureHouse Edison API and returns a\n"
+    "`file_path`. Supplied via `literature_file`, the literature informs the\n"
+    "analysis plan, the generated code, and the interpretation. (In curve-fitting\n"
+    "`task_mode=\"identification\"` the planner withholds lit context to keep the\n"
+    "fit unbiased; it still informs Stage-2 candidate enumeration.)"
+)
+
+# CO-PILOT: pause and ask the user, wait for their answer.
+_LITERATURE_SECTION_COPILOT = f"""
 **LITERATURE SEARCH — REQUIRED OFFER BEFORE ANALYSIS:**
 A FutureHouse API key is configured this session. Before the FIRST
 `run_analysis` on a dataset you MUST first ask the user whether the analysis
@@ -305,11 +317,21 @@ answer — do NOT call `run_analysis` in the same turn as the question.
 - Ask once per dataset; do not re-offer on follow-up `run_analysis` calls
   for the same data.
 
-`search_literature` queries the FutureHouse Edison API and returns a
-`file_path`. Supplied via `literature_file`, the literature informs the
-analysis plan, the generated code, and the interpretation. (In curve-fitting
-`task_mode="identification"` the planner withholds lit context to keep the fit
-unbiased; it still informs Stage-2 candidate enumeration.)
+{_LIT_TOOL_BLURB}
+"""
+
+# SUPERVISED / AUTONOMOUS: no interactive user — decide without asking.
+_LITERATURE_SECTION_AUTONOMOUS = f"""
+**LITERATURE SEARCH — CONSIDER BEFORE ANALYSIS:**
+A FutureHouse API key is configured this session. Before the FIRST
+`run_analysis` on a dataset, decide for yourself whether a literature search
+would materially shape the analysis (method choice, parameter ranges,
+interpretation). If so, call `search_literature(query=...)` and pass the
+returned `file_path` to `run_analysis` as `literature_file`; otherwise call
+`run_analysis` directly. Do NOT ask the user — decide from the data and
+objective. Decide once per dataset.
+
+{_LIT_TOOL_BLURB}
 """
 
 _LITERATURE_SECTION_UNAVAILABLE = ""
@@ -353,10 +375,14 @@ def get_system_prompt(
             "     * 1: ImageAnalysisAgent - Images: general-purpose analysis (microscopy, SEM, TEM, AFM, optical). Atomic resolution, grains, particles, textures, defects, morphology",
             "     * 2: HyperspectralAnalysisAgent - 3D datacubes: EELS-SI, EDS, Raman imaging",
         ])
-    lit_section = (
-        _LITERATURE_SECTION_AVAILABLE if literature_available
-        else _LITERATURE_SECTION_UNAVAILABLE
-    )
+    if not literature_available:
+        lit_section = _LITERATURE_SECTION_UNAVAILABLE
+    elif analysis_mode == AnalysisMode.CO_PILOT:
+        # Interactive — pause and ask the user.
+        lit_section = _LITERATURE_SECTION_COPILOT
+    else:
+        # SUPERVISED / AUTONOMOUS — no user to wait on; decide autonomously.
+        lit_section = _LITERATURE_SECTION_AUTONOMOUS
     body = (
         _SYSTEM_PROMPT_BODY_PRE + agent_list
         + _SYSTEM_PROMPT_BODY_POST.replace("___LITERATURE_SECTION___", lit_section)
