@@ -155,13 +155,34 @@ def _analysis_reports(base_dir: Path) -> List[Dict[str, Any]]:
     return reports
 
 
+def _maybe_json(value: Any) -> Any:
+    """Parse a JSON string into a dict/list; leave anything else as-is."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:  # noqa: BLE001
+            return value
+    return value
+
+
 def _extract_tool_calls(messages: list) -> List[Dict[str, Any]]:
-    """Ordered (tool, args) for every tool call in one chat history.
+    """Ordered tool calls in one chat history, each matched to its result.
 
     Handles the OpenAI-style ``tool_calls`` on assistant messages
     (``function.name`` / ``function.arguments`` JSON string), with a light
-    fallback for a flattened ``{name, args}`` shape.
+    fallback for a flattened ``{name, args}`` shape. Each entry carries the
+    parsed ``args``, the parsed tool ``result`` (matched by ``tool_call_id``),
+    and a ``status`` derived from that result — ``pending`` when the call has
+    no result yet (a tool still running, or a turn in flight).
     """
+    # First pass: tool_call_id -> result payload, from role:"tool" messages.
+    results: Dict[str, Any] = {}
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "tool":
+            tcid = m.get("tool_call_id")
+            if tcid:
+                results[tcid] = _maybe_json(m.get("content"))
+
     seq: List[Dict[str, Any]] = []
     for m in messages:
         if not isinstance(m, dict):
@@ -173,15 +194,15 @@ def _extract_tool_calls(messages: list) -> List[Dict[str, Any]]:
             name = fn.get("name")
             if not name:
                 continue
-            raw = fn.get("arguments", fn.get("args"))
-            args: Any = raw
-            if isinstance(raw, str):
-                try:
-                    args = json.loads(raw)
-                except Exception:  # noqa: BLE001
-                    args = {"_raw": raw}
-            seq.append({"tool": name,
-                        "args": args if isinstance(args, dict) else {}})
+            args = _maybe_json(fn.get("arguments", fn.get("args")))
+            has_result = tc.get("id") in results
+            result = results.get(tc.get("id"))
+            seq.append({
+                "tool": name,
+                "args": args if isinstance(args, dict) else {"_value": args},
+                "result": result,
+                "status": _action_status(result) if has_result else "pending",
+            })
     return seq
 
 

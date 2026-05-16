@@ -8,8 +8,6 @@ ledger, a per-agent tool-call sequence, and a detailed per-action breakdown
 delegation tree's cadence (2s while a chat task runs).
 """
 
-import json
-
 import streamlit as st
 
 from scilink.agents.meta_agent.telemetry import collect_session_telemetry
@@ -175,19 +173,45 @@ _LAYER_LABELS = [
 ]
 
 
-def _compact_args(args, limit: int = 120) -> str:
-    """One-line, truncated rendering of a tool call's arguments."""
-    if not args:
-        return ""
-    try:
-        s = json.dumps(args, default=str, ensure_ascii=False)
-    except Exception:  # noqa: BLE001
-        s = str(args)
+def _type_name(v) -> str:
+    """Short type label for one value — no content, just the type."""
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "bool"
+    if isinstance(v, int):
+        return "int"
+    if isinstance(v, float):
+        return "float"
+    if isinstance(v, str):
+        return "str"
+    if isinstance(v, list):
+        return f"list[{len(v)}]"
+    if isinstance(v, dict):
+        return f"dict[{len(v)}]"
+    return type(v).__name__
+
+
+def _type_summary(obj, limit: int = 220) -> str:
+    """Type signature of a value — for a dict, its keys mapped to value types;
+    otherwise the bare type. Shows the shape without the actual content."""
+    if obj is None:
+        return "—"
+    if isinstance(obj, dict):
+        if not obj:
+            return "{}"
+        s = "{" + ", ".join(f"{k}: {_type_name(v)}"
+                             for k, v in obj.items()) + "}"
+    elif isinstance(obj, list):
+        s = f"list[{len(obj)}]"
+    else:
+        s = _type_name(obj)
     return s if len(s) <= limit else s[:limit - 1] + "…"
 
 
 def _tool_sequence_section(sequence: dict) -> None:
-    """Per-agent ordered tool-call list — the full sequence of tools run."""
+    """Per-agent ordered tool calls — input/output types and whether each tool
+    worked, derived from its result."""
     import pandas as pd
 
     shown = False
@@ -198,9 +222,13 @@ def _tool_sequence_section(sequence: dict) -> None:
             continue
         shown = True
         st.markdown(f"**{label}** — {len(calls)} tool call(s)")
-        rows = [{"#": i, "tool": c.get("tool"),
-                 "arguments": _compact_args(c.get("args"))}
-                for i, c in enumerate(calls, 1)]
+        rows = [{
+            "#": i,
+            "tool": c.get("tool"),
+            "input": _type_summary(c.get("args")),
+            "output": _type_summary(c.get("result")),
+            "status": c.get("status", "—"),
+        } for i, c in enumerate(calls, 1)]
         st.dataframe(pd.DataFrame(rows), use_container_width=True,
                      hide_index=True)
         src = entry.get("source")
@@ -235,21 +263,12 @@ def _worker_breakdown(ag: dict) -> None:
             if rationale:
                 st.caption("Reasoning")
                 st.write(rationale)
-            _input = ac.get("input")
-            _result = ac.get("result")
-            ci, co = st.columns(2)
-            with ci:
-                st.caption("Input")
-                if _input:
-                    st.json(_input, expanded=True)
-                else:
-                    st.caption("— none recorded —")
-            with co:
-                st.caption("Output")
-                if _result:
-                    st.json(_result, expanded=True)
-                else:
-                    st.caption("— none recorded —")
+            st.caption("Input types")
+            st.code(_type_summary(ac.get("input"), limit=600),
+                    language=None, wrap_lines=True)
+            st.caption("Output types")
+            st.code(_type_summary(ac.get("result"), limit=600),
+                    language=None, wrap_lines=True)
             feedback = ac.get("feedback")
             if feedback:
                 st.caption("Feedback")
