@@ -2655,13 +2655,15 @@ class AnalysisOrchestratorTools:
                 "literature_file": {
                     "type": "string",
                     "description": (
-                        "Path to a literature search markdown file produced by "
-                        "`search_literature`. When provided, its contents are "
-                        "injected into the planner so the proposed analysis plan "
-                        "is grounded in external literature. Skipped for the curve-"
-                        "fitting agent's `task_mode='identification'` to preserve "
-                        "the unbiased fit; in that case the literature still "
-                        "informs Stage-2 candidate enumeration."
+                        "Path to a markdown file of literature / document "
+                        "context — produced by `search_literature` (external "
+                        "search) or `read_document` (user-provided papers). "
+                        "When provided, its contents are injected into the "
+                        "planner so the proposed analysis plan is grounded in "
+                        "that literature. Skipped for the curve-fitting agent's "
+                        "`task_mode='identification'` to preserve the unbiased "
+                        "fit; in that case the literature still informs Stage-2 "
+                        "candidate enumeration."
                     )
                 }
             },
@@ -4251,58 +4253,99 @@ class AnalysisOrchestratorTools:
         # =====================================================================
         # READ DOCUMENT
         # =====================================================================
-        def read_document(path: str) -> str:
-            """Read a PDF/DOCX/MD/TXT document and return its full text."""
-            print(f"  📄 Tool: Reading document {path}...")
-            doc_path = Path(path)
-            if not doc_path.exists():
+        def read_document(paths) -> str:
+            """Read one or more PDF/DOCX/MD/TXT documents; return the combined
+            text and persist a literature_file for run_analysis."""
+            if isinstance(paths, str):
+                paths = [paths]
+            if not paths:
                 return json.dumps({
                     "status": "error",
-                    "message": f"File not found: {path}",
+                    "message": "No document path provided.",
                 })
-            if doc_path.is_dir():
+            print(f"  📄 Tool: Reading {len(paths)} document(s)...")
+            docs, errors = [], []
+            for p in paths:
+                dp = Path(p)
+                if not dp.is_file():
+                    errors.append(f"Not a file: {p}")
+                    continue
+                try:
+                    docs.append((dp, _extract_document_text(dp)))
+                except ValueError as e:
+                    errors.append(str(e))
+                except Exception as e:
+                    logging.error(f"read_document failed for {p}: {e}")
+                    errors.append(f"Could not read {dp.name}: {e}")
+            if not docs:
                 return json.dumps({
                     "status": "error",
-                    "message": f"Path is a directory, not a document: {path}",
+                    "message": "No documents could be read.",
+                    "errors": errors,
                 })
+            combined = "\n\n---\n\n".join(
+                f"## {dp.name}\n\n{info['text']}" for dp, info in docs
+            )
+            combined_truncated = len(combined) > _READ_DOC_MAX_CHARS
+            if combined_truncated:
+                combined = combined[:_READ_DOC_MAX_CHARS]
+            # Persist as a literature_file so run_analysis can ground its plan
+            # in these documents — the same channel search_literature uses.
+            lit_path = None
             try:
-                info = _extract_document_text(doc_path)
-            except ValueError as e:
-                return json.dumps({"status": "error", "message": str(e)})
+                lit_dir = self.orch.base_dir / "literature"
+                lit_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                lit_path = lit_dir / f"provided_documents_{ts}.md"
+                lit_path.write_text(combined)
             except Exception as e:
-                logging.error(f"read_document failed: {e}")
-                return json.dumps({
-                    "status": "error",
-                    "message": f"Could not read document: {e}",
-                })
+                logging.error(f"read_document: could not save literature file: {e}")
             return json.dumps({
                 "status": "success",
-                "path": str(doc_path.absolute()),
-                **info,
+                "file_path": str(lit_path) if lit_path else None,
+                "n_documents": len(docs),
+                "documents": [
+                    {"name": dp.name,
+                     **{k: v for k, v in info.items() if k != "text"}}
+                    for dp, info in docs
+                ],
+                "errors": errors or None,
+                "combined_truncated": combined_truncated,
+                "text": combined,
+                "hint": (
+                    "Pass file_path as `literature_file` to the next "
+                    "run_analysis() call so the planner produces a "
+                    "document-informed plan."
+                ),
             })
 
         self._register_tool(
             func=read_document,
             name="read_document",
             description=(
-                "Read a document — PDF, DOCX, Markdown, or text file — and "
-                "return its full extracted text to use as context for the "
-                "analysis (a methods paper, protocol, prior report, or notes "
-                "the user provided). For a few documents read straight into "
-                "context; it does NO literature search and builds no index — "
-                "use search_literature to query the wider literature. Pass an "
-                "absolute file path."
+                "Read one or more documents the user provided — PDF, DOCX, "
+                "Markdown, or text files (a methods paper, protocol, prior "
+                "report, notes). Returns the combined text AND saves a "
+                "literature file: pass the returned `file_path` as "
+                "`literature_file` to run_analysis() so the provided documents "
+                "drive the analysis plan, exactly as a search_literature "
+                "result does. For a handful of documents read straight into "
+                "context — it runs NO external literature search and builds no "
+                "index (use search_literature for the wider literature). Pass "
+                "absolute file paths."
             ),
             parameters={
-                "path": {
-                    "type": "string",
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
                     "description": (
-                        "Absolute path to the document (.pdf, .docx, .md, "
-                        "or .txt)."
+                        "Absolute path(s) to the document(s) to read (.pdf, "
+                        ".docx, .md, or .txt). Multiple documents are combined "
+                        "into one literature file."
                     ),
                 },
             },
-            required=["path"]
+            required=["paths"]
         )
 
     def _register_tool(
