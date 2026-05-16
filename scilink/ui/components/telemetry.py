@@ -7,6 +7,8 @@ ledger and a per-agent tool-call sequence back it underneath. Refreshes on the
 sidebar delegation tree's cadence (2s while a chat task runs).
 """
 
+from pathlib import Path
+
 import streamlit as st
 
 from scilink.agents.meta_agent.telemetry import collect_session_telemetry
@@ -215,9 +217,19 @@ def _tool_sequence_section(sequence: dict) -> None:
         st.dataframe(pd.DataFrame(rows), use_container_width=True,
                      hide_index=True)
         src = entry.get("source")
-        if src:
-            st.caption("Chat-history file")
-            st.code(src, language=None, wrap_lines=True)
+        if src and Path(src).is_file():
+            try:
+                history = Path(src).read_text()
+            except Exception:  # noqa: BLE001
+                history = None
+            if history:
+                st.download_button(
+                    "Download full history",
+                    data=history,
+                    file_name=f"{key}_chat_history.json",
+                    mime="application/json",
+                    key=f"telemetry_dl_{key}",
+                )
     if not shown:
         st.caption("No tool calls recorded yet.")
 
