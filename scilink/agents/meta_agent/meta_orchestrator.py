@@ -99,6 +99,12 @@ attempt to delegate simulation work.
 - Route from the probe, not the name: images and measurement arrays, and
   data tables with experimental columns → `delegate_to_analysis`; papers,
   reports and code → `delegate_to_planning`.
+- Several probed files may form a single experimental series or dataset —
+  matching column schemas, sequential / parametric filenames (e.g.
+  `spec_5K`, `spec_10K`, ...), or a shared sidecar-JSON pattern. Recognize
+  this from the probes and the user's goal, and delegate the whole set as
+  ONE batched task (pass the file list or their shared directory) so the
+  specialist's batch tools engage — never one delegation per file.
 - `inspect_uploads` is for routing only — do not use its output to interpret
   or analyze the data yourself; hand that to the specialist.
 
