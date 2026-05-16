@@ -150,6 +150,7 @@ def _analysis_reports(base_dir: Path) -> List[Dict[str, Any]]:
             "detailed_analysis": detailed,
             "claims": claims,
             "output_dir": str(ar.parent),
+            "report_file": str(ar),
         })
     return reports
 
@@ -184,10 +185,11 @@ def _extract_tool_calls(messages: list) -> List[Dict[str, Any]]:
     return seq
 
 
-def _tool_sequence(base_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
+def _tool_sequence(base_dir: Path) -> Dict[str, Dict[str, Any]]:
     """Per-agent ordered tool-call sequence, read from each ``chat_history.json``
-    (the meta's at the session root, each specialist's in its sub-dir)."""
-    out: Dict[str, List[Dict[str, Any]]] = {}
+    (the meta's at the session root, each specialist's in its sub-dir). Each
+    layer's entry carries its ``calls`` and the ``source`` file path."""
+    out: Dict[str, Dict[str, Any]] = {}
     for layer, sub in (("meta", ""), ("analysis", "analysis"),
                         ("planning", "planning")):
         path = (base_dir / sub / "chat_history.json" if sub
@@ -201,7 +203,7 @@ def _tool_sequence(base_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
         if isinstance(messages, list):
             calls = _extract_tool_calls(messages)
             if calls:
-                out[layer] = calls
+                out[layer] = {"calls": calls, "source": str(path)}
     return out
 
 

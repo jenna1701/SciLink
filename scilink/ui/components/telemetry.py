@@ -71,12 +71,12 @@ def render_telemetry_tab() -> None:
         st.caption("Every tool call each agent's LLM made, in order.")
         _tool_sequence_section(tel.get("tool_sequence", {}))
 
-        # ── Detailed breakdown ───────────────────────────────────────
-        st.subheader("Detailed breakdown")
-        st.caption("Per worker agent: every logged action with its inputs, "
-                   "outputs and reasoning.")
+        # ── Sub-agent activity ───────────────────────────────────────
+        st.subheader("Sub-agent activity")
+        st.caption("Each worker sub-agent's logged operations — inputs, "
+                   "outputs, reasoning — with a link to its full state file.")
         if not agents:
-            st.caption("No worker actions recorded yet.")
+            st.caption("No sub-agent operations recorded yet.")
         for ag in agents:
             _worker_breakdown(ag)
 
@@ -192,7 +192,8 @@ def _tool_sequence_section(sequence: dict) -> None:
 
     shown = False
     for key, label in _LAYER_LABELS:
-        calls = sequence.get(key) or []
+        entry = sequence.get(key) or {}
+        calls = entry.get("calls") or []
         if not calls:
             continue
         shown = True
@@ -202,6 +203,10 @@ def _tool_sequence_section(sequence: dict) -> None:
                 for i, c in enumerate(calls, 1)]
         st.dataframe(pd.DataFrame(rows), use_container_width=True,
                      hide_index=True)
+        src = entry.get("source")
+        if src:
+            st.caption("Chat-history file")
+            st.code(src, language=None, wrap_lines=True)
     if not shown:
         st.caption("No tool calls recorded yet.")
 
@@ -215,6 +220,10 @@ def _worker_breakdown(ag: dict) -> None:
              f"{ag.get('action_count', 0)} action(s)  "
              f"({oc.get('success', 0)}✓ / {oc.get('error', 0)}✗)")
     with st.expander(title):
+        src = ag.get("source_file")
+        if src:
+            st.caption("State file")
+            st.code(src, language=None, wrap_lines=True)
         actions = ag.get("actions", [])
         for i, ac in enumerate(actions, 1):
             st.markdown(
@@ -255,6 +264,10 @@ def _analysis_report(rep: dict) -> None:
     title = (f"{rep.get('analysis_id', 'analysis')}  ·  "
              f"{len(claims)} claim(s)  ·  {rep.get('status', '—')}")
     with st.expander(title):
+        src = rep.get("report_file")
+        if src:
+            st.caption("Results file")
+            st.code(src, language=None, wrap_lines=True)
         detailed = rep.get("detailed_analysis")
         if detailed:
             st.markdown(detailed)
