@@ -9,6 +9,7 @@ Coordinates multi-modal experimental analysis using specialized sub-agents:
 Follows the same design patterns as PlanningOrchestratorAgent for consistent UX.
 """
 
+import inspect
 import json
 import logging
 import os
@@ -1087,8 +1088,9 @@ class AnalysisOrchestratorAgent:
             "base_url": self.base_url,
             "output_dir": output_dir,
             "enable_human_feedback": self._enable_human_feedback,
-            # Consumed only by ImageAnalysisAgent; other agents accept
-            # **kwargs and silently ignore.
+            # Consumed only by ImageAnalysisAgent. Filtered out below for any
+            # agent whose __init__ neither declares it nor accepts **kwargs
+            # (hyperspectral, FFT, SAM, atomistic) — passing it would raise.
             "analysis_depth": self.image_analysis_depth,
         }
 
@@ -1100,6 +1102,19 @@ class AnalysisOrchestratorAgent:
             module = importlib.import_module(module_path)
             cls = getattr(module, class_name)
             entry["class"] = cls  # cache for subsequent calls
+
+        # Keep only the kwargs this agent's __init__ actually accepts. An agent
+        # that declares **kwargs gets everything; one that does not gets only
+        # its explicitly-named parameters.
+        try:
+            params = inspect.signature(cls.__init__).parameters
+            if not any(p.kind is inspect.Parameter.VAR_KEYWORD
+                       for p in params.values()):
+                common_kwargs = {
+                    k: v for k, v in common_kwargs.items() if k in params
+                }
+        except (ValueError, TypeError):
+            pass  # unintrospectable __init__ — pass kwargs through unchanged
 
         agent = cls(**common_kwargs)
         logging.info(f"   Created agent {agent_id}: {type(agent).__name__}")
