@@ -2,11 +2,13 @@
 
 Explore (meta) mode only. A compact, status-colored dependency graph of the
 delegation ledger (meta -> delegations, annotated with the sub-agent each mode
-selected, plus the `context_from` provenance edges) sits on top; dense summary
-tables and a detailed per-action breakdown (inputs, outputs, reasoning) back it
-underneath. Refreshes on the sidebar delegation tree's cadence (2s while a chat
-task runs).
+selected, plus the `context_from` provenance edges) sits on top; the delegation
+ledger, a per-agent tool-call sequence, and a detailed per-action breakdown
+(inputs, outputs, reasoning) back it underneath. Refreshes on the sidebar
+delegation tree's cadence (2s while a chat task runs).
 """
+
+import json
 
 import streamlit as st
 
@@ -63,6 +65,11 @@ def render_telemetry_tab() -> None:
         # ── Delegation ledger ────────────────────────────────────────
         st.subheader("Delegation ledger")
         _ledger_table(delegations)
+
+        # ── Tool sequence ────────────────────────────────────────────
+        st.subheader("Tool sequence")
+        st.caption("Every tool call each agent's LLM made, in order.")
+        _tool_sequence_section(tel.get("tool_sequence", {}))
 
         # ── Detailed breakdown ───────────────────────────────────────
         st.subheader("Detailed breakdown")
@@ -157,6 +164,46 @@ def _ledger_table(delegations: list) -> None:
             "completed": _short_time(d.get("completed_at")),
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+# ── tool sequence ────────────────────────────────────────────────────
+
+_LAYER_LABELS = [
+    ("meta", "Meta-agent"),
+    ("analysis", "Analysis specialist"),
+    ("planning", "Planning specialist"),
+]
+
+
+def _compact_args(args, limit: int = 120) -> str:
+    """One-line, truncated rendering of a tool call's arguments."""
+    if not args:
+        return ""
+    try:
+        s = json.dumps(args, default=str, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        s = str(args)
+    return s if len(s) <= limit else s[:limit - 1] + "…"
+
+
+def _tool_sequence_section(sequence: dict) -> None:
+    """Per-agent ordered tool-call list — the full sequence of tools run."""
+    import pandas as pd
+
+    shown = False
+    for key, label in _LAYER_LABELS:
+        calls = sequence.get(key) or []
+        if not calls:
+            continue
+        shown = True
+        st.markdown(f"**{label}** — {len(calls)} tool call(s)")
+        rows = [{"#": i, "tool": c.get("tool"),
+                 "arguments": _compact_args(c.get("args"))}
+                for i, c in enumerate(calls, 1)]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                     hide_index=True)
+    if not shown:
+        st.caption("No tool calls recorded yet.")
 
 
 # ── detailed breakdown ───────────────────────────────────────────────

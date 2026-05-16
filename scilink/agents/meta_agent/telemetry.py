@@ -154,6 +154,57 @@ def _analysis_reports(base_dir: Path) -> List[Dict[str, Any]]:
     return reports
 
 
+def _extract_tool_calls(messages: list) -> List[Dict[str, Any]]:
+    """Ordered (tool, args) for every tool call in one chat history.
+
+    Handles the OpenAI-style ``tool_calls`` on assistant messages
+    (``function.name`` / ``function.arguments`` JSON string), with a light
+    fallback for a flattened ``{name, args}`` shape.
+    """
+    seq: List[Dict[str, Any]] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        for tc in m.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") if isinstance(tc.get("function"), dict) else tc
+            name = fn.get("name")
+            if not name:
+                continue
+            raw = fn.get("arguments", fn.get("args"))
+            args: Any = raw
+            if isinstance(raw, str):
+                try:
+                    args = json.loads(raw)
+                except Exception:  # noqa: BLE001
+                    args = {"_raw": raw}
+            seq.append({"tool": name,
+                        "args": args if isinstance(args, dict) else {}})
+    return seq
+
+
+def _tool_sequence(base_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
+    """Per-agent ordered tool-call sequence, read from each ``chat_history.json``
+    (the meta's at the session root, each specialist's in its sub-dir)."""
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for layer, sub in (("meta", ""), ("analysis", "analysis"),
+                        ("planning", "planning")):
+        path = (base_dir / sub / "chat_history.json" if sub
+                else base_dir / "chat_history.json")
+        if not path.is_file():
+            continue
+        try:
+            messages = json.loads(path.read_text())
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(messages, list):
+            calls = _extract_tool_calls(messages)
+            if calls:
+                out[layer] = calls
+    return out
+
+
 def _csv_row_count(path: Any) -> int:
     """Row count of a CSV, or 0 if absent / unreadable."""
     try:
@@ -221,6 +272,7 @@ def collect_session_telemetry(meta_agent: Any) -> Dict[str, Any]:
 
         agents: List[Dict[str, Any]] = []
         analysis_reports: List[Dict[str, Any]] = []
+        tool_sequence: Dict[str, List[Dict[str, Any]]] = {}
         if base_dir_raw and Path(base_dir_raw).is_dir():
             base = Path(base_dir_raw)
             for sp in sorted(base.rglob("*_state.json")):
@@ -228,6 +280,7 @@ def collect_session_telemetry(meta_agent: Any) -> Dict[str, Any]:
                 if row:
                     agents.append(row)
             analysis_reports = _analysis_reports(base)
+            tool_sequence = _tool_sequence(base)
 
         # Which sub-agents each specialist (mode) ended up using — for the
         # dependency graph's per-mode sub-agent annotation.
@@ -248,8 +301,9 @@ def collect_session_telemetry(meta_agent: Any) -> Dict[str, Any]:
             "agents": agents,
             "sub_agents": sub_agents,
             "analysis_reports": analysis_reports,
+            "tool_sequence": tool_sequence,
         }
     except Exception as e:  # noqa: BLE001 - telemetry must never break the UI
         logger.warning(f"telemetry collection failed: {e}")
-        return {"meta": {}, "specialists": {}, "agents": [],
-                "sub_agents": {}, "analysis_reports": [], "error": str(e)}
+        return {"meta": {}, "specialists": {}, "agents": [], "sub_agents": {},
+                "analysis_reports": [], "tool_sequence": {}, "error": str(e)}
