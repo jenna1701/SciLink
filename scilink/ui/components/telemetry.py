@@ -60,13 +60,7 @@ def render_telemetry_tab() -> None:
         st.caption("Grey edge = meta dispatched the delegation.  "
                    "Blue edge = a delegation's result fed the next as context.")
 
-        # ── Summary tables ───────────────────────────────────────────
-        st.subheader("Specialists")
-        _specialists_table(tel.get("specialists", {}))
-
-        st.subheader("Worker agents")
-        _workers_table(agents)
-
+        # ── Delegation ledger ────────────────────────────────────────
         st.subheader("Delegation ledger")
         _ledger_table(delegations)
 
@@ -134,7 +128,7 @@ def _delegation_graph_dot(meta: dict, sub_agents: dict) -> str:
     return "\n".join(out)
 
 
-# ── summary tables ───────────────────────────────────────────────────
+# ── tables ───────────────────────────────────────────────────────────
 
 def _short_time(ts) -> str:
     """ISO timestamp -> HH:MM:SS (keeps the table narrow)."""
@@ -142,45 +136,6 @@ def _short_time(ts) -> str:
         return ""
     s = str(ts)
     return s.split("T", 1)[1][:8] if "T" in s else s
-
-
-def _specialists_table(specs: dict) -> None:
-    import pandas as pd
-
-    rows = []
-    for name in ("analysis", "planning"):
-        info = specs.get(name, {})
-        if not info.get("instantiated"):
-            rows.append({"specialist": name, "messages": "—",
-                         "work": "not engaged"})
-            continue
-        if name == "analysis":
-            work = f"{info.get('analyses_run', 0)} analysis run(s)"
-        else:
-            targets = info.get("optimization_targets", [])
-            work = (f"{info.get('bo_data_points', 0)} BO data points"
-                    + (f" · targets: {', '.join(targets)}" if targets else ""))
-        rows.append({"specialist": name,
-                     "messages": info.get("message_count", 0), "work": work})
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-
-def _workers_table(agents: list) -> None:
-    import pandas as pd
-
-    if not agents:
-        st.caption("No worker agents have run yet.")
-        return
-    rows = [{
-        "agent": a.get("name"),
-        "specialist": a.get("specialist"),
-        "actions": a.get("action_count", 0),
-        "✓": a.get("outcomes", {}).get("success", 0),
-        "✗": a.get("outcomes", {}).get("error", 0),
-        "first": _short_time(a.get("first_timestamp")),
-        "last": _short_time(a.get("last_timestamp")),
-    } for a in agents]
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def _ledger_table(delegations: list) -> None:
