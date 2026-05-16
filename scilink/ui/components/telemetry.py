@@ -224,13 +224,21 @@ def _worker_breakdown(ag: dict) -> None:
             if rationale:
                 st.caption("Reasoning")
                 st.write(rationale)
+            _input = ac.get("input")
+            _result = ac.get("result")
             ci, co = st.columns(2)
             with ci:
                 st.caption("Input")
-                st.json(ac.get("input") or {}, expanded=False)
+                if _input:
+                    st.json(_input, expanded=True)
+                else:
+                    st.caption("— none recorded —")
             with co:
                 st.caption("Output")
-                st.json(ac.get("result") or {}, expanded=False)
+                if _result:
+                    st.json(_result, expanded=True)
+                else:
+                    st.caption("— none recorded —")
             feedback = ac.get("feedback")
             if feedback:
                 st.caption("Feedback")
