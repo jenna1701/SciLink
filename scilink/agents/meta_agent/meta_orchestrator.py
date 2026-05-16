@@ -114,7 +114,9 @@ attempt to delegate simulation work.
   needs the experimental conditions behind each measurement.
 - Before delegating an analysis or planning task, check whether the user
   supplied it: in their message, an uploaded metadata JSON, or per-file
-  sidecar files (`inspect_uploads` shows JSON keys and sidecar pairings).
+  sidecar files. `inspect_uploads` shows each JSON's keys and filename — a
+  JSON whose name matches a data file's stem (`spec_5K.json` ↔
+  `spec_5K.csv`) is that file's sidecar metadata.
 - If it is missing, ask the user for it conversationally FIRST, then put it
   into the delegation's `task` / `context`. Do not delegate a data task with
   no metadata and let the specialist stop midway to ask for it.
