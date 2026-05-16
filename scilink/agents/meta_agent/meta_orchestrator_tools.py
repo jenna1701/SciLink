@@ -217,13 +217,15 @@ class MetaOrchestratorTools:
                 "label": {
                     "type": "string",
                     "description": (
-                        "Short label shown in the UI delegation tree — the data "
-                        "type being analyzed (e.g. '1-D Raman spectra', "
-                        "'STEM image', 'hyperspectral datacube')."
+                        "REQUIRED short label for the UI delegation tree — a "
+                        "2-5 word noun phrase naming the data type being "
+                        "analyzed (e.g. '1-D Raman spectra', 'STEM image', "
+                        "'hyperspectral datacube'). NOT a sentence or a "
+                        "restatement of the task."
                     ),
                 },
             },
-            required=["task"],
+            required=["task", "label"],
         )
 
         # -- delegate_to_planning -------------------------------------------
@@ -269,13 +271,14 @@ class MetaOrchestratorTools:
                 "label": {
                     "type": "string",
                     "description": (
-                        "Short label shown in the UI delegation tree — the "
-                        "focus of the planning task (e.g. 'follow-up BO "
-                        "campaign', 'experiment design')."
+                        "REQUIRED short label for the UI delegation tree — a "
+                        "2-5 word noun phrase naming the focus of the planning "
+                        "task (e.g. 'follow-up BO campaign', 'experiment "
+                        "design'). NOT a sentence."
                     ),
                 },
             },
-            required=["task"],
+            required=["task", "label"],
         )
 
         # -- delegate_to_simulation: DEFERRED lazy seam, intentionally NOT built

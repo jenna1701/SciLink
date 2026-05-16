@@ -564,32 +564,46 @@ def _render_planning_status() -> None:
     st.metric("Autonomy", mode.replace("-", " ").title())
 
 
-def _meta_delegation_tree(ledger: list, specialist: str) -> str:
-    """Monospace mission-control → specialist → delegations tree."""
-    rows = [e for e in ledger if e.get("mode") == specialist]
-    lines = ["🛰️ Mission control", f"└─ {specialist.title()}  ({len(rows)})"]
+def _meta_delegation_tree(ledger: list) -> str:
+    """Monospace mission-control → specialists → delegations tree.
+
+    Shows every specialist branch at once — no selector.
+    """
+    by_mode: dict = {}
+    for e in ledger:
+        by_mode.setdefault(e.get("mode", "?"), []).append(e)
     glyphs = {"success": "✓", "error": "✗"}
-    for i, e in enumerate(rows):
-        branch = "   └─" if i == len(rows) - 1 else "   ├─"
-        # Prefer the meta-supplied short label (e.g. the data type); fall
-        # back to the task text for older entries.
-        label = (e.get("label") or "").strip() or " ".join(
-            str(e.get("task") or "").split())
-        if len(label) > 32:
-            label = label[:31] + "…"
-        glyph = glyphs.get(e.get("status"), "⋯")
-        cf = e.get("context_from") or []
-        cf_str = "  ←" + ",".join(f"#{n}" for n in cf) if cf else ""
-        lines.append(f"{branch} #{e.get('index', '?')} {label} {glyph}{cf_str}")
+    icons = {"analysis": "🧪", "planning": "📋"}
+    lines = ["🛰️ Mission control"]
+    modes = sorted(by_mode)
+    for mi, mode in enumerate(modes):
+        rows = by_mode[mode]
+        last_mode = mi == len(modes) - 1
+        lines.append(f"{'└─' if last_mode else '├─'} {icons.get(mode, '•')} "
+                     f"{mode.title()}  ({len(rows)})")
+        cont = "   " if last_mode else "│  "
+        for ri, e in enumerate(rows):
+            rbranch = "└─" if ri == len(rows) - 1 else "├─"
+            # Prefer the meta-supplied short label (the data type); fall back
+            # to the task text for older, unlabelled entries.
+            label = (e.get("label") or "").strip() or " ".join(
+                str(e.get("task") or "").split())
+            if len(label) > 30:
+                label = label[:29] + "…"
+            glyph = glyphs.get(e.get("status"), "⋯")
+            cf = e.get("context_from") or []
+            cf_str = " ←" + ",".join(f"#{n}" for n in cf) if cf else ""
+            lines.append(f"{cont}{rbranch} #{e.get('index', '?')} "
+                         f"{label} {glyph}{cf_str}")
     return "\n".join(lines)
 
 
 def _render_meta_status() -> None:
-    """Show the Explore meta-agent's delegation tree, by specialist.
+    """Show the Explore meta-agent's delegation tree.
 
-    The tree is wrapped in an ``st.fragment`` that polls the live delegation
-    ledger every 2s while a chat is running, so delegations appear (and flip
-    from ⋯ running to ✓/✗) without waiting for the whole turn to finish.
+    Wrapped in an ``st.fragment`` that polls the live delegation ledger every
+    2s while a chat is running, so delegations appear (and flip from ⋯ running
+    to ✓/✗) without waiting for the whole turn to finish.
     """
     task = st.session_state.get("chat_task")
     _interval = "2s" if (task is not None and getattr(task, "is_running", False)) else None
@@ -600,27 +614,11 @@ def _render_meta_status() -> None:
         ledger = getattr(agent, "_delegation_ledger", []) or []
         mode = st.session_state.agent_config.get("mode", "autopilot")
 
+        st.caption(f"{len(ledger)} delegation(s) · {mode.replace('-', ' ').title()}")
         if not ledger:
-            st.caption(f"Autonomy: {mode.replace('-', ' ').title()}")
             st.info("No delegations yet — describe a goal and the meta routes it.")
             return
-
-        by_mode: dict = {}
-        for e in ledger:
-            m = e.get("mode", "?")
-            by_mode[m] = by_mode.get(m, 0) + 1
-        specialists = sorted(by_mode)
-
-        st.caption(f"{len(ledger)} delegation(s) · {mode.replace('-', ' ').title()}")
-        if st.session_state.get("meta_status_specialist") not in specialists:
-            st.session_state["meta_status_specialist"] = specialists[0]
-        selected = st.selectbox(
-            "Specialist",
-            specialists,
-            format_func=lambda s: f"{s.title()} ({by_mode[s]})",
-            key="meta_status_specialist",
-        )
-        st.text(_meta_delegation_tree(ledger, selected))
+        st.text(_meta_delegation_tree(ledger))
 
     _delegation_tree_panel()
 

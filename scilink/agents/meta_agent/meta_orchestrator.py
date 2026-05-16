@@ -146,9 +146,10 @@ attempt to delegate simulation work.
   conversation.
 - Pass upstream findings via the `context` dict, not by re-typing them into
   `task`.
-- Give each call a short `label` — the data type for an analysis (e.g.
-  "1-D Raman spectra", "STEM image") or the focus for a planning task (e.g.
-  "follow-up BO campaign"). It is how the delegation is shown in the UI.
+- Give each call a short `label` (required) — a 2-5 word noun phrase, NOT a
+  sentence: the data type for an analysis ("1-D Raman spectra", "STEM
+  image"), or the focus for a planning task ("follow-up BO campaign"). It is
+  how the delegation is shown in the UI.
 
 **BRIDGING CONTEXT BETWEEN SPECIALISTS:**
 - Every delegation's result is kept in a delegation ledger. Call
