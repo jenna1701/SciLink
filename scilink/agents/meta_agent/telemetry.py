@@ -1,12 +1,13 @@
 """Read-only telemetry snapshot of a meta (Explore) session.
 
 Aggregates state the agents already persist — the meta's delegation ledger,
-the specialist orchestrators' counters, and each worker agent's
-``action_history`` (the uniform ``_log_action`` audit trail) — into one plain
-dict for the Telemetry UI tab.
+the specialist orchestrators' counters, each worker agent's ``action_history``
+(the uniform ``_log_action`` audit trail, with full input / result / rationale
+per action), and the analysis sub-agents' ``analysis_results.json`` reasoning
+— into one plain dict for the Telemetry UI tab.
 
-The reader is LLM-free, stdlib-only, and never raises: a malformed state file
-degrades that one agent's row to nothing rather than breaking the tab.
+The reader is LLM-free, stdlib-only, and never raises: a malformed file
+degrades that one entry rather than breaking the tab.
 """
 
 import json
@@ -16,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_RATIONALE_MAX = 200
+_DETAILED_MAX = 2000  # cap on the analysis detailed_analysis reasoning text
 
 # Friendly names for the known worker state files; anything else falls back to
 # a title-cased form of the file stem (so a new agent still shows up sanely).
@@ -64,7 +65,11 @@ def _specialist_of(path: Path) -> str:
 
 def _worker_telemetry(state_path: Path) -> Optional[Dict[str, Any]]:
     """One agent row from a ``*_state.json`` file, or None if it has no
-    ``action_history`` (so non-agent ``*_state.json`` files are skipped)."""
+    ``action_history`` (so non-agent ``*_state.json`` files are skipped).
+
+    Each action carries the full ``input`` / ``result`` / ``rationale`` /
+    ``feedback`` so the UI can render a detailed per-action breakdown.
+    """
     try:
         data = json.loads(state_path.read_text())
     except Exception:  # noqa: BLE001 - a bad state file must not break the tab
@@ -90,14 +95,14 @@ def _worker_telemetry(state_path: Path) -> Optional[Dict[str, Any]]:
             outcomes["error"] += 1
         else:
             outcomes["other"] += 1
-        rationale = entry.get("rationale")
-        if isinstance(rationale, str) and len(rationale) > _RATIONALE_MAX:
-            rationale = rationale[:_RATIONALE_MAX - 1] + "…"
         actions.append({
             "timestamp": entry.get("timestamp"),
             "action": action,
             "status": status,
-            "rationale": rationale,
+            "rationale": entry.get("rationale"),
+            "input": entry.get("input"),
+            "result": entry.get("result"),
+            "feedback": entry.get("feedback"),
         })
 
     stamps = [a["timestamp"] for a in actions if a["timestamp"]]
@@ -113,6 +118,40 @@ def _worker_telemetry(state_path: Path) -> Optional[Dict[str, Any]]:
         "actions": actions,
         "source_file": str(state_path),
     }
+
+
+def _analysis_reports(base_dir: Path) -> List[Dict[str, Any]]:
+    """Per-analysis scientific reasoning from each ``analysis_results.json`` —
+    the detailed_analysis narrative and the extracted scientific claims."""
+    reports: List[Dict[str, Any]] = []
+    adir = base_dir / "analysis"
+    if not adir.is_dir():
+        return reports
+    for ar in sorted(adir.rglob("analysis_results.json")):
+        try:
+            data = json.loads(ar.read_text())
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(data, dict):
+            continue
+        claims: List[Dict[str, Any]] = []
+        for c in data.get("scientific_claims") or []:
+            if isinstance(c, dict):
+                claims.append({"claim": c.get("claim"),
+                               "impact": c.get("scientific_impact")})
+            elif c:
+                claims.append({"claim": str(c), "impact": None})
+        detailed = str(data.get("detailed_analysis") or "")
+        if len(detailed) > _DETAILED_MAX:
+            detailed = detailed[:_DETAILED_MAX] + "…"
+        reports.append({
+            "analysis_id": ar.parent.name,
+            "status": data.get("status"),
+            "detailed_analysis": detailed,
+            "claims": claims,
+            "output_dir": str(ar.parent),
+        })
+    return reports
 
 
 def _csv_row_count(path: Any) -> int:
@@ -181,11 +220,22 @@ def collect_session_telemetry(meta_agent: Any) -> Dict[str, Any]:
         } for e in ledger]
 
         agents: List[Dict[str, Any]] = []
+        analysis_reports: List[Dict[str, Any]] = []
         if base_dir_raw and Path(base_dir_raw).is_dir():
-            for sp in sorted(Path(base_dir_raw).rglob("*_state.json")):
+            base = Path(base_dir_raw)
+            for sp in sorted(base.rglob("*_state.json")):
                 row = _worker_telemetry(sp)
                 if row:
                     agents.append(row)
+            analysis_reports = _analysis_reports(base)
+
+        # Which sub-agents each specialist (mode) ended up using — for the
+        # dependency graph's per-mode sub-agent annotation.
+        sub_agents: Dict[str, List[str]] = {}
+        for a in agents:
+            names = sub_agents.setdefault(a["specialist"], [])
+            if a["name"] not in names:
+                names.append(a["name"])
 
         return {
             "meta": {
@@ -196,7 +246,10 @@ def collect_session_telemetry(meta_agent: Any) -> Dict[str, Any]:
             },
             "specialists": _specialists(meta_agent),
             "agents": agents,
+            "sub_agents": sub_agents,
+            "analysis_reports": analysis_reports,
         }
     except Exception as e:  # noqa: BLE001 - telemetry must never break the UI
         logger.warning(f"telemetry collection failed: {e}")
-        return {"meta": {}, "specialists": {}, "agents": [], "error": str(e)}
+        return {"meta": {}, "specialists": {}, "agents": [],
+                "sub_agents": {}, "analysis_reports": [], "error": str(e)}

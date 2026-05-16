@@ -1,9 +1,11 @@
 """Telemetry tab — live snapshot of meta + specialist + worker-agent state.
 
-Explore (meta) mode only. A status-colored dependency graph of the delegation
-ledger (meta -> delegations, with the `context_from` provenance edges) sits on
-top; dense detail tables back it underneath. Refreshes on the same cadence as
-the sidebar delegation tree (2s while a chat task runs).
+Explore (meta) mode only. A compact, status-colored dependency graph of the
+delegation ledger (meta -> delegations, annotated with the sub-agent each mode
+selected, plus the `context_from` provenance edges) sits on top; dense summary
+tables and a detailed per-action breakdown (inputs, outputs, reasoning) back it
+underneath. Refreshes on the sidebar delegation tree's cadence (2s while a chat
+task runs).
 """
 
 import streamlit as st
@@ -51,25 +53,37 @@ def render_telemetry_tab() -> None:
             return
 
         # ── Dependency graph ─────────────────────────────────────────
-        st.graphviz_chart(_delegation_graph_dot(meta), use_container_width=True)
+        st.graphviz_chart(
+            _delegation_graph_dot(meta, tel.get("sub_agents", {})),
+            width="content",
+        )
         st.caption("Grey edge = meta dispatched the delegation.  "
                    "Blue edge = a delegation's result fed the next as context.")
 
-        # ── Specialists ──────────────────────────────────────────────
+        # ── Summary tables ───────────────────────────────────────────
         st.subheader("Specialists")
         _specialists_table(tel.get("specialists", {}))
 
-        # ── Worker agents ────────────────────────────────────────────
         st.subheader("Worker agents")
         _workers_table(agents)
 
-        # ── Every logged action ──────────────────────────────────────
-        st.subheader("Worker activity")
-        _actions_table(agents)
-
-        # ── Delegation ledger ────────────────────────────────────────
         st.subheader("Delegation ledger")
         _ledger_table(delegations)
+
+        # ── Detailed breakdown ───────────────────────────────────────
+        st.subheader("Detailed breakdown")
+        st.caption("Per worker agent: every logged action with its inputs, "
+                   "outputs and reasoning.")
+        if not agents:
+            st.caption("No worker actions recorded yet.")
+        for ag in agents:
+            _worker_breakdown(ag)
+
+        reports = tel.get("analysis_reports", [])
+        if reports:
+            st.markdown("**Analysis reasoning**")
+            for rep in reports:
+                _analysis_report(rep)
 
     _panel()
 
@@ -80,24 +94,35 @@ def _dot_escape(text) -> str:
     return str(text).replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _delegation_graph_dot(meta: dict) -> str:
-    """DOT string: meta-agent root -> delegation nodes (colored by status),
-    with dispatch edges and `context_from` provenance edges."""
+def _truncate(text, limit: int) -> str:
+    text = str(text or "")
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _delegation_graph_dot(meta: dict, sub_agents: dict) -> str:
+    """DOT string: meta-agent root -> delegation nodes (colored by status,
+    annotated with the sub-agent(s) the mode used), with dispatch edges and
+    `context_from` provenance edges. Kept compact via tight spacing + a size
+    cap so it does not dominate the tab."""
     dels = meta.get("delegations", [])
     out = [
         "digraph telemetry {",
-        '  rankdir=TB; bgcolor="transparent"; pad=0.2;',
+        '  rankdir=TB; bgcolor="transparent"; pad=0.15;',
+        '  size="7,4.5"; ratio=compress; ranksep=0.32; nodesep=0.22;',
         '  node [shape=box, style="filled,rounded", fontname="Helvetica", '
-        'fontsize=10, color="#30363d", fontcolor="white"];',
-        '  edge [fontname="Helvetica", fontsize=8];',
-        f'  meta [label="Meta-agent\\n({_dot_escape(str(meta.get("meta_mode", "")).title())})", '
+        'fontsize=9, margin="0.11,0.05", color="#30363d", fontcolor="white"];',
+        '  edge [fontname="Helvetica", fontsize=8, arrowsize=0.7];',
+        f'  meta [label="Meta-agent ({_dot_escape(str(meta.get("meta_mode", "")).title())})", '
         'fillcolor="#30363d"];',
     ]
     for d in dels:
         idx = d.get("index")
         fill = _STATUS_FILL.get(d.get("status"), _DEFAULT_FILL)
+        subs = sub_agents.get(d.get("mode"), [])
+        sub_line = ("\\n↳ " + _dot_escape(_truncate(", ".join(subs), 32))
+                    if subs else "")
         label = (f'#{idx} · {_dot_escape(d.get("mode", "?"))}\\n'
-                 f'{_dot_escape(d.get("label", ""))}')
+                 f'{_dot_escape(_truncate(d.get("label", ""), 24))}{sub_line}')
         out.append(f'  d{idx} [label="{label}", fillcolor="{fill}"];')
     for d in dels:                                   # dispatch edges
         out.append(f'  meta -> d{d.get("index")} [color="#8893a5"];')
@@ -109,7 +134,7 @@ def _delegation_graph_dot(meta: dict) -> str:
     return "\n".join(out)
 
 
-# ── tables ───────────────────────────────────────────────────────────
+# ── summary tables ───────────────────────────────────────────────────
 
 def _short_time(ts) -> str:
     """ISO timestamp -> HH:MM:SS (keeps the table narrow)."""
@@ -158,30 +183,6 @@ def _workers_table(agents: list) -> None:
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
-def _actions_table(agents: list) -> None:
-    """Every logged action across all workers, newest first."""
-    import pandas as pd
-
-    rows = []
-    for a in agents:
-        for ac in a.get("actions", []):
-            rows.append({
-                "time": _short_time(ac.get("timestamp")),
-                "specialist": a.get("specialist"),
-                "agent": a.get("name"),
-                "action": ac.get("action"),
-                "status": ac.get("status"),
-                "rationale": ac.get("rationale"),
-                "_sort": ac.get("timestamp") or "",
-            })
-    if not rows:
-        st.caption("No worker actions recorded yet.")
-        return
-    rows.sort(key=lambda r: r["_sort"], reverse=True)
-    df = pd.DataFrame(rows).drop(columns=["_sort"])
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
-
 def _ledger_table(delegations: list) -> None:
     import pandas as pd
 
@@ -201,3 +202,55 @@ def _ledger_table(delegations: list) -> None:
             "completed": _short_time(d.get("completed_at")),
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+# ── detailed breakdown ───────────────────────────────────────────────
+
+def _worker_breakdown(ag: dict) -> None:
+    """One expander per worker agent: every action with input/output/reason."""
+    oc = ag.get("outcomes", {})
+    title = (f"{ag.get('name', '?')}  ·  {ag.get('specialist', '—')}  ·  "
+             f"{ag.get('action_count', 0)} action(s)  "
+             f"({oc.get('success', 0)}✓ / {oc.get('error', 0)}✗)")
+    with st.expander(title):
+        actions = ag.get("actions", [])
+        for i, ac in enumerate(actions, 1):
+            st.markdown(
+                f"**{i}. `{ac.get('action', '?')}`**  ·  "
+                f"`{ac.get('status', '—')}`  ·  "
+                f"{_short_time(ac.get('timestamp'))}"
+            )
+            rationale = ac.get("rationale")
+            if rationale:
+                st.caption("Reasoning")
+                st.write(rationale)
+            ci, co = st.columns(2)
+            with ci:
+                st.caption("Input")
+                st.json(ac.get("input") or {}, expanded=False)
+            with co:
+                st.caption("Output")
+                st.json(ac.get("result") or {}, expanded=False)
+            feedback = ac.get("feedback")
+            if feedback:
+                st.caption("Feedback")
+                st.write(feedback)
+            if i < len(actions):
+                st.divider()
+
+
+def _analysis_report(rep: dict) -> None:
+    """One expander per analysis run: its detailed reasoning + claims."""
+    claims = rep.get("claims", [])
+    title = (f"{rep.get('analysis_id', 'analysis')}  ·  "
+             f"{len(claims)} claim(s)  ·  {rep.get('status', '—')}")
+    with st.expander(title):
+        detailed = rep.get("detailed_analysis")
+        if detailed:
+            st.markdown(detailed)
+        if claims:
+            st.caption("Scientific claims")
+            for c in claims:
+                st.markdown(f"- **{c.get('claim', '')}**")
+                if c.get("impact"):
+                    st.caption(c["impact"])
