@@ -564,19 +564,51 @@ def _render_planning_status() -> None:
     st.metric("Autonomy", mode.replace("-", " ").title())
 
 
-def _render_meta_status() -> None:
-    """Show meta-agent status metrics."""
-    agent = st.session_state.agent
-    children = getattr(agent, "_children", {}) or {}
-    ledger = getattr(agent, "_delegation_ledger", []) or []
-    mode = st.session_state.agent_config.get("mode", "co-pilot")
+def _meta_delegation_tree(ledger: list, specialist: str) -> str:
+    """Monospace meta → specialist → delegations tree for the sidebar."""
+    rows = [e for e in ledger if e.get("mode") == specialist]
+    lines = ["🧭 Explore", f"└─ {specialist.title()}  ({len(rows)})"]
+    glyphs = {"success": "✓", "error": "✗"}
+    for i, e in enumerate(rows):
+        branch = "   └─" if i == len(rows) - 1 else "   ├─"
+        task = " ".join(str(e.get("task") or "").split())
+        if len(task) > 30:
+            task = task[:29] + "…"
+        glyph = glyphs.get(e.get("status"), "⋯")
+        cf = e.get("context_from") or []
+        cf_str = "  ←" + ",".join(f"#{n}" for n in cf) if cf else ""
+        lines.append(f"{branch} #{e.get('index', '?')} {task} {glyph}{cf_str}")
+    return "\n".join(lines)
 
-    row_c1, row_c2 = st.columns(2)
-    with row_c1:
-        st.metric("Delegations", len(ledger))
-    with row_c2:
-        st.metric("Autonomy", mode.replace("-", " ").title())
-    st.metric("Specialists Active", ", ".join(sorted(children)) or "None")
+
+def _render_meta_status() -> None:
+    """Show the Explore meta-agent's delegation tree, by specialist."""
+    agent = st.session_state.agent
+    ledger = getattr(agent, "_delegation_ledger", []) or []
+    mode = st.session_state.agent_config.get("mode", "autopilot")
+
+    if not ledger:
+        st.caption(f"Autonomy: {mode.replace('-', ' ').title()}")
+        st.info("No delegations yet — describe a goal and the meta routes it.")
+        return
+
+    by_mode: dict = {}
+    for e in ledger:
+        m = e.get("mode", "?")
+        by_mode[m] = by_mode.get(m, 0) + 1
+    specialists = sorted(by_mode)
+
+    st.caption(f"{len(ledger)} delegation(s) · {mode.replace('-', ' ').title()}")
+    if st.session_state.get("meta_status_specialist") not in specialists:
+        st.session_state["meta_status_specialist"] = specialists[0]
+    selected = st.selectbox(
+        "Specialist",
+        specialists,
+        format_func=lambda s: f"{s.title()} ({by_mode[s]})",
+        key="meta_status_specialist",
+    )
+    st.text(_meta_delegation_tree(ledger, selected))
+    st.caption("✓ done · ✗ error · ⋯ running · ←#n context source")
 
 
 # ── helpers ──────────────────────────────────────────────────────

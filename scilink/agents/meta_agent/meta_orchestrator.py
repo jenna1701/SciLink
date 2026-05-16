@@ -152,6 +152,9 @@ attempt to delegate simulation work.
   `get_delegation_history` to retrieve an earlier result, then pass the
   relevant `key_findings` / `files_produced` as the `context` argument of the
   next `delegate_to_*` call. That is how analysis findings inform planning.
+- When the `context` you pass draws on earlier delegations, also list those
+  delegations' `delegation_index` numbers in the `context_from` argument —
+  this records the provenance of the threaded findings.
 - `summarize_session_state` reports what each specialist has done so far.
 
 **RESPONSE STYLE:**
@@ -401,7 +404,8 @@ class MetaOrchestratorAgent:
     # Delegation + ledger (used by MetaOrchestratorTools)
     # =========================================================================
 
-    def _delegate(self, mode: str, task: str, context: Optional[dict] = None) -> str:
+    def _delegate(self, mode: str, task: str, context: Optional[dict] = None,
+                  context_from: Optional[list] = None) -> str:
         """Run a task on a child orchestrator, record it, return a JSON summary.
 
         The child runs under the meta's own autonomy mode (mapped by enum
@@ -433,17 +437,31 @@ class MetaOrchestratorAgent:
                 "suggested_followups": [], "warnings": [],
             }
 
-        entry = self._record_delegation(mode, task, context, result)
+        entry = self._record_delegation(mode, task, context, result, context_from)
         return self._summarize_delegation_result(mode, result, entry["index"])
 
-    def _record_delegation(self, mode, task, context, result) -> Dict[str, Any]:
+    def _record_delegation(self, mode, task, context, result,
+                           context_from=None) -> Dict[str, Any]:
         """Append a compact entry to the delegation ledger (not the full result)."""
+        index = len(self._delegation_ledger) + 1
+        # Normalize context_from to valid prior delegation indices (the LLM may
+        # pass ints, strings, or "#n" forms; drop anything out of range).
+        raw = context_from
+        if isinstance(raw, (int, str)):
+            raw = [raw]
+        elif not isinstance(raw, (list, tuple)):
+            raw = []
+        sources = sorted({
+            int(s) for s in (str(v).strip().lstrip("#") for v in raw)
+            if s.isdigit() and 0 < int(s) < index
+        })
         entry = {
-            "index": len(self._delegation_ledger) + 1,
+            "index": index,
             "timestamp": datetime.now().isoformat(),
             "mode": mode,
             "task": task,
             "context_keys": sorted(context.keys()) if isinstance(context, dict) else [],
+            "context_from": sources,
             "status": result.get("status"),
             "summary": result.get("summary", ""),
             "key_findings": result.get("key_findings", []),

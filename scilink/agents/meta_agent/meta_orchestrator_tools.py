@@ -174,9 +174,10 @@ class MetaOrchestratorTools:
         """Register the meta-agent's delegation and introspection tools."""
 
         # -- delegate_to_analysis -------------------------------------------
-        def delegate_to_analysis(task: str, context: dict = None) -> str:
+        def delegate_to_analysis(task: str, context: dict = None,
+                                 context_from: list = None) -> str:
             print(f"  🧪 Delegating to analysis specialist: {task[:80]}...")
-            return self.orch._delegate("analysis", task, context)
+            return self.orch._delegate("analysis", task, context, context_from)
 
         self._register_tool(
             func=delegate_to_analysis,
@@ -204,14 +205,23 @@ class MetaOrchestratorTools:
                         "earlier delegation) to inform the task."
                     ),
                 },
+                "context_from": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "delegation_index numbers of earlier delegations whose "
+                        "findings you threaded into `context` — records provenance."
+                    ),
+                },
             },
             required=["task"],
         )
 
         # -- delegate_to_planning -------------------------------------------
-        def delegate_to_planning(task: str, context: dict = None) -> str:
+        def delegate_to_planning(task: str, context: dict = None,
+                                 context_from: list = None) -> str:
             print(f"  📋 Delegating to planning specialist: {task[:80]}...")
-            return self.orch._delegate("planning", task, context)
+            return self.orch._delegate("planning", task, context, context_from)
 
         self._register_tool(
             func=delegate_to_planning,
@@ -236,6 +246,14 @@ class MetaOrchestratorTools:
                     "description": (
                         "Optional upstream findings / file paths (e.g. analysis "
                         "key_findings) to inform the task."
+                    ),
+                },
+                "context_from": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "delegation_index numbers of earlier delegations whose "
+                        "findings you threaded into `context` — records provenance."
                     ),
                 },
             },
