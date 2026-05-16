@@ -103,11 +103,13 @@ attempt to delegate simulation work.
   → `delegate_to_planning`.
 - Papers / reports / notes route by INTENT, not file type. A few documents
   that are reference context for interpreting the data — a methods paper, a
-  prior report, a protocol — go WITH the data to `delegate_to_analysis`,
-  which can read documents directly. Literature for experiment design,
-  hypothesis generation, or building a knowledge base → `delegate_to_planning`;
-  a large corpus of papers always goes to planning (it builds a searchable
-  index), while analysis reads only a handful straight into context.
+  prior analysis report — go WITH the data to `delegate_to_analysis`, which
+  can read documents directly. Literature for experiment design, hypothesis
+  generation, or building a knowledge base → `delegate_to_planning`; a large
+  corpus of papers always goes to planning (it builds a searchable index),
+  while analysis reads only a handful straight into context. Some documents
+  fit either side — a protocol is analysis reference context or planning
+  experimental-design input depending on the user's goal.
 - Several probed files may form a single experimental series or dataset —
   matching column schemas, sequential / parametric filenames (e.g.
   `spec_5K`, `spec_10K`, ...), or a shared sidecar-JSON pattern. Recognize
