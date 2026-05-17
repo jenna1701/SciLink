@@ -73,9 +73,32 @@ def _curve_fit_rows(output_dir: Path) -> List[Dict[str, Any]]:
     return rows
 
 
+def _image_series_rows(output_dir: Path) -> List[Dict[str, Any]]:
+    """One row per image from an image-analysis run's
+    series_analysis_results.json (the image-series analog of a curve-fitting
+    run's series_fit_results.json; a single image is a series of one)."""
+    sar = output_dir / "series_analysis_results.json"
+    if not sar.is_file():
+        return []
+    try:
+        data = json.loads(sar.read_text())
+    except Exception:  # noqa: BLE001
+        return []
+    rows: List[Dict[str, Any]] = []
+    for r in data.get("results", []):
+        if not isinstance(r, dict) or not r.get("success"):
+            continue
+        row: Dict[str, Any] = {"unit": r.get("name") or f"index_{r.get('index')}"}
+        row.update(_sidecar_conditions(r.get("data_path")))
+        row.update(_flatten_scalars(r.get("extracted_features")))
+        row.update(_flatten_scalars(r.get("quality_metrics"), "quality_"))
+        rows.append(row)
+    return rows
+
+
 def _extracted_feature_rows(output_dir: Path) -> List[Dict[str, Any]]:
-    """One row from an agent that records an ``extracted_features`` dict in
-    analysis_results.json (e.g. image analysis)."""
+    """Generic fallback: one row from an agent that records a top-level
+    ``extracted_features`` dict in analysis_results.json."""
     ar = output_dir / "analysis_results.json"
     if not ar.is_file():
         return []
@@ -101,9 +124,14 @@ def write_feature_table(output_dir) -> Optional[str]:
     """
     try:
         output_dir = Path(output_dir)
-        # Curve-fitting series first (richest, explicitly per-unit); fall back
-        # to the generic ``extracted_features`` dict (image analysis, etc.).
-        rows = _curve_fit_rows(output_dir) or _extracted_feature_rows(output_dir)
+        # Per-unit series adapters first (curve-fitting spectra, then image
+        # series — both one row per unit with conditions merged from sidecars);
+        # fall back to the generic top-level ``extracted_features`` dict.
+        rows = (
+            _curve_fit_rows(output_dir)
+            or _image_series_rows(output_dir)
+            or _extracted_feature_rows(output_dir)
+        )
         if not rows:
             return None
         columns: List[str] = []
