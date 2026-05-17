@@ -341,16 +341,19 @@ class MetaOrchestratorAgent:
         # first chat turn (children must exist to read their tool registries).
         self._capabilities_block: Optional[str] = None
 
-        # Runtime-registered external tools (from MCP servers). These extend
-        # the meta itself — callable alongside the delegate_to_* tools — and
-        # are propagated to every specialist child. MCP connections are live
-        # subprocesses; they are not checkpointed and must be reconnected
-        # after a restore.
+        # External tools registered on the meta itself (MCP server tools) —
+        # callable alongside the delegate_to_* tools. MCP connections are
+        # live subprocesses; not checkpointed, reconnect after a restore.
         self._external_tools: List[Dict[str, str]] = []
         self._mcp_connections: Dict[str, Any] = {}
-        # Server configs kept so MCP tools reach every child — including a
-        # child created lazily after the server was connected.
-        self._mcp_server_configs: Dict[str, Dict[str, Any]] = {}
+        # Custom skills registered for the session (name → path) — kept for
+        # display; the meta has no skill-running tools of its own.
+        self._custom_skills: Dict[str, str] = {}
+        # Shared extensions — skills, custom tools, MCP servers — registered
+        # on the meta and propagated to every specialist child, including a
+        # child created lazily after registration. One mechanism for all
+        # three: see _register_shared_extension.
+        self._shared_extensions: List[Dict[str, Any]] = []
 
         self.message_count = 0
         self.last_checkpoint_message_count = 0
@@ -455,8 +458,8 @@ class MetaOrchestratorAgent:
                 restore_checkpoint=restore,
                 analysis_mode=AnalysisMode.CO_PILOT,
             )
-            # Share any MCP servers already connected on the meta.
-            self._propagate_mcp_to_child(self._children["analysis"])
+            # Share skills / custom tools / MCP servers registered on the meta.
+            self._propagate_extensions_to_child(self._children["analysis"])
         return self._children["analysis"]
 
     def _get_planning_child(self):
@@ -491,12 +494,12 @@ class MetaOrchestratorAgent:
                 autonomy_level=AutonomyLevel.CO_PILOT,
                 data_dir=None,
             )
-            # Share any MCP servers already connected on the meta.
-            self._propagate_mcp_to_child(self._children["planning"])
+            # Share skills / custom tools / MCP servers registered on the meta.
+            self._propagate_extensions_to_child(self._children["planning"])
         return self._children["planning"]
 
     # =========================================================================
-    # MCP server integration
+    # Shared extensions: skills, custom tools, MCP servers
     # =========================================================================
 
     def connect_mcp_server(
@@ -578,15 +581,13 @@ class MetaOrchestratorAgent:
             registered += 1
 
         self._mcp_connections[server_name] = conn
-        self._mcp_server_configs[server_name] = {
-            "command": command, "url": url, "env": env,
-        }
         logging.info(f"✅ MCP '{server_name}': registered {registered} tool(s)")
 
-        # Propagate to every already-created specialist child. Children
-        # created later replay _mcp_server_configs in _get_*_child.
-        for child in self._children.values():
-            self._connect_mcp_on_child(child, server_name)
+        # Share with every specialist child (now and lazily-created later).
+        self._register_shared_extension({
+            "kind": "mcp", "server_name": server_name,
+            "command": command, "url": url, "env": env,
+        })
         return registered
 
     def disconnect_mcp_server(self, server_name: str) -> None:
@@ -617,8 +618,12 @@ class MetaOrchestratorAgent:
         for name in names_to_remove:
             self.tools.functions_map.pop(name, None)
 
-        # Tear the server down on every specialist child too.
-        self._mcp_server_configs.pop(server_name, None)
+        # Drop the shared record and tear the server down on every child.
+        self._shared_extensions = [
+            e for e in self._shared_extensions
+            if not (e.get("kind") == "mcp"
+                    and e.get("server_name") == server_name)
+        ]
         for child in self._children.values():
             try:
                 child.disconnect_mcp_server(server_name)
@@ -635,33 +640,93 @@ class MetaOrchestratorAgent:
         for name in list(self._mcp_connections):
             self.disconnect_mcp_server(name)
 
-    def _connect_mcp_on_child(self, child, server_name: str) -> None:
-        """Connect one recorded MCP server onto a child orchestrator.
+    def register_skill(self, skill_path: str) -> str:
+        """Register a custom skill (.md) and share it with every specialist.
 
-        Failures are logged, not raised — a child stays usable without an
-        MCP server, and one bad child must not break the meta's connection.
+        The meta runs no analyses itself, so the skill is not registered on
+        the meta — it is propagated to the analysis and planning children,
+        where the skill-aware tools (run_analysis, planning) can select it.
+
+        Returns:
+            The skill name (the file stem) used to reference it.
         """
-        cfg = self._mcp_server_configs.get(server_name)
-        if cfg is None:
-            return
+        path = Path(skill_path).expanduser().resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"Skill file not found: {path}")
+        if path.suffix.lower() != ".md":
+            raise ValueError(f"Skill file must be a .md file: {path}")
+        if path.stat().st_size == 0:
+            raise ValueError(f"Skill file is empty: {path}")
+
+        self._custom_skills[path.stem] = str(path)
+        self._register_shared_extension(
+            {"kind": "skill", "skill_path": str(path)}
+        )
+        logging.info(f"✅ Skill '{path.stem}' shared with specialists")
+        return path.stem
+
+    def register_tools(self, schemas: list, factory: callable) -> None:
+        """Register custom tool functions and share them with every specialist.
+
+        Custom tools bind to a loaded data file (the factory receives the
+        child's current data), which the meta — a router — has no concept
+        of, so they are registered on the children, not the meta itself.
+        """
+        self._register_shared_extension(
+            {"kind": "tools", "schemas": schemas, "factory": factory}
+        )
+        for schema in schemas:
+            if schema.get("type") != "function":
+                continue
+            fn = schema.get("function", {})
+            if fn.get("name"):
+                self._external_tools.append({
+                    "name": fn["name"],
+                    "description": fn.get("description", ""),
+                })
+        n = sum(1 for s in schemas if s.get("type") == "function")
+        logging.info(f"✅ {n} custom tool(s) shared with specialists")
+
+    # ── Shared-extension propagation ───────────────────────────────────
+
+    def _register_shared_extension(self, ext: Dict[str, Any]) -> None:
+        """Record a shared extension and apply it to every already-created
+        child. A child created later replays it in _get_*_child. This is the
+        one mechanism behind register_skill / register_tools / MCP sharing."""
+        self._shared_extensions.append(ext)
+        for child in self._children.values():
+            self._apply_extension_to_child(child, ext)
+
+    def _apply_extension_to_child(self, child, ext: Dict[str, Any]) -> None:
+        """Apply one shared extension (skill / tools / MCP) to a child.
+
+        Failures are logged, not raised — a child stays usable, and one bad
+        child must not break the meta-side registration.
+        """
+        kind = ext.get("kind")
         try:
-            child.connect_mcp_server(
-                server_name,
-                command=cfg.get("command"),
-                url=cfg.get("url"),
-                env=cfg.get("env"),
-            )
+            if kind == "skill":
+                child.register_skill(ext["skill_path"])
+            elif kind == "tools":
+                child.register_tools(ext["schemas"], ext["factory"])
+            elif kind == "mcp":
+                child.connect_mcp_server(
+                    ext["server_name"],
+                    command=ext.get("command"),
+                    url=ext.get("url"),
+                    env=ext.get("env"),
+                )
         except Exception as e:  # noqa: BLE001
             self.logger.warning(
-                f"Could not connect MCP '{server_name}' on "
+                f"Could not apply {kind} extension to "
                 f"{type(child).__name__}: {e}"
             )
 
-    def _propagate_mcp_to_child(self, child) -> None:
-        """Replay every recorded MCP server onto a freshly created child, so
-        a child instantiated after the connection still shares the tools."""
-        for server_name in self._mcp_server_configs:
-            self._connect_mcp_on_child(child, server_name)
+    def _propagate_extensions_to_child(self, child) -> None:
+        """Replay every shared extension onto a freshly created child, so a
+        child instantiated after registration still shares skills/tools."""
+        for ext in self._shared_extensions:
+            self._apply_extension_to_child(child, ext)
 
     # =========================================================================
     # Specialist capability inventory
