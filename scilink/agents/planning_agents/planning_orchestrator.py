@@ -810,9 +810,10 @@ class PlanningOrchestratorAgent:
     
     def _should_enable_human_feedback(self) -> bool:
         """Determines if human feedback should be enabled based on autonomy level."""
-        # Only CO_PILOT pauses for human review
-        # AUTOPILOT and AUTONOMOUS proceed without asking
-        return self.autonomy_level == AutonomyLevel.CO_PILOT
+        # CO_PILOT and AUTOPILOT surface generated plans/code for human
+        # review (accept or request changes) — the AUTOPILOT directive
+        # promises this review interface. Only AUTONOMOUS runs without it.
+        return self.autonomy_level != AutonomyLevel.AUTONOMOUS
 
     def set_autonomy_level(self, level: AutonomyLevel) -> None:
         """
