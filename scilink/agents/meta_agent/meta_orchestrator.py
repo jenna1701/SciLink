@@ -342,11 +342,15 @@ class MetaOrchestratorAgent:
         self._capabilities_block: Optional[str] = None
 
         # Runtime-registered external tools (from MCP servers). These extend
-        # the meta itself — callable alongside the delegate_to_* tools. MCP
-        # connections are live subprocesses; they are not checkpointed and
-        # must be reconnected after a restore.
+        # the meta itself — callable alongside the delegate_to_* tools — and
+        # are propagated to every specialist child. MCP connections are live
+        # subprocesses; they are not checkpointed and must be reconnected
+        # after a restore.
         self._external_tools: List[Dict[str, str]] = []
         self._mcp_connections: Dict[str, Any] = {}
+        # Server configs kept so MCP tools reach every child — including a
+        # child created lazily after the server was connected.
+        self._mcp_server_configs: Dict[str, Dict[str, Any]] = {}
 
         self.message_count = 0
         self.last_checkpoint_message_count = 0
@@ -451,6 +455,8 @@ class MetaOrchestratorAgent:
                 restore_checkpoint=restore,
                 analysis_mode=AnalysisMode.CO_PILOT,
             )
+            # Share any MCP servers already connected on the meta.
+            self._propagate_mcp_to_child(self._children["analysis"])
         return self._children["analysis"]
 
     def _get_planning_child(self):
@@ -485,6 +491,8 @@ class MetaOrchestratorAgent:
                 autonomy_level=AutonomyLevel.CO_PILOT,
                 data_dir=None,
             )
+            # Share any MCP servers already connected on the meta.
+            self._propagate_mcp_to_child(self._children["planning"])
         return self._children["planning"]
 
     # =========================================================================
@@ -499,11 +507,14 @@ class MetaOrchestratorAgent:
         url: str = None,
         env: dict = None,
     ) -> int:
-        """Connect to an MCP server and register its tools on the meta.
+        """Connect to an MCP server and register its tools on the meta and
+        every specialist child.
 
-        The registered tools become directly callable by the meta LLM,
-        alongside the ``delegate_to_*`` tools — so an MCP server (filesystem,
-        database, web, ...) extends the meta itself, not a child orchestrator.
+        The tools become callable by the meta LLM (alongside the
+        ``delegate_to_*`` tools) AND by each analysis / planning child during
+        a delegation. The server config is recorded so a child created later
+        picks it up too. Each agent holds its own connection — an MCP stdio
+        server is spawned once per agent (meta + each created child).
 
         Args:
             server_name: Human-readable label for this server.
@@ -513,7 +524,7 @@ class MetaOrchestratorAgent:
             env: Optional environment variables for the subprocess.
 
         Returns:
-            Number of tools registered from this server.
+            Number of tools registered on the meta from this server.
         """
         from ...mcp_client import MCPConnection
 
@@ -567,7 +578,15 @@ class MetaOrchestratorAgent:
             registered += 1
 
         self._mcp_connections[server_name] = conn
+        self._mcp_server_configs[server_name] = {
+            "command": command, "url": url, "env": env,
+        }
         logging.info(f"✅ MCP '{server_name}': registered {registered} tool(s)")
+
+        # Propagate to every already-created specialist child. Children
+        # created later replay _mcp_server_configs in _get_*_child.
+        for child in self._children.values():
+            self._connect_mcp_on_child(child, server_name)
         return registered
 
     def disconnect_mcp_server(self, server_name: str) -> None:
@@ -598,12 +617,51 @@ class MetaOrchestratorAgent:
         for name in names_to_remove:
             self.tools.functions_map.pop(name, None)
 
+        # Tear the server down on every specialist child too.
+        self._mcp_server_configs.pop(server_name, None)
+        for child in self._children.values():
+            try:
+                child.disconnect_mcp_server(server_name)
+            except Exception as e:  # noqa: BLE001
+                self.logger.warning(
+                    f"Could not disconnect MCP '{server_name}' on "
+                    f"{type(child).__name__}: {e}"
+                )
+
         logging.info(f"🔌 MCP '{server_name}' disconnected.")
 
     def disconnect_all_mcp_servers(self) -> None:
         """Disconnect from all connected MCP servers."""
         for name in list(self._mcp_connections):
             self.disconnect_mcp_server(name)
+
+    def _connect_mcp_on_child(self, child, server_name: str) -> None:
+        """Connect one recorded MCP server onto a child orchestrator.
+
+        Failures are logged, not raised — a child stays usable without an
+        MCP server, and one bad child must not break the meta's connection.
+        """
+        cfg = self._mcp_server_configs.get(server_name)
+        if cfg is None:
+            return
+        try:
+            child.connect_mcp_server(
+                server_name,
+                command=cfg.get("command"),
+                url=cfg.get("url"),
+                env=cfg.get("env"),
+            )
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning(
+                f"Could not connect MCP '{server_name}' on "
+                f"{type(child).__name__}: {e}"
+            )
+
+    def _propagate_mcp_to_child(self, child) -> None:
+        """Replay every recorded MCP server onto a freshly created child, so
+        a child instantiated after the connection still shares the tools."""
+        for server_name in self._mcp_server_configs:
+            self._connect_mcp_on_child(child, server_name)
 
     # =========================================================================
     # Specialist capability inventory
