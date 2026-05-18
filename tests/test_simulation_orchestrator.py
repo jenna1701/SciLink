@@ -99,6 +99,7 @@ EXPECTED_TOOLS = {
     "list_generated_structures",
     "analyze_vasp_output",
     "suggest_incar_fixes",
+    "route_simulation",
     # HPC tools
     "submit_vasp_job",
     "get_job_status",

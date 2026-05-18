@@ -86,7 +86,7 @@ are loaded AND what the user has installed locally.
 **Routing first:**
 On any new simulation request, call `route_simulation` BEFORE
 generating structures or inputs. The router returns
-{scale, engine, reasoning, candidates_considered} based on the user's
+{{scale, engine, reasoning, candidates_considered}} based on the user's
 goal, the system, and what's actually available. Once a routing
 decision exists in the session, plan subsequent tool calls around
 that engine (don't re-route on every turn unless the user pivots).
