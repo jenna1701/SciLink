@@ -601,6 +601,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             lit_p = Path(literature_file)
             if lit_p.is_file():
                 state["literature_context"] = lit_p.read_text()
+                # Record provenance so the result reflects that literature
+                # was consulted — the in-pipeline LiteratureSearchController
+                # is skipped on this path and never populates literature_files.
+                state["literature_files"] = {"provided_file": str(lit_p)}
                 self.logger.info(f"📚 Loaded literature context from {lit_p.name}")
             else:
                 self.logger.warning(f"literature_file not found: {literature_file}")

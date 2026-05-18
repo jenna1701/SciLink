@@ -589,7 +589,8 @@ class GenerateCurveFittingReportController:
                 or []
             )
         candidates_html = self._format_candidate_identifications(
-            candidate_identifications
+            candidate_identifications,
+            literature_used=bool(state.get("literature_context")),
         )
 
         html_content = self._build_html_report(
@@ -742,13 +743,17 @@ class GenerateCurveFittingReportController:
             <tbody>{rows}</tbody>
         </table>"""
 
-    def _format_candidate_identifications(self, candidates) -> str:
+    def _format_candidate_identifications(self, candidates, literature_used: bool = False) -> str:
         """Render the id-mode ranked candidate list as an HTML section.
 
         Returns an empty string when `candidates` is empty or missing —
         so the rest of the report is unchanged for fitting-mode runs.
         Missing per-candidate fields fall back to "—" rather than
         raising; malformed entries are skipped.
+
+        `literature_used` controls the provenance caveat: when a literature
+        search was consulted, the disclaimer must not claim the candidates
+        rest on model knowledge alone.
         """
         if not candidates:
             return ""
@@ -790,10 +795,21 @@ class GenerateCurveFittingReportController:
         if not rows:
             return ""
 
+        if literature_used:
+            provenance = (
+                "Candidates enumerated by the model from the spectral evidence "
+                "and a consulted literature search; ranks and consistency grades "
+                "remain qualitative model judgments (not database-verified)."
+            )
+        else:
+            provenance = (
+                "LLM-enumerated candidates from the spectral evidence; ranks and "
+                "consistency grades are qualitative LLM judgments (not database-verified)."
+            )
+
         return f"""
         <h2>Candidate Identifications (id-mode)</h2>
-        <p><em>LLM-enumerated candidates from the spectral evidence; ranks and
-        consistency grades are qualitative LLM judgments (not database-verified).
+        <p><em>{provenance}
         Use <strong>Distinguishing evidence</strong> to plan a follow-up measurement
         that would separate the top candidates.</em></p>
         <table class="params-table">

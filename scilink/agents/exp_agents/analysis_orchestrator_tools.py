@@ -2516,6 +2516,7 @@ class AnalysisOrchestratorTools:
                     "agent_name": self.AGENT_NAMES.get(agent_id),
                     "status": result.get("status"),
                     "output_directory": str(analysis_output_dir),
+                    "literature_file": literature_file,
                     "full_result": result,
                     "novelty_assessment": None
                 }
