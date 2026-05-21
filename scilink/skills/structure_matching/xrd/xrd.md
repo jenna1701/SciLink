@@ -33,6 +33,30 @@ with the XRD analysis module, mp-api, pulp).
 
 ## planning
 
+**This skill is a tool-driven workflow, not a closed-form peak fit.**
+When this skill is active, your `physical_model` and `fitting_strategy`
+fields MUST describe the tool chain — not "N Pseudo-Voigt peaks" or
+similar. Even when the metadata names a chemistry (`chemistry_hint`),
+go through `search_structures` to *find* the specific structure entry
+(material_id, lattice parameter, exact symmetry) rather than hardcoding
+peak positions from training-data knowledge. The whole point of the
+skill is that the database, not your prior, is the source of truth.
+
+**Required JSON plan format when this skill is active:**
+
+```json
+{
+    "observations": "XRD pattern of <something>; <N> dominant peaks in <range> 2theta",
+    "analysis_approach": "Database-driven phase identification: search structures, simulate XRD per candidate, score match by R-factor / FOM",
+    "physical_model": "Tool-driven workflow: search_structures + simulate_xrd_pattern + score_xrd_match_fast + extract_peaks + score_xrd_match_robust",
+    "parameters_to_extract": ["best_match_formula", "best_match_id", "best_match_space_group", "figure_of_merit", "verdict", "fitted_zero_shift", "fitted_lattice_scale"],
+    "fitting_strategy": "Step 1: search_structures(query={chemistry: <hint or inferred>, top_n: 5}). Step 2: simulate_xrd_pattern per candidate. Step 3: score_xrd_match_fast for triage. Step 4: extract_peaks(experimental). Step 5: score_xrd_match_robust(algorithm='hanawalt') for survivors. Step 6: rank by FOM and report.",
+    "literature_query": null
+}
+```
+
+Do NOT emit a peak-fitting plan (`physical_model: "5 Pseudo-Voigt peaks ..."`) — that bypasses the skill's purpose.
+
 **Two-tier identification workflow** — both tiers usually run, never
 either-alone:
 

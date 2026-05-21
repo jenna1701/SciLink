@@ -1156,6 +1156,14 @@ class HumanFeedbackRefinementController:
 
         _append_auxiliary_context(prompt, state)
         _append_skill_context(prompt, state, "planning")
+        # The planner needs to know which tools are available so it can plan
+        # around them when the active skill prescribes a tool-driven workflow
+        # (e.g. structure_matching/xrd's search → simulate → score). Without
+        # this, the planner emits a peak-fitting plan from training-data
+        # priors even when the skill markdown names specific tools.
+        tool_inventory = _tool_inventory_text(state)
+        if tool_inventory:
+            prompt.append("\n" + tool_inventory)
         _append_prior_knowledge_context(prompt, state)
         _prior_runs = _prior_curve_fit_block(state)
         if _prior_runs:
