@@ -2063,11 +2063,6 @@ not style preferences.
 - Decay/kinetics (exponential, stretched exponential, power law)
 - Derivative spectroscopy
 - Peak detection and integration
-- **Tool-driven workflows** (when the skill names registered tools that you should chain — \
-e.g. database lookup + simulation + scoring rather than a closed-form fit). When the skill's \
-**MANDATORY Domain Skill Rules** section prescribes calling specific tools listed under \
-**Available Tools** (if shown), `physical_model` and `fitting_strategy` MUST describe the tool \
-chain, not a closed-form math expression. See the tool-workflow output format below.
 
 **Commit to specific choices — do NOT hedge:**
 - State ONE model type, not alternatives (write "Voigt profiles" not "Gaussian or Voigt")
@@ -2077,7 +2072,7 @@ chain, not a closed-form math expression. See the tool-workflow output format be
   the user can refine before the plan is locked
 - This plan will be translated directly into code; any ambiguity forces the code generator to guess
 
-**Output Format (closed-form fit):**
+**Output Format:**
 ```json
 {
     "observations": "What you see in the data",
@@ -2088,25 +2083,6 @@ chain, not a closed-form math expression. See the tool-workflow output format be
     "literature_query": "Question for literature search to help with fitting, or null if not needed"
 }
 ```
-
-**Output Format (tool-driven workflow):** When the active skill prescribes a tool chain \
-(e.g. an XRD identification workflow built from `search_structures` + `simulate_xrd_pattern` + \
-`score_xrd_match_*`), `physical_model` is the named workflow and `fitting_strategy` is the \
-ordered tool sequence — not a peak-fitting model:
-```json
-{
-    "observations": "What you see in the data",
-    "analysis_approach": "Database-driven phase identification via search → simulate → score",
-    "physical_model": "Tool-driven workflow: search_structures → simulate_xrd_pattern → score_xrd_match_robust",
-    "parameters_to_extract": ["best_match_formula", "best_match_id", "figure_of_merit", "verdict"],
-    "fitting_strategy": "Step 1: search_structures(query={chemistry: ...}) for top-N candidates. Step 2: simulate_xrd_pattern per candidate. Step 3: score_xrd_match_fast for triage. Step 4: extract_peaks + score_xrd_match_robust for confident identification.",
-    "literature_query": null
-}
-```
-Do NOT mix the two output formats. If the active skill names tools, use the tool-workflow form. \
-Do NOT name an XRD-style "5 pseudo-Voigt peaks" model when the skill's planning section tells \
-you to chain `search_structures` + `simulate_xrd_pattern` + `score_xrd_match_*`. \
-A registered tool exists for a reason; bypassing it with a closed-form fit is a plan violation.
 """
 
 
@@ -2185,12 +2161,9 @@ methods (e.g., Shirley background, Voigt line shapes, spin-orbit constraints) th
 substituted with alternatives.
 - If the Context skill rules prescribe a workflow that uses **registered tools** \
 (see "Available Tools" below — e.g. `search_structures`, `simulate_xrd_pattern`, `score_xrd_match_*`), \
-you MUST import and call those tools in your script. **Use the `**Import:**` line from each tool's \
-entry VERBATIM** — do not guess the module path, do not relocate the function to a different \
-package name (e.g. `scilink.agents.skills.*` does NOT exist; the canonical path is the one \
-written in the **Import:** line). Do not reimplement what a registered tool provides; do not \
-bypass a tool with hardcoded values (e.g. do not hardcode reference peak positions when \
-`simulate_xrd_pattern` is available).
+you MUST import and call those tools in your script. Do not reimplement what a registered tool \
+provides; do not bypass a tool with hardcoded values (e.g. do not hardcode reference peak positions \
+when `simulate_xrd_pattern` is available).
 Deviations are acceptable ONLY when they are obvious from the data dimensions provided \
 (e.g., more parameters than data points). In such cases, implement the closest viable model \
 and document the deviation and reasoning in the results `"deviation_note"` field. \
