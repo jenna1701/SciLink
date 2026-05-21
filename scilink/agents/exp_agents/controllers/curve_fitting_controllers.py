@@ -32,6 +32,38 @@ from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
 
+def _parse_script_markers(stdout: Optional[str]) -> dict:
+    """Parse FIT_RESULTS_JSON and DB_MATCHES_JSON markers from script stdout.
+
+    The first parseable ``FIT_RESULTS_JSON:`` line wins. Once that marker
+    has been seen (even with malformed JSON) later instances are ignored —
+    matches the long-standing first-wins behavior.
+
+    ``DB_MATCHES_JSON:`` is emitted by ``search_structures`` in the
+    structure_matching skill. When present, the parsed payload is merged
+    in at ``fit_results['db_matches']`` so the synthesis stage and HTML
+    report can surface candidates without per-script glue code.
+    """
+    fit_results: dict = {}
+    fit_seen = False
+    db_matches: Optional[dict] = None
+    for line in (stdout or "").splitlines():
+        if line.startswith("FIT_RESULTS_JSON:") and not fit_seen:
+            fit_seen = True
+            try:
+                fit_results = json.loads(line.replace("FIT_RESULTS_JSON:", "").strip())
+            except json.JSONDecodeError:
+                pass
+        elif line.startswith("DB_MATCHES_JSON:") and db_matches is None:
+            try:
+                db_matches = json.loads(line.replace("DB_MATCHES_JSON:", "").strip())
+            except json.JSONDecodeError:
+                pass
+    if db_matches is not None:
+        fit_results.setdefault("db_matches", db_matches)
+    return fit_results
+
+
 def _resolve_parallel_workers(value: Optional[int]) -> int:
     """Resolve the effective non-anchor worker count.
 
@@ -1990,14 +2022,7 @@ Your guidance: '''
                 "script_errors": script_errors,
             }
         
-        fit_results = {}
-        for line in (exec_result.get("stdout") or "").splitlines():
-            if line.startswith("FIT_RESULTS_JSON:"):
-                try:
-                    fit_results = json.loads(line.replace("FIT_RESULTS_JSON:", "").strip())
-                except json.JSONDecodeError:
-                    pass
-                break
+        fit_results = _parse_script_markers(exec_result.get("stdout"))
         
         viz_path = self.output_dir / f"{output_prefix}_fit.png"
         if not viz_path.exists():
