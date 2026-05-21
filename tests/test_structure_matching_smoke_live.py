@@ -8,7 +8,7 @@ land in fit_results, and synthesis references the matched candidates.
 Runs only when:
     - LLM key present (ANTHROPIC_API_KEY or GEMINI_API_KEY)
     - MP_API_KEY present (so the MP backend is queryable)
-    - pymatgen-analysis-diffraction installed
+    - full pymatgen (with analysis.diffraction.xrd) installed
     - UNSAFE_EXECUTION_OK=true (required by the curve-fitting executor)
 
 Manual invocation:
@@ -47,7 +47,7 @@ pytestmark = [
     ),
     pytest.mark.skipif(
         not (MP_API_AVAILABLE and PYMATGEN_XRD_AVAILABLE),
-        reason="mp-api or pymatgen-analysis-diffraction not installed; install scilink[structure-matching]",
+        reason="mp-api or pymatgen XRD analysis module not installed; install scilink[structure-matching]",
     ),
 ]
 
