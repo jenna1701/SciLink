@@ -3934,7 +3934,7 @@ class OrchestratorTools:
             """Query a knowledge data file or directory database with natural language."""
             import subprocess
 
-            print(f"  ⚡ Tool: Querying knowledge data: '{query[:80]}...'")
+            print(f"  ⚡ Tool: Querying knowledge data: '{query}'")
 
             # 1. Discover queryable files / directory databases. Informational
             #    only — an explicit `file_name` path is resolved directly below,
@@ -4169,7 +4169,7 @@ class OrchestratorTools:
             import subprocess
             from scilink.executors import require_sandbox_approval
 
-            print(f"  ⚡ Tool: screen_database  '{query[:80]}'  top_k={top_k}")
+            print(f"  ⚡ Tool: screen_database  '{query}'  top_k={top_k}")
 
             if not require_sandbox_approval(
                 interactive=True, allow_override=True,
