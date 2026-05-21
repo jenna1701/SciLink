@@ -2159,6 +2159,11 @@ FITTING_SCRIPT_INSTRUCTIONS = """Write a curve fitting script for spectroscopic 
 binding constraints that MUST be followed in your implementation. Skill rules specify required \
 methods (e.g., Shirley background, Voigt line shapes, spin-orbit constraints) that cannot be \
 substituted with alternatives.
+- If the Context skill rules prescribe a workflow that uses **registered tools** \
+(see "Available Tools" below — e.g. `search_structures`, `simulate_xrd_pattern`, `score_xrd_match_*`), \
+you MUST import and call those tools in your script. Do not reimplement what a registered tool \
+provides; do not bypass a tool with hardcoded values (e.g. do not hardcode reference peak positions \
+when `simulate_xrd_pattern` is available).
 Deviations are acceptable ONLY when they are obvious from the data dimensions provided \
 (e.g., more parameters than data points). In such cases, implement the closest viable model \
 and document the deviation and reasoning in the results `"deviation_note"` field. \
@@ -2175,6 +2180,8 @@ plan as specified and let the retry pipeline handle actual runtime failures.
 - Points: {n_points}
 - X: [{x_min:.6g}, {x_max:.6g}]
 - Y: [{y_min:.6g}, {y_max:.6g}]
+
+{tool_inventory}
 
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
 
@@ -2220,6 +2227,8 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
 ```
 {error_message}
 ```
+
+{tool_inventory}
 
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
 

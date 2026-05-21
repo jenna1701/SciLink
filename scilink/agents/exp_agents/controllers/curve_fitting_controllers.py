@@ -32,6 +32,33 @@ from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
 
+def _active_skill_names(state: dict) -> list[str]:
+    """Return names of all currently-loaded skills from a pipeline state dict.
+
+    Mirrors the image_analysis helper of the same name. Falls back to the
+    legacy singular ``skill_name`` field when ``skills_loaded`` is absent.
+    """
+    loaded = state.get("skills_loaded")
+    if loaded:
+        return [s.get("name") for s in loaded if s and s.get("name")]
+    legacy = state.get("skill_name")
+    return [legacy] if legacy else []
+
+
+def _tool_inventory_text(state: dict) -> str:
+    """Render the curve-fitting tool inventory for the active skills.
+
+    Returns an empty string when no skill is active and no shared tools
+    target the curve_fitting agent — avoids polluting prompts with an
+    empty "Available Tools" header.
+    """
+    from ...skills._shared._registry import format_tool_inventory
+
+    return format_tool_inventory(
+        "curve_fitting", active_skills=_active_skill_names(state),
+    )
+
+
 def _parse_script_markers(stdout: Optional[str]) -> dict:
     """Parse FIT_RESULTS_JSON and DB_MATCHES_JSON markers from script stdout.
 
@@ -1680,6 +1707,7 @@ Your guidance: '''
             x_max=stats["x_range"][1],
             y_min=stats["y_range"][0],
             y_max=stats["y_range"][1],
+            tool_inventory=_tool_inventory_text(state),
         )
 
         if prior_script:
@@ -1734,6 +1762,7 @@ Your guidance: '''
             physical_model=config.get("physical_model", ""),
             failed_script=script,
             error_message=error_msg,
+            tool_inventory=_tool_inventory_text(state),
         )
         skill_sections = state.get("skill_sections")
         if skill_sections and skill_sections.get("analysis"):
