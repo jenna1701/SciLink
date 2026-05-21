@@ -59,6 +59,33 @@ def _tool_inventory_text(state: dict) -> str:
     )
 
 
+_WORKFLOW_OVERRIDE = """
+## CRITICAL OVERRIDE — Workflow Plan Required (last instruction)
+
+The **Available Tools** section above is non-empty: the currently-active
+skill registers tools for the curve_fitting agent. When this is the
+case, the plan format you MUST emit is the **tool-driven workflow** form
+(not the closed-form fit form):
+
+- `physical_model` MUST describe the tool chain (e.g. `"Tool-driven
+  workflow: search_structures + simulate_xrd_pattern +
+  score_xrd_match_robust"`) — NOT a closed-form expression like
+  `"5 Pseudo-Voigt peaks at the known Si reflections"`.
+- `fitting_strategy` MUST be an ordered tool sequence (Step 1 ...
+  Step N), each step naming a specific tool from the inventory.
+- `parameters_to_extract` MUST be the tool outputs (e.g.
+  `["best_match_formula", "figure_of_merit", "verdict"]`) — NOT peak
+  parameters (`"center"`, `"amplitude"`, `"fwhm"`).
+
+A closed-form `physical_model` when tools are registered is a HARD
+violation of the active skill's contract. The skill's planning section
+above shows the exact JSON shape — emit it. Metadata that names a
+chemistry (e.g. `chemistry_hint: ["Si"]`) is a query hint for
+`search_structures`, NOT permission to bypass the search/simulate/score
+pipeline with hardcoded reference peak positions.
+"""
+
+
 def _parse_script_markers(stdout: Optional[str]) -> dict:
     """Parse FIT_RESULTS_JSON and DB_MATCHES_JSON markers from script stdout.
 
@@ -1156,14 +1183,6 @@ class HumanFeedbackRefinementController:
 
         _append_auxiliary_context(prompt, state)
         _append_skill_context(prompt, state, "planning")
-        # The planner needs to know which tools are available so it can plan
-        # around them when the active skill prescribes a tool-driven workflow
-        # (e.g. structure_matching/xrd's search → simulate → score). Without
-        # this, the planner emits a peak-fitting plan from training-data
-        # priors even when the skill markdown names specific tools.
-        tool_inventory = _tool_inventory_text(state)
-        if tool_inventory:
-            prompt.append("\n" + tool_inventory)
         _append_prior_knowledge_context(prompt, state)
         _prior_runs = _prior_curve_fit_block(state)
         if _prior_runs:
@@ -1191,6 +1210,16 @@ class HumanFeedbackRefinementController:
                 f"\n## Series Context\nThis is the first spectrum in a series of {num_spectra}. "
                 "The fitting model you choose will be applied to ALL spectra in the series."
             )
+
+        # Tool inventory + workflow override LAST — so the LLM reads it right
+        # before generating its plan. Mid-prompt placement was overridden by
+        # the CURVE_ANALYSIS_INSTRUCTIONS' peak-fitting bias and the
+        # chemistry_hint in metadata; "last instruction wins" puts the
+        # tool-workflow requirement on top.
+        tool_inventory = _tool_inventory_text(state)
+        if tool_inventory:
+            prompt.append("\n" + tool_inventory)
+            prompt.append(_WORKFLOW_OVERRIDE)
 
         response = self.model.generate_content(prompt, generation_config=self.generation_config)
         result, error = self._parse(response)
