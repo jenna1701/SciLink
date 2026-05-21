@@ -58,9 +58,19 @@ TOOL_SPEC = ToolSpec(
         "query": {
             "type": "dict",
             "description": (
-                "Spec: {chemistry: list[str] (required), space_group_hints?: "
-                "list[int], lattice_param_ranges?: {a: (min,max), ...}, "
-                "max_e_above_hull?: float, top_n?: int (default 10)}"
+                "Spec: {chemistry: list[str] OR list[list[str]] (required), "
+                "space_group_hints?: list[int], lattice_param_ranges?: "
+                "{a: (min,max), ...}, max_e_above_hull?: float, top_n?: int "
+                "(default 10, per chemistry hypothesis).\n\n"
+                "Use a single list for one hypothesis: chemistry=['Ti','O']. "
+                "Use a list of lists when the chemistry is unknown and you "
+                "want to test multiple candidates in one call: "
+                "chemistry=[['Si'], ['C'], ['Ge']]. Each sublist becomes "
+                "its own database query; results are merged + deduped + "
+                "ranked across all hypotheses. This is the canonical way "
+                "to handle the post-fit (no-hint) path — one search_structures "
+                "call covering several element hypotheses, never multiple "
+                "calls from inside a loop."
             ),
         },
         "sources": {
@@ -101,30 +111,44 @@ def search_structures(
     output_dir: str = "./candidates",
 ) -> dict[str, Any]:
     """Query structure databases. See ``TOOL_SPEC`` for full contract."""
-    spec = _coerce_query_spec(query)
+    specs = _coerce_query_specs(query)
     warnings: list[str] = []
 
     backends = _build_backends(sources, warnings)
     if not backends:
-        result = {"candidates": [], "sources_queried": [], "warnings": warnings or ["No backends available"]}
+        result = {
+            "candidates": [], "sources_queried": [],
+            "warnings": warnings or ["No backends available"],
+        }
         _emit_db_matches_marker(result)
         return result
 
     accumulated: list[StructureCandidate] = []
     sources_queried: list[str] = []
-    for backend in backends:
-        try:
-            results = backend.query(spec)
-        except Exception as e:
-            warnings.append(f"{backend.name} backend raised: {e}")
-            _logger.warning("Backend %s failed: %s", backend.name, e)
-            continue
-        sources_queried.append(backend.name)
-        accumulated.extend(results)
+    queried_set: set[str] = set()
+    for spec in specs:
+        for backend in backends:
+            try:
+                results = backend.query(spec)
+            except Exception as e:
+                warnings.append(
+                    f"{backend.name} backend raised on chemistry={spec.chemistry}: {e}"
+                )
+                _logger.warning("Backend %s failed: %s", backend.name, e)
+                continue
+            if backend.name not in queried_set:
+                queried_set.add(backend.name)
+                sources_queried.append(backend.name)
+            accumulated.extend(results)
 
     deduped = _dedupe(accumulated)
     deduped.sort(key=lambda c: -c.rank_score)
-    deduped = deduped[:spec.top_n]
+    # Per-chemistry top_n still applies inside backend.query; here we cap the
+    # final merged + deduped list at the per-spec top_n * number of hypotheses
+    # so a 3-chemistry / top_n=5 call returns at most 15 candidates pre-dedup,
+    # whatever dedup produces after.
+    global_cap = max(spec.top_n for spec in specs) * max(len(specs), 1)
+    deduped = deduped[:global_cap]
 
     _materialize_cifs(deduped, Path(output_dir), warnings)
 
@@ -139,21 +163,62 @@ def search_structures(
 
 # --- Helpers ------------------------------------------------------------------
 
-def _coerce_query_spec(query: dict) -> QuerySpec:
+def _coerce_query_specs(query: dict) -> list[QuerySpec]:
+    """Return one QuerySpec per chemistry hypothesis.
+
+    Accepts both legacy single-hypothesis (``chemistry=["Ti", "O"]``) and
+    multi-hypothesis (``chemistry=[["Si"], ["C"], ["Ge"]]``) shapes. The
+    multi-hypothesis form is what the LLM should use for the no-hint
+    workflow path — one call covering several element hypotheses,
+    instead of looping over single-hypothesis calls (which historically
+    led to consolidation bugs).
+
+    The other QuerySpec fields (space_group_hints, lattice_param_ranges,
+    max_e_above_hull, top_n) are shared across hypotheses.
+    """
     chemistry = query.get("chemistry")
     if not chemistry:
-        raise ValueError("query.chemistry is required (non-empty list of element symbols)")
+        raise ValueError(
+            "query.chemistry is required (non-empty list of element symbols, "
+            "or a non-empty list-of-lists for multiple hypotheses)"
+        )
+    if not isinstance(chemistry, list):
+        raise ValueError(
+            f"query.chemistry must be a list, got {type(chemistry).__name__}"
+        )
+
+    # Normalize to list[list[str]].
+    if all(isinstance(c, str) for c in chemistry):
+        chemistries: list[list[str]] = [list(chemistry)]
+    elif all(isinstance(c, list) and c and all(isinstance(e, str) for e in c)
+              for c in chemistry):
+        chemistries = [list(c) for c in chemistry]
+    else:
+        raise ValueError(
+            "query.chemistry must be either a list[str] (single hypothesis, "
+            "e.g. ['Ti', 'O']) or a list[list[str]] (multiple hypotheses, "
+            "e.g. [['Si'], ['C'], ['Ge']])"
+        )
+
     lattice_ranges = query.get("lattice_param_ranges")
     if lattice_ranges:
         # JSON serialization turns tuples into lists; normalize back.
         lattice_ranges = {k: tuple(v) for k, v in lattice_ranges.items()}
-    return QuerySpec(
-        chemistry=list(chemistry),
-        space_group_hints=query.get("space_group_hints"),
-        lattice_param_ranges=lattice_ranges,
-        max_e_above_hull=query.get("max_e_above_hull"),
-        top_n=int(query.get("top_n", 10)),
-    )
+
+    space_group_hints = query.get("space_group_hints")
+    max_e = query.get("max_e_above_hull")
+    top_n = int(query.get("top_n", 10))
+
+    return [
+        QuerySpec(
+            chemistry=c,
+            space_group_hints=space_group_hints,
+            lattice_param_ranges=lattice_ranges,
+            max_e_above_hull=max_e,
+            top_n=top_n,
+        )
+        for c in chemistries
+    ]
 
 
 def _build_backends(

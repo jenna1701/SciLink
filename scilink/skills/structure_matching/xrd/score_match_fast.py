@@ -69,7 +69,7 @@ TOOL_SPEC = ToolSpec(
         },
         "scale_search": {
             "type": "tuple",
-            "description": "(min, max, step) lattice-scale grid. Default (0.99, 1.01, 0.0025) — 9 scales. Pass None to disable scale search (shift only).",
+            "description": "(min, max, step) lattice-scale grid. Default (0.98, 1.02, 0.002) — covers ±2% lattice-parameter mismatch. Pass None to disable scale search (shift only).",
         },
         "background": {
             "type": "str",
@@ -98,7 +98,7 @@ def score_xrd_match_fast(
     sim_intensity: Sequence[float],
     fwhm: float = 0.15,
     shift_search: tuple = (-0.5, 0.5),
-    scale_search: tuple | None = (0.99, 1.01, 0.0025),
+    scale_search: tuple | None = (0.98, 1.02, 0.002),
     background: str = "subtract_min",
 ) -> dict[str, Any]:
     """Cross-correlation fast scoring. See ``TOOL_SPEC`` for full contract."""

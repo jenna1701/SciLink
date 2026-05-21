@@ -61,7 +61,13 @@ either-alone:
 - **Post-fit pattern** — no chemistry hypothesis. Run `extract_peaks`
   first to estimate the dominant peak positions, infer an approximate
   lattice from the strongest peak via Bragg's law for a guessed crystal
-  system, then query with `lattice_param_ranges` to narrow the DB.
+  system, then make a **single** `search_structures` call with a
+  list-of-lists chemistry hypothesis (e.g.
+  `chemistry=[["Si"], ["C"], ["Ge"], ["Ti","O"]]`). The tool dispatches
+  one DB query per hypothesis, dedupes, and merges results. **Never
+  loop over single-chemistry `search_structures` calls** — that path
+  has historically broken on consolidation, and the tool is built to
+  handle multiple hypotheses in one invocation.
 
 **Bounding the candidate count.** Always set `search_structures(query={
 "top_n": N, ...})` with N in [3, 10]. More than 10 candidates per

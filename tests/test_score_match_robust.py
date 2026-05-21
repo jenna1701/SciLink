@@ -147,7 +147,35 @@ def test_hanawalt_unmatched_when_outside_tolerance():
     )
     # The first exp peak is 0.5 deg off, outside tol=0.3 → unmatched
     assert 0 in out["unmatched_exp"]
-    assert out["coverage"] == 2 / 3
+    # Coverage is intensity-weighted: peaks 1+2 carry (60+30)/(100+60+30) = 90/190
+    # of total intensity, so coverage ≈ 0.474 (not the 2/3 a plain count
+    # would give). This is the deliberate fix that prevents weak noise peaks
+    # from dragging coverage on otherwise-clean spectra.
+    assert out["coverage"] == pytest.approx(90 / 190, abs=0.001)
+
+
+def test_hanawalt_intensity_weighted_coverage_ignores_weak_noise_peaks():
+    """A clean 5-peak Si match with 10 weak noise peaks added should still
+    score near 1.0 coverage, because the noise peaks carry negligible
+    intensity."""
+    main_peaks = [(p, a) for p, a in zip(SI_PEAKS, SI_AMPS)]
+    # Add 10 "noise" peaks at random positions with tiny intensity.
+    noise_peaks = [(20.0 + 5.0 * i, 1.0) for i in range(10)]
+    all_peaks = main_peaks + noise_peaks
+    positions = [p for p, _ in all_peaks]
+    intensities = [a for _, a in all_peaks]
+    exp_pl = {"positions": positions, "intensities": intensities}
+
+    out = score_xrd_match_robust(
+        sim_two_theta=SI_PEAKS, sim_intensity=SI_AMPS,
+        exp_peaks=exp_pl,
+        algorithm="hanawalt",
+        tol_deg=0.3,
+    )
+    # Most of the noise peaks should be unmatched, but coverage stays high
+    # because they carry essentially zero intensity.
+    assert out["coverage"] > 0.95
+    assert out["verdict"] == "accept"
 
 
 # ---------------------------------------------------------------------------

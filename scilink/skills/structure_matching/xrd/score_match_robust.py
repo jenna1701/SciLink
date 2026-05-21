@@ -111,7 +111,7 @@ TOOL_SPEC = ToolSpec(
         },
         "scale_search": {
             "type": "tuple",
-            "description": "(min, max, step) lattice-scale grid for MIP. Default (0.99, 1.01, 0.0025). Ignored by hanawalt.",
+            "description": "(min, max, step) lattice-scale grid for MIP. Default (0.98, 1.02, 0.002) — covers ±2% lattice-parameter mismatch (typical between MP DFT-relaxed cells and experimental conditions). Ignored by hanawalt.",
         },
         "shift_search": {
             "type": "tuple",
@@ -152,7 +152,7 @@ def score_xrd_match_robust(
     tol_deg: float = 0.3,
     max_exp_peaks: int = 20,
     max_sim_peaks: int = 30,
-    scale_search: tuple = (0.99, 1.01, 0.0025),
+    scale_search: tuple = (0.98, 1.02, 0.002),
     shift_search: tuple = (-0.4, 0.4),
 ) -> dict[str, Any]:
     """Robust peak-list scoring. See ``TOOL_SPEC`` for full contract."""
@@ -277,12 +277,15 @@ def _score_hanawalt(
     used_sim = set()
     matched_peaks = []
     unmatched_exp = []
+    matched_exp_intensities: list[float] = []
 
     pos_scores = []
     int_scores = []
     weights = []
 
-    for i, (ep, ei_norm) in enumerate(zip(exp_pl.positions, exp_pl.intensities_norm)):
+    for i, (ep, ei_norm, ei_abs) in enumerate(
+        zip(exp_pl.positions, exp_pl.intensities_norm, exp_pl.intensities)
+    ):
         residuals = np.abs(sim_positions - ep)
         # Skip already-used sim peaks
         for j_used in used_sim:
@@ -302,14 +305,23 @@ def _score_hanawalt(
             "sim_pos": float(sim_positions[j]),
             "residual_deg": float(residuals[j]),
         })
+        matched_exp_intensities.append(float(ei_abs))
         pos_scores.append(pos_score * weight)
         int_scores.append(int_score * weight)
         weights.append(weight)
 
-    if exp_pl.n == 0:
-        coverage = 0.0
-    else:
+    # Intensity-weighted coverage: matching the strong peaks matters more than
+    # matching weak noise spikes that extract_peaks may have picked up. The
+    # original unweighted (matched / total) form penalized clean spectra with
+    # any noise peaks even when every meaningful peak was matched.
+    total_intensity = sum(exp_pl.intensities)
+    matched_intensity = sum(matched_exp_intensities)
+    if total_intensity > 0:
+        coverage = matched_intensity / total_intensity
+    elif exp_pl.n > 0:
         coverage = len(matched_peaks) / exp_pl.n
+    else:
+        coverage = 0.0
 
     if weights:
         mean_pos = sum(pos_scores) / sum(weights)

@@ -34,7 +34,7 @@ from scilink.skills.structure_matching.xrd.simulate_xrd import (
 
 _skip_no_xrd = pytest.mark.skipif(
     not PYMATGEN_XRD_AVAILABLE,
-    reason="pymatgen-analysis-diffraction not installed; pip install scilink[structure-matching]",
+    reason="pymatgen XRD analysis module not installed; pip install scilink[structure-matching]",
 )
 from scilink.skills.structure_matching.xrd.score_match_fast import (
     TOOL_SPEC as SCORE_FAST_TOOL_SPEC,
@@ -135,6 +135,95 @@ def test_search_query_requires_chemistry(tmp_path):
             sources=["local"],
             output_dir=str(tmp_path / "out"),
         )
+
+
+def test_search_multi_chemistry_hypothesis(tmp_path):
+    """list[list[str]] dispatches one query per sublist and merges."""
+    cif_dir = tmp_path / "cifs"
+    cif_dir.mkdir()
+    _write_cif(cif_dir / "si.cif", _silicon())
+    _write_cif(cif_dir / "diamond.cif", _diamond())
+
+    with patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(cif_dir)}):
+        result = search_structures(
+            query={"chemistry": [["Si"], ["C"]], "top_n": 3},
+            sources=["local"],
+            output_dir=str(tmp_path / "out"),
+        )
+
+    formulas = {c["formula"] for c in result["candidates"]}
+    assert "Si" in formulas
+    assert "C" in formulas
+    assert len(result["candidates"]) == 2  # one per chemistry
+
+
+def test_search_single_chemistry_unchanged(tmp_path):
+    """list[str] (legacy form) still works identically."""
+    cif_dir = tmp_path / "cifs"
+    cif_dir.mkdir()
+    _write_cif(cif_dir / "si.cif", _silicon())
+    _write_cif(cif_dir / "diamond.cif", _diamond())
+
+    with patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(cif_dir)}):
+        result = search_structures(
+            query={"chemistry": ["Si"]},  # single hypothesis
+            sources=["local"],
+            output_dir=str(tmp_path / "out"),
+        )
+    formulas = {c["formula"] for c in result["candidates"]}
+    assert formulas == {"Si"}
+
+
+def test_search_multi_chemistry_validates_shape(tmp_path):
+    with pytest.raises(ValueError, match="list\\[str\\]"):
+        search_structures(
+            query={"chemistry": [1, 2, 3]},  # ints, not strings
+            sources=["local"],
+            output_dir=str(tmp_path / "out"),
+        )
+    with pytest.raises(ValueError, match="list\\[str\\]"):
+        search_structures(
+            query={"chemistry": [["Si"], "C"]},  # mixed shapes
+            sources=["local"],
+            output_dir=str(tmp_path / "out"),
+        )
+    with pytest.raises(ValueError, match="list\\[str\\]"):
+        search_structures(
+            query={"chemistry": [[]]},  # empty sublist
+            sources=["local"],
+            output_dir=str(tmp_path / "out"),
+        )
+
+
+def test_search_multi_chemistry_warns_per_backend_failure(tmp_path):
+    """If a backend raises on chemistry=['Si'] but succeeds on ['C'], we get
+    one warning referencing 'Si' and candidates from 'C'."""
+    cif_dir = tmp_path / "cifs"
+    cif_dir.mkdir()
+    _write_cif(cif_dir / "diamond.cif", _diamond())
+
+    from scilink.skills.structure_matching._backends import (
+        LocalCIFBackend, QuerySpec, StructureCandidate,
+    )
+
+    original_query = LocalCIFBackend.query
+
+    def selective_raise(self, spec: QuerySpec):
+        if spec.chemistry == ["Si"]:
+            raise RuntimeError("simulated MP timeout for Si")
+        return original_query(self, spec)
+
+    with patch.object(LocalCIFBackend, "query", selective_raise), \
+         patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(cif_dir)}):
+        result = search_structures(
+            query={"chemistry": [["Si"], ["C"]]},
+            sources=["local"],
+            output_dir=str(tmp_path / "out"),
+        )
+
+    formulas = {c["formula"] for c in result["candidates"]}
+    assert "C" in formulas
+    assert any("chemistry=['Si']" in w for w in result["warnings"])
 
 
 def test_search_emits_db_matches_json(tmp_path):
