@@ -1,87 +1,99 @@
 ---
-description: XRD structure matching — query crystal-structure databases (Materials Project, local CIF), simulate kinematic patterns, score against experiment by R-factor and Rwp.
+description: XRD structure matching — query crystal-structure databases (Materials Project, local CIF), simulate kinematic patterns, score by cross-correlation (fast) and Hanawalt / MIP peak-matching (robust).
 ---
 # XRD Structure Matching Skill
 
 ## overview
 
 Identify a crystalline phase from an experimental X-ray diffraction (XRD)
-pattern by matching against database structures. Three tools chain together
-to give an end-to-end identification workflow:
+pattern by matching against database structures. The skill ships five
+tools the analysis script chains together:
 
-- `search_structures` — multi-backend database query (Materials Project,
-  local CIF directory, COD). Returns ranked candidates with materialized
-  CIF paths.
-- `simulate_xrd_pattern` — kinematic XRD pattern from a CIF via pymatgen's
-  XRDCalculator (CuKa default; any wavelength).
-- `score_xrd_match` — R-factor / Rwp / cosine similarity between simulated
-  and experimental patterns, with an accept/marginal/reject verdict.
+- `search_structures` — query Materials Project and / or a local CIF
+  directory for candidate structures (chemistry + symmetry filters).
+- `simulate_xrd_pattern` — kinematic XRD pattern from a CIF via pymatgen
+  (CuKa default; any wavelength supported).
+- `score_xrd_match_fast` — **fast tier**. Cross-correlation of the
+  broadened simulated pattern against the experiment, fitting zero-shift
+  and lattice scale jointly. Tens of milliseconds per candidate. Use for
+  on-the-fly ranking during an experiment or scout passes over many
+  candidates.
+- `extract_peaks` — extract a peak list from a continuous experimental
+  pattern (positions, intensities, FWHMs). Needed before the robust
+  tier; can also be called standalone to inspect / report peaks.
+- `score_xrd_match_robust` — **robust tier**. Peak-list-based scoring
+  with two algorithms: `'hanawalt'` (default, classical figure-of-merit
+  search-match) or `'mip'` (mixed-integer linear programming for joint
+  shift / scale / assignment optimization). Hundreds of milliseconds
+  per candidate. Use for confident identification on real-lab patterns
+  after the fast tier narrows the candidate list.
 
-The workflow supports two invocation patterns: **pre-fit** (chemistry is
-hypothesized up front — query DB, simulate, score) and **post-fit** (peak-
-fit experimental first to extract lattice parameters, then use those to
-filter the DB).
-
-This skill requires `pymatgen-analysis-diffraction` (install via
-`pip install scilink[structure-matching]`). The skill degrades gracefully
-when the package is absent — `search_structures` still works, but
-`simulate_xrd_pattern` raises a clear RuntimeError.
+Install dependencies: `pip install scilink[structure-matching]` (pymatgen
+with the XRD analysis module, mp-api, pulp).
 
 ## planning
 
-**Two invocation patterns. Pick one — never both in the same plan.**
+**Two-tier identification workflow** — both tiers usually run, never
+either-alone:
 
-**Pre-fit pattern** — use when the user/metadata names a chemistry
-hypothesis (e.g. "this is a TiO2 sample"):
+1. **Pre-fit / triage** with the **fast tier**. Query the DB for top-N
+   candidates (N between 5 and 10), simulate each one's pattern, run
+   `score_xrd_match_fast` on every candidate. Rank by correlation. This
+   establishes which candidates are even plausible — typically 3-4
+   survive the `verdict='accept'|'marginal'` filter; the others
+   (`verdict='reject'`) can be dropped.
 
-1. `search_structures(query={"chemistry": [...], "top_n": 5})` — pick
-   top_n ≤ 10 to bound simulation cost.
-2. For each candidate, `simulate_xrd_pattern(candidate.structure_path)`
-   on the same wavelength as the experiment.
-3. `score_xrd_match` each simulated pattern against the experimental data.
-4. Rank candidates by R-factor; report the best plus runners-up.
+2. **Confident identification** with the **robust tier**. Extract the
+   experimental peak list once with `extract_peaks`. For each surviving
+   candidate from step 1, run `score_xrd_match_robust(algorithm='hanawalt')`.
+   Report the best by figure-of-merit. Switch to `algorithm='mip'` when:
+   - The pattern is suspected multi-phase (mixture identification).
+   - You need the fitted zero-shift and lattice scale reported as
+     parameters (e.g., for downstream Rietveld initialization).
+   - Hanawalt's top candidates are within ~10% FOM of each other and you
+     want a provably optimal tie-breaker.
 
-**Post-fit pattern** — use when the user provides no chemistry hypothesis
-and you need to identify the phase from peak positions alone:
+**Two invocation modes for step 1:**
 
-1. Peak-fit the experimental pattern (Lorentzian or pseudo-Voigt peaks
-   with a low-order polynomial background) to extract peak positions.
-2. Estimate lattice parameters from the strongest peaks via Bragg's law
-   for a guessed crystal system (cubic is the simplest first guess; for
-   non-cubic add the relevant peak indexing).
-3. `search_structures(query={"chemistry": [inferred from metadata or
-   left broad], "lattice_param_ranges": {"a": (a_est-0.2, a_est+0.2)}})`
-   — narrow the search with extracted parameters.
-4. Steps 2-4 of the pre-fit pattern.
+- **Pre-fit pattern** — chemistry is hypothesized by the user / metadata
+  (e.g. "this is a TiO2 sample"). Query DB with `chemistry=[...]`,
+  optionally a `space_group_hints` list if the user names a polymorph.
+- **Post-fit pattern** — no chemistry hypothesis. Run `extract_peaks`
+  first to estimate the dominant peak positions, infer an approximate
+  lattice from the strongest peak via Bragg's law for a guessed crystal
+  system, then query with `lattice_param_ranges` to narrow the DB.
 
-**Bounding the candidate count.** Always set `top_n` between 3 and 10.
-More than 10 simulations per spectrum bloats runtime without
-adding identification certainty — if the answer isn't in the top 5, it's
-usually a sign the query chemistry is wrong, not that you need more
-candidates.
+**Bounding the candidate count.** Always set `search_structures(query={
+"top_n": N, ...})` with N in [3, 10]. More than 10 candidates per
+spectrum bloats simulation cost without adding identification certainty
+— if the answer isn't in the top 5, the chemistry hypothesis is usually
+wrong, not the candidate count.
 
-**Wavelength selection.** Default to CuKa unless the experiment metadata
-says otherwise. MoKa is common for high-2θ work. Mismatched wavelength
-between simulation and experiment will yield uniformly bad R-factors for
-all candidates — if every candidate scores "reject" with a large constant
-offset in peak positions, suspect a wavelength mismatch first.
+**Wavelength selection.** Default CuKa unless the experiment metadata
+says otherwise. MoKa is common for high-2θ work. A wavelength mismatch
+gives uniformly bad correlations / FOMs for all candidates with a
+characteristic shift in peak positions — suspect that first when every
+candidate scores reject.
 
 ## analysis
 
 **CRITICAL: structure-matching workflow.** The per-item analysis script
-must follow this exact sequence for the pre-fit pattern:
+must follow this exact sequence:
 
-1. Load experimental 2-theta, intensity arrays.
-2. Call `search_structures` once with a bounded `top_n`.
-3. For each candidate, call `simulate_xrd_pattern` and `score_xrd_match`.
-4. Emit a `MATCH_RESULTS_JSON: {...}` line to stdout collecting the
-   ranked match list, and a `FIT_RESULTS_JSON: {...}` line with
-   identification verdict + best-match metadata.
+1. Load experimental 2-theta + intensity arrays.
+2. Call `search_structures` once with `top_n` between 3 and 10.
+3. For each candidate, call `simulate_xrd_pattern` and `score_xrd_match_fast`.
+4. Filter to candidates with `verdict in {'accept', 'marginal'}`.
+5. Call `extract_peaks` once on the experimental pattern.
+6. For each surviving candidate, call `score_xrd_match_robust` (default
+   `algorithm='hanawalt'`).
+7. Emit a `MATCH_RESULTS_JSON: {...}` line collecting the ranked match
+   list, and a `FIT_RESULTS_JSON: {...}` line with verdict + best-match
+   metadata. The `search_structures` tool already prints its own
+   `DB_MATCHES_JSON:` marker; the framework's stdout parser lifts it
+   into `fit_results['db_matches']` automatically.
 
-The `search_structures` tool already prints its own `DB_MATCHES_JSON:`
-marker; do not re-emit it. The framework parser picks it up automatically.
-
-**Complete pre-fit template** — adapt for the active wavelength and
+**Complete two-tier template** — adapt for the active wavelength and
 chemistry hypothesis:
 
 ```python
@@ -90,7 +102,9 @@ import numpy as np
 
 from scilink.skills.structure_matching.xrd.search_structures import search_structures
 from scilink.skills.structure_matching.xrd.simulate_xrd import simulate_xrd_pattern
-from scilink.skills.structure_matching.xrd.score_match import score_xrd_match
+from scilink.skills.structure_matching.xrd.score_match_fast import score_xrd_match_fast
+from scilink.skills.structure_matching.xrd.score_match_robust import score_xrd_match_robust
+from scilink.skills.structure_matching.xrd.extract_peaks import extract_peaks
 
 # ---- Step 1: Load experimental pattern ----
 data = np.loadtxt(DATA_PATH, delimiter=',', skiprows=1)
@@ -102,126 +116,165 @@ hits = search_structures(
     output_dir="./candidates",
 )
 
-# ---- Step 3 & 4: Simulate + score each candidate ----
+# ---- Step 3: Fast tier — broad ranking ----
 WAVELENGTH = "CuKa"
-results = []
+two_theta_range = (float(exp_2theta.min()), float(exp_2theta.max()))
+fast_results = []
 for cand in hits["candidates"]:
     sim = simulate_xrd_pattern(
-        cand["structure_path"],
-        wavelength=WAVELENGTH,
-        two_theta_range=(float(exp_2theta.min()), float(exp_2theta.max())),
+        cand["structure_path"], wavelength=WAVELENGTH,
+        two_theta_range=two_theta_range,
     )
-    score = score_xrd_match(
+    fast = score_xrd_match_fast(
         exp_two_theta=exp_2theta.tolist(),
         exp_intensity=exp_intensity.tolist(),
         sim_two_theta=sim["two_theta"],
         sim_intensity=sim["intensities"],
     )
-    results.append({
-        "id": cand["id"],
-        "source": cand["source"],
-        "formula": cand["formula"],
-        "space_group": cand["space_group"],
-        "r_factor": score["r_factor"],
-        "rwp": score["rwp"],
-        "verdict": score["verdict"],
+    fast_results.append({**cand, "fast": fast, "sim_peaks": sim})
+
+# ---- Step 4: Filter to plausible candidates ----
+plausible = [r for r in fast_results if r["fast"]["verdict"] in {"accept", "marginal"}]
+if not plausible:
+    plausible = sorted(fast_results, key=lambda r: -r["fast"]["correlation"])[:3]
+
+# ---- Step 5: Extract experimental peaks once ----
+exp_peaks = extract_peaks(exp_2theta.tolist(), exp_intensity.tolist())
+
+# ---- Step 6: Robust tier — confident identification ----
+final = []
+for r in plausible:
+    robust = score_xrd_match_robust(
+        sim_two_theta=r["sim_peaks"]["two_theta"],
+        sim_intensity=r["sim_peaks"]["intensities"],
+        exp_peaks=exp_peaks,
+        algorithm="hanawalt",  # change to 'mip' for multi-phase / fitted parameters
+    )
+    final.append({
+        "id": r["id"], "source": r["source"], "formula": r["formula"],
+        "space_group": r["space_group"],
+        "correlation_fast": r["fast"]["correlation"],
+        "figure_of_merit": robust["figure_of_merit"],
+        "verdict": robust["verdict"],
+        "fitted_shift_fast": r["fast"]["fitted_shift"],
+        "fitted_scale_fast": r["fast"]["fitted_scale"],
     })
 
-results.sort(key=lambda r: r["r_factor"])
-best = results[0] if results else None
+final.sort(key=lambda r: -r["figure_of_merit"])
+best = final[0] if final else None
 
-# ---- Step 5: Emit ranked match list + fit results ----
-print("MATCH_RESULTS_JSON: " + json.dumps(results))
+# ---- Step 7: Emit ranked match list + fit results ----
+print("MATCH_RESULTS_JSON: " + json.dumps(final))
 print("FIT_RESULTS_JSON: " + json.dumps({
     "best_match": best,
-    "candidates_considered": len(results),
+    "candidates_considered": len(final),
     "fit_quality": {
-        "r_factor": best["r_factor"] if best else None,
+        "figure_of_merit": best["figure_of_merit"] if best else None,
         "verdict": best["verdict"] if best else "no_candidates",
     },
 }))
 ```
 
-**Background handling.** `score_xrd_match` defaults to `background="subtract_min"`
-which subtracts the minimum experimental intensity as a flat offset. For
-patterns with significant continuous background (amorphous halo,
-fluorescence), fit and subtract a low-order polynomial background BEFORE
-calling `score_xrd_match` and pass `background="none"`.
+**Background handling.** Both scorers default to subtracting the
+experimental minimum as a flat offset. For patterns with significant
+continuous background (amorphous halo, fluorescence), fit and subtract a
+low-order polynomial background BEFORE calling the scorers and pass
+`background="none"`.
 
 **Wavelength consistency.** Pass the same `wavelength` to every
 `simulate_xrd_pattern` call. Pull from experiment metadata when present;
 otherwise default CuKa.
 
-**Peak broadening.** `score_xrd_match` uses a Lorentzian with FWHM=0.15°
-by default. For low-resolution or strongly broadened experimental
-patterns (e.g. nanocrystalline samples), increase `fwhm` to 0.3-0.5°
-so peaks overlap as they do in the data.
+**Peak broadening.** Both scorers use a Lorentzian with FWHM=0.15° by
+default. For low-resolution or strongly broadened experimental patterns
+(nanocrystalline samples), bump `fwhm` to 0.3-0.5° so peaks overlap as
+they do in the data.
 
-**Do not over-interpret negative results.** If every candidate verdict is
-"reject", the right next action is to broaden the chemistry hypothesis or
-increase top_n — not to invent a new candidate.
+**When the robust tier disagrees with the fast tier.** Trust the robust
+tier — it factors out background, scale, and intensity-ratio effects
+that the fast tier folds into the correlation. The fast tier is a
+triage step; the robust tier is the identification.
 
 ## interpretation
 
-**R-factor thresholds.** The verdict field in each score is derived from
-the R-factor:
+**Verdict thresholds.**
 
-- R-factor ≤ 0.10 → "accept" — strong identification; report as the phase
-- R-factor ≤ 0.20 → "marginal" — plausible match; list the top 3
-- R-factor > 0.20 → "reject" — no confident match
+Fast tier (correlation, in [-1, 1]):
+- correlation ≥ 0.85 → "accept"
+- correlation ≥ 0.60 → "marginal"
+- otherwise → "reject"
 
-Rwp (weighted profile R-factor) is a complementary metric; report it
-alongside R-factor but use R-factor for the verdict.
+Robust tier — Hanawalt (figure-of-merit, in [0, 1]):
+- FOM ≥ 0.70 → "accept"
+- FOM ≥ 0.40 → "marginal"
+- otherwise → "reject"
 
-**Reporting style for synthesis.** Phrase identification in proportion to
-the R-factor margin:
+Robust tier — MIP (cost, in [0, 1], lower is better):
+- cost ≤ 0.25 → "accept"
+- cost ≤ 0.55 → "marginal"
+- otherwise → "reject"
 
-- Best R-factor < 0.05 and runner-up > 2× best: declare identification
-  with high confidence. Name the phase and space group.
-- Best R-factor 0.05-0.10: declare identification with caveats. Note any
-  alternative candidates within 1.5× of the best.
-- Best R-factor 0.10-0.20: do not declare a single identification. List
-  the top 3 candidates as "consistent with the experimental pattern" and
-  recommend higher-resolution data or complementary techniques.
-- All R-factors > 0.20: report no confident match. Suggest broadening the
-  chemistry hypothesis, checking the experimental wavelength, or running
-  a peak-fit-first workflow.
+**Reporting style for synthesis.** Phrase identification in proportion
+to the robust-tier margin:
 
-**What R-factor cannot tell you.** A good R-factor confirms the phase is
-present; it does NOT confirm purity, sample preparation, or absence of
-minor phases. Mention this caveat when reporting identifications.
+- Best FOM > 0.85 and runner-up > 1.5× lower: declare identification
+  with high confidence. Name the phase, space group, and (if MIP was
+  used) the fitted zero-shift and lattice scale.
+- Best FOM in [0.70, 0.85]: declare identification with caveats. List
+  alternative candidates within 0.1 FOM of the best.
+- Best FOM in [0.40, 0.70]: do not declare a single identification.
+  List the top 3 candidates as "consistent with the experimental
+  pattern" and recommend higher-resolution data or a complementary
+  technique (EELS, EDS).
+- All FOMs below 0.40: report no confident match. Suggest broadening
+  the chemistry hypothesis, checking the experimental wavelength, or
+  running a peak-fit-first workflow.
 
-**Multi-phase samples.** v1 of this skill assumes a single dominant phase.
-For multi-phase identification, list the top 3 candidates with their
-R-factors and note that quantitative phase fraction analysis (Rietveld
-refinement) is the standard next step — that's outside this skill's
-scope.
+**What a good score cannot tell you.** A high FOM / low MIP cost
+confirms the phase is present; it does NOT confirm purity, sample
+preparation correctness, or absence of minor phases. Mention this
+caveat when reporting identifications.
+
+**Multi-phase samples.** Hanawalt is single-phase by construction. For
+suspected multi-phase mixtures, switch to MIP and increase
+`max_exp_peaks` so the assignment problem has enough peaks to allocate
+across phases. v1 of this skill does not include quantitative phase
+fraction analysis (Rietveld refinement is the next step) — note this in
+the report.
 
 ## validation
 
-**Per-candidate quality checks.**
+**Per-candidate sanity checks.**
 
 - The simulated pattern must cover the experimental 2-theta range. If
   `min(sim["two_theta"])` is more than 1° above `min(exp_2theta)`,
   expand the simulation range or note unobserved low-angle peaks.
-- The number of simulated peaks should be reasonable for the candidate's
-  symmetry (5-50 peaks typical in 10-90° 2θ; outliers indicate the
-  simulation range was too narrow or too broad).
-- R-factor and cosine similarity must agree on the verdict direction.
-  When R-factor < 0.10 but cosine < 0.5, suspect a normalization issue —
-  rerun with `background="subtract_min"` if not already.
+- The number of simulated peaks should be reasonable for the
+  candidate's symmetry (5-50 peaks typical in 10-90° 2θ; outliers
+  indicate the simulation range was too narrow or too broad).
+- Fast and robust tier verdicts should agree on direction. When the
+  fast tier says "accept" but the robust tier says "reject", the
+  correlation is being fooled by background or scale — re-run with a
+  polynomial background subtraction.
 
-**Cross-candidate sanity.** When 3+ candidates score "accept", the
-chemistry hypothesis is too broad — narrow it. When 0 candidates score
-above "reject", the chemistry hypothesis is wrong or the wavelength is
-mismatched.
+**Cross-candidate sanity.** When 3+ candidates score "accept" in the
+robust tier, the chemistry hypothesis is too broad — narrow it. When 0
+candidates score above "reject", the chemistry hypothesis is wrong or
+the wavelength is mismatched.
 
-**FWHM tuning.** If the best candidate scores R-factor > 0.15 but visual
+**Zero-shift sanity (MIP only).** A fitted zero-shift larger than 0.3°
+typically indicates either a sample-displacement problem on the
+instrument or a wavelength mismatch — not a true identification issue.
+Flag it in the report.
+
+**FWHM tuning.** If the best candidate scores FOM > 0.6 but visual
 inspection (peak positions match) suggests it's the right phase, retry
-`score_xrd_match` with `fwhm=0.3` or `fwhm=0.5`. Broad peaks in real
-data require broader simulation profiles.
+the robust scorer with `tol_deg=0.5` (looser tolerance) or extract
+peaks with a larger `min_distance_deg` to suppress noise peaks. Broad
+peaks in real data require looser tolerance windows.
 
-**Materials-Project authority.** Per the dedup rule, when MP and a local
-CIF both return the same (formula, space_group), MP wins. Local CIFs
-without space-group metadata cannot dedup against MP — they appear as
-separate candidates.
+**Materials-Project authority.** When MP and a local CIF both return the
+same (formula, space_group), `search_structures` keeps the MP entry and
+drops the local one. Local CIFs without space-group metadata cannot
+dedup against MP and appear as separate candidates — verify they aren't
+duplicates of MP entries already in the candidate list.
