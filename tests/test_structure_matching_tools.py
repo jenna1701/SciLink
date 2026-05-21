@@ -36,9 +36,9 @@ _skip_no_xrd = pytest.mark.skipif(
     not PYMATGEN_XRD_AVAILABLE,
     reason="pymatgen-analysis-diffraction not installed; pip install scilink[structure-matching]",
 )
-from scilink.skills.structure_matching.xrd.score_match import (
-    TOOL_SPEC as SCORE_TOOL_SPEC,
-    score_xrd_match,
+from scilink.skills.structure_matching.xrd.score_match_fast import (
+    TOOL_SPEC as SCORE_FAST_TOOL_SPEC,
+    score_xrd_match_fast,
 )
 
 
@@ -326,11 +326,12 @@ def test_simulate_wavelength_shifts_peaks(tmp_path):
     assert min(mo["two_theta"]) < min(cu["two_theta"])
 
 
-# --- score_xrd_match ----------------------------------------------------------
+# --- score_xrd_match_fast (cross-correlation) ---------------------------------
 
-def test_score_tool_spec_renders():
-    block = SCORE_TOOL_SPEC.to_prompt()
-    assert "score_xrd_match" in block
+def test_score_fast_tool_spec_renders():
+    block = SCORE_FAST_TOOL_SPEC.to_prompt()
+    assert "score_xrd_match_fast" in block
+    assert "cross-correlation" in block.lower() or "shift" in block.lower()
 
 
 def _synthetic_pattern(peak_positions, peak_intensities, grid=None, fwhm=0.15, noise=0.0):
@@ -347,66 +348,116 @@ def _synthetic_pattern(peak_positions, peak_intensities, grid=None, fwhm=0.15, n
     return grid.tolist(), y.tolist()
 
 
-def test_score_perfect_match_yields_accept():
+def test_score_fast_perfect_match_yields_accept():
     peaks_x = [28.4, 47.3, 56.1]
     peaks_y = [100.0, 60.0, 30.0]
     grid, exp = _synthetic_pattern(peaks_x, peaks_y)
 
-    out = score_xrd_match(
+    out = score_xrd_match_fast(
         exp_two_theta=grid, exp_intensity=exp,
         sim_two_theta=peaks_x, sim_intensity=peaks_y,
     )
 
     assert out["verdict"] == "accept"
-    assert out["r_factor"] < 0.05
-    assert out["cosine_similarity"] > 0.99
+    assert out["correlation"] > 0.95
+    # No shift/scale needed when sim == exp
+    assert abs(out["fitted_shift"]) < 0.1
+    assert abs(out["fitted_scale"] - 1.0) < 0.005
 
 
-def test_score_total_mismatch_yields_reject():
+def test_score_fast_recovers_known_shift():
+    """If exp is offset by Δ from sim, fast tier must recover Δ from the lag."""
+    peaks_x = np.array([28.4, 47.3, 56.1])
+    peaks_y = [100.0, 60.0, 30.0]
+    shift = 0.15  # degrees — modest zero-shift typical of real lab data
+    grid, exp = _synthetic_pattern(peaks_x + shift, peaks_y)
+
+    out = score_xrd_match_fast(
+        exp_two_theta=grid, exp_intensity=exp,
+        sim_two_theta=peaks_x.tolist(), sim_intensity=peaks_y,
+    )
+    assert out["verdict"] == "accept"
+    assert abs(out["fitted_shift"] - shift) < 0.05
+    assert out["correlation"] > 0.9
+
+
+def test_score_fast_recovers_known_scale():
+    """Mild lattice-parameter offset shifts all peaks proportionally — scale grid catches it."""
+    base_peaks = np.array([28.4, 47.3, 56.1, 69.1])
+    peaks_y = [100.0, 60.0, 30.0, 25.0]
+    true_scale = 1.005
+    grid, exp = _synthetic_pattern((base_peaks * true_scale).tolist(), peaks_y)
+
+    out = score_xrd_match_fast(
+        exp_two_theta=grid, exp_intensity=exp,
+        sim_two_theta=base_peaks.tolist(), sim_intensity=peaks_y,
+        scale_search=(0.99, 1.01, 0.001),
+    )
+    assert out["verdict"] == "accept"
+    assert abs(out["fitted_scale"] - true_scale) < 0.003
+
+
+def test_score_fast_total_mismatch_yields_reject():
     grid, exp = _synthetic_pattern([28.4, 47.3, 56.1], [100, 60, 30])
-    # Simulated peaks at totally different positions
-    out = score_xrd_match(
+    out = score_xrd_match_fast(
         exp_two_theta=grid, exp_intensity=exp,
         sim_two_theta=[70.0, 80.0], sim_intensity=[100.0, 50.0],
     )
-
     assert out["verdict"] == "reject"
-    assert out["r_factor"] > 0.5
+    assert out["correlation"] < 0.6
 
 
-def test_score_partial_match_yields_marginal_or_reject():
-    grid, exp = _synthetic_pattern([28.4, 47.3, 56.1], [100, 60, 30])
-    # One peak right, others wrong
-    out = score_xrd_match(
+def test_score_fast_empty_simulation_returns_reject():
+    grid, exp = _synthetic_pattern([28.4, 47.3], [100, 60])
+    out = score_xrd_match_fast(
         exp_two_theta=grid, exp_intensity=exp,
-        sim_two_theta=[28.4, 70.0], sim_intensity=[100.0, 50.0],
+        sim_two_theta=[], sim_intensity=[],
     )
-    assert out["verdict"] in {"marginal", "reject"}
+    assert out["verdict"] == "reject"
+    assert out["correlation"] == 0.0
 
 
-def test_score_validates_array_shapes():
+def test_score_fast_disables_scale_search():
+    """Passing scale_search=None forces scale=1.0; fitted_scale must be exactly 1."""
+    peaks_x = np.array([28.4, 47.3])
+    peaks_y = [100.0, 60.0]
+    grid, exp = _synthetic_pattern((peaks_x * 1.005).tolist(), peaks_y)
+
+    out = score_xrd_match_fast(
+        exp_two_theta=grid, exp_intensity=exp,
+        sim_two_theta=peaks_x.tolist(), sim_intensity=peaks_y,
+        scale_search=None,
+    )
+    assert out["fitted_scale"] == 1.0
+
+
+def test_score_fast_validates_array_shapes():
     with pytest.raises(ValueError, match="same length"):
-        score_xrd_match(
-            exp_two_theta=[10.0, 20.0, 30.0],
+        score_xrd_match_fast(
+            exp_two_theta=[10.0, 20.0, 30.0] * 10,
             exp_intensity=[1.0, 2.0],
             sim_two_theta=[15.0],
             sim_intensity=[1.0],
         )
 
 
-def test_score_validates_fwhm():
+def test_score_fast_validates_fwhm():
+    grid = np.linspace(10, 50, 100).tolist()
+    intensity = (np.zeros(100) + 1).tolist()
     with pytest.raises(ValueError, match="fwhm"):
-        score_xrd_match(
-            exp_two_theta=[10.0, 20.0], exp_intensity=[1.0, 2.0],
+        score_xrd_match_fast(
+            exp_two_theta=grid, exp_intensity=intensity,
             sim_two_theta=[15.0], sim_intensity=[1.0],
             fwhm=0,
         )
 
 
-def test_score_unknown_background_raises():
+def test_score_fast_unknown_background_raises():
+    grid = np.linspace(10, 50, 100).tolist()
+    intensity = (np.zeros(100) + 1).tolist()
     with pytest.raises(ValueError, match="background"):
-        score_xrd_match(
-            exp_two_theta=[10.0, 20.0], exp_intensity=[1.0, 2.0],
+        score_xrd_match_fast(
+            exp_two_theta=grid, exp_intensity=intensity,
             sim_two_theta=[15.0], sim_intensity=[1.0],
             background="weird",
         )
