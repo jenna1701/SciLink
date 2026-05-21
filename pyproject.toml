@@ -63,6 +63,7 @@ ui = [
 structure-matching = [
     "pymatgen-analysis-diffraction>=2024.0",
     "mp-api>=0.45.0",
+    "pulp>=2.7.0",
 ]
 all = [
     "scilink[sim]",
