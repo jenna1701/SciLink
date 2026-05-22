@@ -60,6 +60,34 @@ def _gate(state: dict):
     return g
 
 
+def _safe_r2(result_or_quality: dict, default: float = 0.0) -> float:
+    """Extract r_squared from a fit_result (or fit_quality dict), defaulting
+    to ``default`` when the key is missing OR present with value None.
+
+    Workflow-style skills (xrd structure-matching, future Raman / EELS
+    libraries with FOM-based scoring) emit FIT_RESULTS_JSON without a
+    meaningful r_squared — the natural emitted value is ``null`` or
+    omitted. ``.get('r_squared', 0)`` returns the default only when the
+    key is missing; if the key is present with a None value it returns
+    None, which then crashes downstream arithmetic / comparison.
+
+    Accepts either a full fit result (with a ``fit_quality`` sub-dict)
+    or a fit_quality dict directly.
+    """
+    if not isinstance(result_or_quality, dict):
+        return float(default)
+    fq = result_or_quality.get("fit_quality", result_or_quality)
+    if not isinstance(fq, dict):
+        return float(default)
+    val = fq.get("r_squared")
+    if val is None:
+        return float(default)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def _tool_inventory_text(state: dict) -> str:
     """Render the curve-fitting tool inventory for the active skills.
 
@@ -2330,7 +2358,7 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
             return None
 
         # Gather fit info
-        r_squared = fit_result.get("fit_quality", {}).get("r_squared", 0)
+        r_squared = fit_result.get("fit_quality", {}).get("r_squared") or 0
         model_type = fit_result.get("model_type", "Unknown")
         parameters = fit_result.get("parameters", {})
 
@@ -2347,7 +2375,7 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
         # STEP 3's comparative assessment.
         prior_best_section = ""
         if best_result is not None and best_result is not fit_result:
-            best_r2 = best_result.get("fit_quality", {}).get("r_squared", 0)
+            best_r2 = best_result.get("fit_quality", {}).get("r_squared") or 0
             best_issues_lines = []
             if best_verification:
                 for issue in (best_verification.get("issues_found") or [])[:6]:
@@ -2520,7 +2548,7 @@ Return JSON with the refined fitting approach:
             print(f"[Best fit visualization saved to: {viz_path}]")
         
         prompt = self.HUMAN_FEEDBACK_PROMPT.format(
-            best_r2=best_result.get("fit_quality", {}).get("r_squared", 0),
+            best_r2=best_result.get("fit_quality", {}).get("r_squared") or 0,
             threshold=self.r2_threshold,
             models_tried=models_tried,
             example_threshold=self.r2_threshold - self._r2_soft_margin(self.r2_threshold),
@@ -2722,7 +2750,7 @@ Return JSON with:
             )
             if reuse_result.get("success"):
                 reuse_r2 = (
-                    reuse_result.get("fit_quality", {}).get("r_squared", 0)
+                    reuse_result.get("fit_quality", {}).get("r_squared") or 0
                     or 0.0
                 )
                 verdict = "good" if reuse_r2 >= self.r2_threshold else "poor"
@@ -2783,7 +2811,7 @@ Return JSON with:
         )
 
         if result["success"]:
-            r2 = result.get("fit_quality", {}).get("r_squared", 0)
+            r2 = result.get("fit_quality", {}).get("r_squared") or 0
             all_attempts.append({
                 "model": initial_model, "r2": r2, "result": result,
                 "config": state.get("locked_fitting_config", {}).copy(),
@@ -2989,7 +3017,7 @@ Return JSON with:
                         )
 
                         if verified_result["success"]:
-                            verified_r2 = verified_result.get("fit_quality", {}).get("r_squared", 0)
+                            verified_r2 = verified_result.get("fit_quality", {}).get("r_squared") or 0
 
                             all_attempts.append({
                                 "model": f"Verification-{verification_iter + 1}",
@@ -3219,7 +3247,7 @@ Return JSON with:
                     )
 
                     if human_guided_result["success"]:
-                        human_r2 = human_guided_result.get("fit_quality", {}).get("r_squared", 0)
+                        human_r2 = human_guided_result.get("fit_quality", {}).get("r_squared") or 0
                         self.logger.info(f"   Human-guided fit: R² = {human_r2:.4f}")
 
                         if human_r2 > best_r2:
@@ -3375,7 +3403,7 @@ Return JSON with:
         )
 
         if user_guided_result["success"]:
-            user_r2 = user_guided_result.get("fit_quality", {}).get("r_squared", 0)
+            user_r2 = user_guided_result.get("fit_quality", {}).get("r_squared") or 0
             self.logger.info(f"   User-guided fit: R² = {user_r2:.4f}")
             all_attempts.append({"model": "User-guided", "r2": user_r2, "result": user_guided_result})
 
@@ -3483,7 +3511,7 @@ Return JSON with:
         
         total = len(series_results)
         successful = sum(1 for r in series_results if r["success"])
-        r2_values = [r.get("fit_quality", {}).get("r_squared", 0) for r in series_results if r["success"]]
+        r2_values = [r.get("fit_quality", {}).get("r_squared") or 0 for r in series_results if r["success"]]
         
         if r2_values:
             lines.append(f"Series statistics: {successful}/{total} successful fits")
@@ -4228,7 +4256,7 @@ class AdaptiveRefitController:
         """Build a temporary state dict for independent re-analysis."""
         locked_config = state.get("locked_fitting_config", {})
         original_result = state["series_results"][idx]
-        original_r2 = original_result.get("fit_quality", {}).get("r_squared", 0)
+        original_r2 = original_result.get("fit_quality", {}).get("r_squared") or 0
 
         # Build experimental context so the LLM knows what it's fitting
         system_info = state.get("system_info", {})
@@ -4255,7 +4283,7 @@ class AdaptiveRefitController:
         series_context_parts = []
         successful = [r for r in series_results if r.get("success") and not r.get("flagged")]
         if successful:
-            r2_vals = [r.get("fit_quality", {}).get("r_squared", 0) for r in successful]
+            r2_vals = [r.get("fit_quality", {}).get("r_squared") or 0 for r in successful]
             series_context_parts.append(
                 f"Successful fits (locked model): {len(successful)}/{len(series_results)} spectra, "
                 f"R² range {min(r2_vals):.4f}–{max(r2_vals):.4f}, "
@@ -4271,7 +4299,7 @@ class AdaptiveRefitController:
             if 0 <= neighbor_idx < len(series_results):
                 nr = series_results[neighbor_idx]
                 if nr.get("success") and not nr.get("flagged"):
-                    nr2 = nr.get("fit_quality", {}).get("r_squared", 0)
+                    nr2 = nr.get("fit_quality", {}).get("r_squared") or 0
                     series_context_parts.append(
                         f"Neighbor spectrum [{neighbor_idx}] fitted successfully: "
                         f"model={nr.get('model_type', 'N/A')}, R²={nr2:.4f}"
@@ -4427,7 +4455,7 @@ class AdaptiveRefitController:
                 self.logger.error(f"  Consistency refit failed for {name}: {e}")
                 continue
 
-            new_r2 = result.get("fit_quality", {}).get("r_squared", 0)
+            new_r2 = result.get("fit_quality", {}).get("r_squared") or 0
             prev_r2 = entry["new_r2"] or 0
 
             if result["success"] and new_r2 >= prev_r2 * 0.99:
@@ -4542,7 +4570,7 @@ class AdaptiveRefitController:
                 })
                 continue
 
-            new_r2 = refit_result.get("fit_quality", {}).get("r_squared", 0)
+            new_r2 = refit_result.get("fit_quality", {}).get("r_squared") or 0
             locked_model = state.get("locked_fitting_config", {}).get("physical_model")
 
             if refit_result["success"] and (original_r2 is None or new_r2 > original_r2):
@@ -5470,7 +5498,7 @@ class UnifiedCurveReportController:
                 else:
                     status, status_color = "✓", "#27ae60"
 
-                r_squared = r.get("fit_quality", {}).get("r_squared", 0)
+                r_squared = r.get("fit_quality", {}).get("r_squared") or 0
                 r2_str = f"R² = {r_squared:.4f}" if isinstance(r_squared, float) else ""
                 refit_note = ""
                 if r.get("adaptively_refitted") and r.get("original_r2") is not None:
