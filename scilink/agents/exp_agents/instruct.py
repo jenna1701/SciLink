@@ -2176,6 +2176,8 @@ plan as specified and let the retry pipeline handle actual runtime failures.
 - X: [{x_min:.6g}, {x_max:.6g}]
 - Y: [{y_min:.6g}, {y_max:.6g}]
 
+{tool_inventory}
+
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
 
 **Requirements:**
@@ -2220,6 +2222,8 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
 ```
 {error_message}
 ```
+
+{tool_inventory}
 
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
 

@@ -32,6 +32,108 @@ from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
 
+def _active_skill_names(state: dict) -> list[str]:
+    """Return names of all currently-loaded skills from a pipeline state dict.
+
+    Mirrors the image_analysis helper of the same name. Falls back to the
+    legacy singular ``skill_name`` field when ``skills_loaded`` is absent.
+    """
+    loaded = state.get("skills_loaded")
+    if loaded:
+        return [s.get("name") for s in loaded if s and s.get("name")]
+    legacy = state.get("skill_name")
+    return [legacy] if legacy else []
+
+
+def _gate(state: dict):
+    """Return the effective QualityGate for this analysis.
+
+    The agent stashes the resolved gate at ``state['quality_gate']`` in
+    ``CurveFittingAgent.analyze``. When absent (e.g. legacy callers
+    constructing a controller directly), falls back to the framework
+    default — R² ≥ 0.95 — so existing behavior is unchanged.
+    """
+    from ..quality_gate import R_SQUARED_DEFAULT
+    g = state.get("quality_gate")
+    if g is None:
+        return R_SQUARED_DEFAULT
+    return g
+
+
+def _safe_r2(result_or_quality: dict, default: float = 0.0) -> float:
+    """Extract r_squared from a fit_result (or fit_quality dict), defaulting
+    to ``default`` when the key is missing OR present with value None.
+
+    Workflow-style skills (xrd structure-matching, future Raman / EELS
+    libraries with FOM-based scoring) emit FIT_RESULTS_JSON without a
+    meaningful r_squared — the natural emitted value is ``null`` or
+    omitted. ``.get('r_squared', 0)`` returns the default only when the
+    key is missing; if the key is present with a None value it returns
+    None, which then crashes downstream arithmetic / comparison.
+
+    Accepts either a full fit result (with a ``fit_quality`` sub-dict)
+    or a fit_quality dict directly.
+    """
+    if not isinstance(result_or_quality, dict):
+        return float(default)
+    fq = result_or_quality.get("fit_quality", result_or_quality)
+    if not isinstance(fq, dict):
+        return float(default)
+    val = fq.get("r_squared")
+    if val is None:
+        return float(default)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _tool_inventory_text(state: dict) -> str:
+    """Render the curve-fitting tool inventory for the active skills.
+
+    Returns an empty string when no skill is active and no shared tools
+    target the curve_fitting agent — avoids polluting prompts with an
+    empty "Available Tools" header.
+    """
+    from ...skills._shared._registry import format_tool_inventory
+
+    return format_tool_inventory(
+        "curve_fitting", active_skills=_active_skill_names(state),
+    )
+
+
+def _parse_script_markers(stdout: Optional[str]) -> dict:
+    """Parse FIT_RESULTS_JSON and DB_MATCHES_JSON markers from script stdout.
+
+    The first parseable ``FIT_RESULTS_JSON:`` line wins. Once that marker
+    has been seen (even with malformed JSON) later instances are ignored —
+    matches the long-standing first-wins behavior.
+
+    ``DB_MATCHES_JSON:`` is emitted by ``search_structures`` in the
+    structure_matching skill. When present, the parsed payload is merged
+    in at ``fit_results['db_matches']`` so the synthesis stage and HTML
+    report can surface candidates without per-script glue code.
+    """
+    fit_results: dict = {}
+    fit_seen = False
+    db_matches: Optional[dict] = None
+    for line in (stdout or "").splitlines():
+        if line.startswith("FIT_RESULTS_JSON:") and not fit_seen:
+            fit_seen = True
+            try:
+                fit_results = json.loads(line.replace("FIT_RESULTS_JSON:", "").strip())
+            except json.JSONDecodeError:
+                pass
+        elif line.startswith("DB_MATCHES_JSON:") and db_matches is None:
+            try:
+                db_matches = json.loads(line.replace("DB_MATCHES_JSON:", "").strip())
+            except json.JSONDecodeError:
+                pass
+    if db_matches is not None:
+        fit_results.setdefault("db_matches", db_matches)
+    return fit_results
+
+
 def _resolve_parallel_workers(value: Optional[int]) -> int:
     """Resolve the effective non-anchor worker count.
 
@@ -1648,6 +1750,7 @@ Your guidance: '''
             x_max=stats["x_range"][1],
             y_min=stats["y_range"][0],
             y_max=stats["y_range"][1],
+            tool_inventory=_tool_inventory_text(state),
         )
 
         if prior_script:
@@ -1702,6 +1805,7 @@ Your guidance: '''
             physical_model=config.get("physical_model", ""),
             failed_script=script,
             error_message=error_msg,
+            tool_inventory=_tool_inventory_text(state),
         )
         skill_sections = state.get("skill_sections")
         if skill_sections and skill_sections.get("analysis"):
@@ -1990,14 +2094,7 @@ Your guidance: '''
                 "script_errors": script_errors,
             }
         
-        fit_results = {}
-        for line in (exec_result.get("stdout") or "").splitlines():
-            if line.startswith("FIT_RESULTS_JSON:"):
-                try:
-                    fit_results = json.loads(line.replace("FIT_RESULTS_JSON:", "").strip())
-                except json.JSONDecodeError:
-                    pass
-                break
+        fit_results = _parse_script_markers(exec_result.get("stdout"))
         
         viz_path = self.output_dir / f"{output_prefix}_fit.png"
         if not viz_path.exists():
@@ -2180,13 +2277,88 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
         verifier can rate whether the current fit is physically better than
         the prior high-water mark.  ``best_verification`` (the verifier's
         last verdict on best) is used to summarize prior issues.
+
+        Workflow-style skills (where the active QualityGate uses a non-R²
+        metric such as figure_of_merit) bypass this verifier — the skill's
+        own scoring tools (e.g. score_xrd_match_robust) ARE the
+        verification, and the R²-shaped prompt would not apply.
         """
+        gate = _gate(state)
+        if gate.metric != "r_squared":
+            value = gate.extract(fit_result.get("fit_quality"))
+            # Canonical verdict schema — must match the keys downstream
+            # consumers actually read (curve_fitting_controllers.py:2839, :3094
+            # read `fit_acceptable`; :2871 reads `issues_found`; :2848 reads
+            # `physically_better_than_best`). The earlier short-circuit
+            # emitted `should_accept` / `issues`, which silently defaulted
+            # downstream — non-R² gates were effectively inert. Reviewer
+            # caught it on PR #193.
+            if gate.is_accept(value):
+                cmp = "≥" if gate.direction == "higher_is_better" else "≤"
+                return {
+                    "fit_acceptable": True,
+                    "overall_assessment": (
+                        f"Skill workflow gate satisfied: {gate.metric} = "
+                        f"{value:.4f} {cmp} {gate.accept_threshold:.4f}. "
+                        f"Curve-fit R² verifier bypassed for non-R² gates."
+                    ),
+                    "issues_found": [],
+                    "recommended_action": "none",
+                    "physically_better_than_best": False,
+                    "comparison_note": "N/A — non-R² gate (no prior-best comparison)",
+                }
+            elif gate.is_hard_reject(value):
+                value_str = f"{value:.4f}" if isinstance(value, (int, float)) else "missing"
+                return {
+                    "fit_acceptable": False,
+                    "overall_assessment": (
+                        f"Skill workflow gate hard-rejects: {gate.metric} = "
+                        f"{value_str} vs hard-reject threshold "
+                        f"{gate.hard_reject_threshold:.4f}."
+                    ),
+                    "issues_found": [{
+                        "location": "Workflow scoring",
+                        "problem": f"{gate.metric} below acceptable range",
+                        "suggested_fix": (
+                            "Re-plan the workflow — widen the database query, "
+                            "broaden the chemistry hypothesis, or verify the "
+                            "wavelength / experimental metadata."
+                        ),
+                    }],
+                    "recommended_action": "retry_fitting_attempt_with_changes",
+                    "physically_better_than_best": False,
+                    "comparison_note": "N/A — non-R² gate (no prior-best comparison)",
+                }
+            else:
+                # Marginal: between accept and hard-reject. Treat as
+                # acceptable (don't trigger retry), but flag as marginal
+                # in the verdict so the synthesis layer can qualify it.
+                return {
+                    "fit_acceptable": True,
+                    "overall_assessment": (
+                        f"Skill workflow gate marginal: {gate.metric} = "
+                        f"{value:.4f}. Below accept threshold "
+                        f"{gate.accept_threshold:.4f} but above hard-reject; "
+                        f"synthesis will report as marginal."
+                    ),
+                    "issues_found": [{
+                        "location": "Workflow scoring",
+                        "problem": f"{gate.metric} marginal (below accept threshold)",
+                        "suggested_fix": (
+                            "Acceptable as-is; downstream synthesis will "
+                            "qualify confidence as marginal."
+                        ),
+                    }],
+                    "recommended_action": "none",
+                    "physically_better_than_best": False,
+                    "comparison_note": "N/A — non-R² gate (no prior-best comparison)",
+                }
         if not fit_result.get("visualization_bytes"):
             self.logger.warning("      No visualization available for LLM verification")
             return None
 
         # Gather fit info
-        r_squared = fit_result.get("fit_quality", {}).get("r_squared", 0)
+        r_squared = fit_result.get("fit_quality", {}).get("r_squared") or 0
         model_type = fit_result.get("model_type", "Unknown")
         parameters = fit_result.get("parameters", {})
 
@@ -2203,7 +2375,7 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
         # STEP 3's comparative assessment.
         prior_best_section = ""
         if best_result is not None and best_result is not fit_result:
-            best_r2 = best_result.get("fit_quality", {}).get("r_squared", 0)
+            best_r2 = best_result.get("fit_quality", {}).get("r_squared") or 0
             best_issues_lines = []
             if best_verification:
                 for issue in (best_verification.get("issues_found") or [])[:6]:
@@ -2376,7 +2548,7 @@ Return JSON with the refined fitting approach:
             print(f"[Best fit visualization saved to: {viz_path}]")
         
         prompt = self.HUMAN_FEEDBACK_PROMPT.format(
-            best_r2=best_result.get("fit_quality", {}).get("r_squared", 0),
+            best_r2=best_result.get("fit_quality", {}).get("r_squared") or 0,
             threshold=self.r2_threshold,
             models_tried=models_tried,
             example_threshold=self.r2_threshold - self._r2_soft_margin(self.r2_threshold),
@@ -2578,7 +2750,7 @@ Return JSON with:
             )
             if reuse_result.get("success"):
                 reuse_r2 = (
-                    reuse_result.get("fit_quality", {}).get("r_squared", 0)
+                    reuse_result.get("fit_quality", {}).get("r_squared") or 0
                     or 0.0
                 )
                 verdict = "good" if reuse_r2 >= self.r2_threshold else "poor"
@@ -2639,7 +2811,7 @@ Return JSON with:
         )
 
         if result["success"]:
-            r2 = result.get("fit_quality", {}).get("r_squared", 0)
+            r2 = result.get("fit_quality", {}).get("r_squared") or 0
             all_attempts.append({
                 "model": initial_model, "r2": r2, "result": result,
                 "config": state.get("locked_fitting_config", {}).copy(),
@@ -2845,7 +3017,7 @@ Return JSON with:
                         )
 
                         if verified_result["success"]:
-                            verified_r2 = verified_result.get("fit_quality", {}).get("r_squared", 0)
+                            verified_r2 = verified_result.get("fit_quality", {}).get("r_squared") or 0
 
                             all_attempts.append({
                                 "model": f"Verification-{verification_iter + 1}",
@@ -3075,7 +3247,7 @@ Return JSON with:
                     )
 
                     if human_guided_result["success"]:
-                        human_r2 = human_guided_result.get("fit_quality", {}).get("r_squared", 0)
+                        human_r2 = human_guided_result.get("fit_quality", {}).get("r_squared") or 0
                         self.logger.info(f"   Human-guided fit: R² = {human_r2:.4f}")
 
                         if human_r2 > best_r2:
@@ -3231,7 +3403,7 @@ Return JSON with:
         )
 
         if user_guided_result["success"]:
-            user_r2 = user_guided_result.get("fit_quality", {}).get("r_squared", 0)
+            user_r2 = user_guided_result.get("fit_quality", {}).get("r_squared") or 0
             self.logger.info(f"   User-guided fit: R² = {user_r2:.4f}")
             all_attempts.append({"model": "User-guided", "r2": user_r2, "result": user_guided_result})
 
@@ -3339,7 +3511,7 @@ Return JSON with:
         
         total = len(series_results)
         successful = sum(1 for r in series_results if r["success"])
-        r2_values = [r.get("fit_quality", {}).get("r_squared", 0) for r in series_results if r["success"]]
+        r2_values = [r.get("fit_quality", {}).get("r_squared") or 0 for r in series_results if r["success"]]
         
         if r2_values:
             lines.append(f"Series statistics: {successful}/{total} successful fits")
@@ -4084,7 +4256,7 @@ class AdaptiveRefitController:
         """Build a temporary state dict for independent re-analysis."""
         locked_config = state.get("locked_fitting_config", {})
         original_result = state["series_results"][idx]
-        original_r2 = original_result.get("fit_quality", {}).get("r_squared", 0)
+        original_r2 = original_result.get("fit_quality", {}).get("r_squared") or 0
 
         # Build experimental context so the LLM knows what it's fitting
         system_info = state.get("system_info", {})
@@ -4111,7 +4283,7 @@ class AdaptiveRefitController:
         series_context_parts = []
         successful = [r for r in series_results if r.get("success") and not r.get("flagged")]
         if successful:
-            r2_vals = [r.get("fit_quality", {}).get("r_squared", 0) for r in successful]
+            r2_vals = [r.get("fit_quality", {}).get("r_squared") or 0 for r in successful]
             series_context_parts.append(
                 f"Successful fits (locked model): {len(successful)}/{len(series_results)} spectra, "
                 f"R² range {min(r2_vals):.4f}–{max(r2_vals):.4f}, "
@@ -4127,7 +4299,7 @@ class AdaptiveRefitController:
             if 0 <= neighbor_idx < len(series_results):
                 nr = series_results[neighbor_idx]
                 if nr.get("success") and not nr.get("flagged"):
-                    nr2 = nr.get("fit_quality", {}).get("r_squared", 0)
+                    nr2 = nr.get("fit_quality", {}).get("r_squared") or 0
                     series_context_parts.append(
                         f"Neighbor spectrum [{neighbor_idx}] fitted successfully: "
                         f"model={nr.get('model_type', 'N/A')}, R²={nr2:.4f}"
@@ -4283,7 +4455,7 @@ class AdaptiveRefitController:
                 self.logger.error(f"  Consistency refit failed for {name}: {e}")
                 continue
 
-            new_r2 = result.get("fit_quality", {}).get("r_squared", 0)
+            new_r2 = result.get("fit_quality", {}).get("r_squared") or 0
             prev_r2 = entry["new_r2"] or 0
 
             if result["success"] and new_r2 >= prev_r2 * 0.99:
@@ -4398,7 +4570,7 @@ class AdaptiveRefitController:
                 })
                 continue
 
-            new_r2 = refit_result.get("fit_quality", {}).get("r_squared", 0)
+            new_r2 = refit_result.get("fit_quality", {}).get("r_squared") or 0
             locked_model = state.get("locked_fitting_config", {}).get("physical_model")
 
             if refit_result["success"] and (original_r2 is None or new_r2 > original_r2):
@@ -5326,7 +5498,7 @@ class UnifiedCurveReportController:
                 else:
                     status, status_color = "✓", "#27ae60"
 
-                r_squared = r.get("fit_quality", {}).get("r_squared", 0)
+                r_squared = r.get("fit_quality", {}).get("r_squared") or 0
                 r2_str = f"R² = {r_squared:.4f}" if isinstance(r_squared, float) else ""
                 refit_note = ""
                 if r.get("adaptively_refitted") and r.get("original_r2") is not None:
