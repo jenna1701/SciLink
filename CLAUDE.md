@@ -31,6 +31,78 @@ across all three modes. For example, adding an XRD or Raman skill for
 existing CurveFittingAgent is strongly preferred over creating two new agents
 for Ramand and XRD.
 
+## Foundation agents
+
+The architectural shape that makes the "skills, not new agents" preference
+work is the **foundation agent**: a single agent class designed to cover
+one broad domain ("modality") and specialized at runtime to specific
+techniques within that domain through pluggable skill bundles, rather than
+through subclassing. Today the analysis-side agents (`CurveFittingAgent`,
+`ImageAnalysisAgent`, `HyperspectralAnalysisAgent`) are the canonical
+examples; the proposed `OptimizationAgent` refactor (issue #196) follows
+this same shape for the optimization modality, and future simulation
+foundation agents (e.g., a DFT-side equivalent) should as well.
+
+A foundation agent has five elements:
+
+1. **A modality-specific pipeline architecture.** Each foundation agent
+   defines its own fixed sequence (and graph) of stages — planning,
+   execution, verification, refinement, and so on — appropriate to its
+   modality. Image analysis, optimization, and DFT calculations don't
+   share a pipeline shape; each has stages and branches that fit how that
+   kind of work actually proceeds.
+
+2. **Per-stage baseline prompts owned by the agent.** At each stage of
+   its pipeline, the agent carries a baseline prompt template encoding
+   the technique-independent reasoning for that stage. These baselines
+   are the agent's "default expertise" — always present, never replaced
+   by specializations.
+
+3. **A fixed section vocabulary defined per modality.** The agent
+   declares a small set of named sections (e.g., *planning*,
+   *validation*, *interpretation*) that domain specializations are
+   authored against. The vocabulary is the contract between
+   specialization authors and the agent's pipeline: authors write
+   content under those named sections, and the agent's pipeline stages
+   know which named sections to splice into which baseline prompts.
+
+4. **Pluggable domain specializations ("skills") combining prose
+   guidance with optional code helpers.** A skill is a self-contained
+   bundle authored by a domain expert — primarily narrative guidance
+   organized under the agent's section vocabulary, optionally
+   accompanied by purpose-built helper functions exposed as callable
+   tools. Activating a skill for a given run changes both what the LLM
+   reads at each stage and which specialized tools it can call; tools
+   declared inside a skill are visible to the LLM only when that skill
+   is active. This keeps the per-call surface focused on the active
+   specialization rather than overwhelming the LLM with every possible
+   tool from every possible skill.
+
+5. **An extensibility loop for open-ended per-task work, with
+   modality-appropriate verification.** The agent ships with a stable
+   surface of hand-written tools and, where the modality needs it, also
+   generates per-task code at runtime that calls those tools. Generated
+   artifacts run in a sandbox, and the agent verifies the result before
+   accepting it. Both the scope of generation and the form of
+   verification vary by modality — e.g., a per-task analysis script
+   verified by visual and numerical inspection in analysis; a bounded
+   constraint or acquisition wrapper verified by numerical sanity tests
+   in optimization; an input deck verified by convergence checks in
+   simulation.
+
+Elements (1)–(3) are the agent's structural contract (pipeline shape,
+baseline prompts at each stage, section vocabulary). Element (4) is how
+a skill specializes that contract at runtime. Element (5) is what lets
+the agent absorb the long tail of techniques without per-technique code.
+
+A note on "modality": the natural axis of variation differs across agent
+families. In analysis it's typically data type (1D curves, 2D images,
+3D datacubes); in optimization it could be method family (sequential
+single-objective BO, multi-objective, DoE, active learning); in
+simulation it could be computational method (DFT, classical MD,
+machine-learning potentials). Each foundation agent picks its own axis;
+the definition is agnostic about *what counts as a modality*.
+
 ## Plan-mode capability boundaries
 
 Two settled conventions on where capability lives in plan mode:
