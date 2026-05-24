@@ -52,8 +52,7 @@ SciLink provides three complementary agent systems that cover the full scientifi
 - **Simulated-annealing agentic pipelines.** Hold scientific priors strictly
   at first, then progressively thaw the lock on the implementation plan
   and domain-rule strictness only when iterative refinements fail to
-  converge — a literal Metropolis–Hastings step with verifier-driven
-  acceptance.
+  converge — inspired by Metropolis–Hastings, with verifier-driven acceptance.
 
 ---
 
