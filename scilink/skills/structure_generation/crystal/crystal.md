@@ -57,17 +57,31 @@ otherwise). Note the target spacegroup/phase so it can be checked later.
 
 ## Validation
 
-A generated crystalline structure is valid when:
+A generated **crystalline / periodic** structure is a valid starting point for periodic DFT
+or solid-state MD when:
 
-- It parses, and the **total atom count** matches the request (supercell size × formula,
+- It parses, and the **total atom count** matches the request (supercell size × formula units,
   adjusted for any defects).
 - **Stoichiometry / composition** matches the requested compound (e.g. a CrPS₄ monolayer must
   keep Cr:P:S = 1:1:4, minus any requested vacancy).
-- **No atom overlaps** — minimum interatomic distance is physical (≳ 0.7 Å and near typical
-  bond lengths); no duplicated sites.
-- **Periodicity is sensible** — a full 3D cell for bulk; for a slab, ≥ ~12 Å vacuum along the
-  surface normal and that direction only.
+- **No unphysical atom overlaps** — minimum interatomic distance is physical (≳ 0.7 Å and near
+  typical bond lengths); no duplicated sites.
+- **Periodicity is sensible** — a full 3D periodic cell for bulk; for a slab, ≥ ~12 Å vacuum
+  along the surface normal (15 Å common but not strict) and along that direction ONLY.
 - **Phase / spacegroup** matches if a specific polymorph was requested (`SpacegroupAnalyzer`).
-- **Defects** are present in the correct number and type.
-- Watch for the classic failure: a monolayer/layer extraction that dropped a sublattice
-  (wrong stoichiometry) or produced a skewed/degenerate cell.
+- **Defects** (vacancies / substitutions / interstitials) are present in the correct number and type.
+
+**Normal for an UNRELAXED crystal — do NOT flag these:**
+
+- Atomic clashes / close contacts (<1.0 Å) at grain boundaries, interfaces, or surface
+  terminations — these resolve during relaxation.
+- Atoms placed on ideal lattice sites near defects rather than displaced toward relaxed
+  positions; absence of explicit defect bond reconstruction.
+- Vacuum thicknesses anywhere from ~12 Å upward (15 Å is common but not a strict requirement).
+- Minor coordinate-wrap artifacts that don't change the periodic image.
+
+**Flag as substantive:** wrong composition / stoichiometry, wrong supercell size vs the
+request, missing requested defects, fundamentally wrong bonding (script bug), or severely
+insufficient vacuum (<10 Å) for a slab. Watch for the classic failure: a monolayer / layer
+extraction that dropped a sublattice (wrong stoichiometry) or produced a skewed / degenerate
+cell.

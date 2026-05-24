@@ -200,10 +200,37 @@ class StructureOrchestrator:
         )
         return "\n\n".join(parts)
 
+    def _load_validation_rubric(self, structure_class: str) -> Optional[str]:
+        """Load the ``## Validation`` section of the
+        ``structure_generation/<structure_class>`` skill to steer the validator
+        with class-specific acceptance criteria. The validator's base prompt is
+        class-neutral, so this rubric is what makes validation scale-aware (e.g. a
+        molecule is not judged by periodic-crystal supercell/vacuum criteria).
+        Returns None when no bundle / no validation section exists.
+        """
+        try:
+            from ...skills.loader import load_skill
+            parsed = load_skill(structure_class, domain="structure_generation")
+        except FileNotFoundError:
+            return None
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to load validation rubric for '{structure_class}': {e}"
+            )
+            return None
+        body = (parsed.get("validation") or "").strip()
+        if not body:
+            return None
+        self.logger.info(
+            f"Loaded validation rubric for structure_class: {parsed.get('name', structure_class)}"
+        )
+        return body
+
     def generate_and_validate(self, user_request: str,
                               structure_class: Optional[str] = "crystal",
                               *,
                               skill_content: Optional[str] = None,
+                              validation_rubric: Optional[str] = None,
                               prior_script: Optional[str] = None,
                               validate: bool = True,
                               max_cycles: Optional[int] = None,
@@ -227,6 +254,11 @@ class StructureOrchestrator:
             Pre-rendered skill guidance injected verbatim. When given it is used
             as-is and ``structure_class`` is not consulted for skill loading — this
             lets callers compose multiple / user-registered skills themselves.
+        validation_rubric : str, optional
+            Pre-rendered class-specific validation criteria injected into the
+            validator. Defaults to the ``## Validation`` section of the
+            ``structure_class`` skill when not supplied (and ``structure_class``
+            is set).
         prior_script : str, optional
             A previously generated script to modify (variant builds); applied to
             the initial generation only.
@@ -249,6 +281,9 @@ class StructureOrchestrator:
 
         if skill_content is None and structure_class is not None:
             skill_content = self._load_structure_skill(structure_class)
+
+        if validation_rubric is None and structure_class is not None:
+            validation_rubric = self._load_validation_rubric(structure_class)
 
         max_cycles = self.max_refinement_cycles if max_cycles is None else max_cycles
 
@@ -326,7 +361,8 @@ class StructureOrchestrator:
             val_result = self.structure_validator.validate_structure_and_script(
                 structure_file_path=structure_file,
                 generating_script_content=script_content,
-                original_request=user_request
+                original_request=user_request,
+                validation_rubric=validation_rubric,
             )
 
             validator_feedback = val_result

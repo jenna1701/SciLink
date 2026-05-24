@@ -240,13 +240,17 @@ class SimulationOrchestratorTools:
                 })
 
             # Delegate the whole generate → validate → refine loop to the
-            # StructureOrchestrator (single source of truth). structure_class is
-            # None here: the chat tool's skill axis is the user-supplied `skill`,
-            # already rendered into skill_content above — no class skill is
-            # auto-loaded. The orchestrator appends the POSCAR-format instruction.
+            # StructureOrchestrator (single source of truth). structure_class
+            # defaults to "crystal": simulate mode is periodic-DFT-centric today,
+            # so crystal is the sensible default *class* (it supplies the
+            # class-specific validation rubric). A user-supplied `skill` (rendered
+            # into skill_content above) overrides the crystal *generation* skill;
+            # the crystal validation rubric still applies. The orchestrator
+            # appends the POSCAR-format instruction. (When the StructurePlanner
+            # lands it will set structure_class per request.)
             result = so.generate_and_validate(
                 description,
-                structure_class=None,
+                structure_class="crystal",
                 skill_content=skill_content,
                 prior_script=prior_script,
                 validate=validate_and_refine,
