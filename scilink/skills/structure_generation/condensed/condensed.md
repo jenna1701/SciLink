@@ -1,0 +1,75 @@
+---
+description: Condensed-phase / solvated-box structure generation — liquids, solutions, explicitly-solvated solutes, amorphous cells, and interfaces at a target density via Packmol (incl. pymatgen's wrapper) / OpenMM / mBuild / ASE, written as a periodic VASP5 POSCAR. For classical MD (LAMMPS, GROMACS, OpenMM).
+output_format: POSCAR
+---
+## Overview
+
+Build **periodic condensed-phase** systems for classical MD (LAMMPS, GROMACS, OpenMM): bulk
+liquids, solutions, explicitly-solvated solutes, amorphous cells, and liquid/solid interfaces.
+Output a periodic **POSCAR** (orthorhombic/cubic cell + all atoms). The goal is the right
+number of molecules at a realistic **density**, packed into a periodic box with no severe
+overlaps — a sound *initial* configuration that MD equilibration will relax.
+
+This is for many-molecule periodic boxes. For a single isolated molecule use `molecular`; for
+crystalline solids use `crystal`; for proteins / nucleic acids use `biomolecular`.
+
+**Scope boundary:** this step produces *coordinates*. Force-field assignment / atom typing /
+charges are a downstream step. When the target is an AMBER-typed system (proteins, or small
+molecules needing GAFF), solvation + counter-ions are usually done together with topology
+building via AmberTools `tleap` — see the **`amber` force-field skill** (`force_field/amber`) —
+rather than packed here. Pack explicitly here for generic liquids / solutions / amorphous cells.
+
+## Planning
+
+1. **Components & counts:** parse the requested species and their numbers or concentration
+   (e.g. "256 water", "1 M NaCl in water"). When only a density/box is given, compute counts
+   from the target density: ρ = (Σ Nᵢ · Mᵢ) / (N_A · V).
+2. **Box size:** choose a cubic/orthorhombic cell giving the target density (e.g. liquid water
+   ≈ 1.0 g/cm³ → ~0.033 molecules/Å³). Size it so a solute does not see its own periodic image
+   (≳ 10–12 Å of solvent around a solute).
+3. **Explicit solvent:** classical MD uses **explicit** solvent — actually place the solvent
+   molecules (unlike molecular DFT's implicit model). Add counter-ions to neutralize a charged
+   solute when relevant.
+4. **Packing:** plan a non-overlapping random packing. Equilibration (NPT/NVT) is a downstream
+   MD step — here you only need a valid, non-overlapping start near the target density.
+
+## Implementation
+
+Prefer whatever is installed (the generation loop will fall back if an import is missing):
+
+- **Packmol** — the de-facto packing tool. Drive it from Python via **pymatgen**
+  (`pymatgen.io.packmol.PackmolBoxGen`), which writes the Packmol input, runs it, and returns a
+  structure; or write a Packmol input file and call the `packmol` binary via `subprocess`
+  (place N copies per species with a `tolerance` ≈ 2.0 Å minimum separation).
+- **OpenMM `Modeller.addSolvent()`** (often with **PDBFixer**) — adds a water box + neutralizing
+  ions in a few lines; convenient for solvating a solute.
+- **mBuild (MoSDeF)** — programmatic construction of complex / multi-component / polymeric boxes
+  (`mbuild.fill_box`).
+- **ASE / numpy fallback** — build each molecule once (ASE / RDKit), then insert copies at random
+  positions/orientations into the cell, rejecting placements closer than a minimum distance.
+- **Cell & PBC:** set an orthorhombic/cubic `cell` and `pbc=True` sized to the target density.
+- **Output:** write a periodic POSCAR, e.g.
+  `ase.io.write("POSCAR", atoms, format="vasp", vasp5=True, direct=True)`, then print the exact
+  line `STRUCTURE_SAVED:POSCAR`.
+
+## Validation
+
+A generated **condensed-phase box** is a valid MD starting configuration when:
+
+- It parses, and the **composition / molecule counts** match the request (and the box is
+  net-neutral when ions are involved).
+- **Density** is within ~10–20 % of the target / a physically realistic value for the phase
+  (not vacuum-sparse, not impossibly dense).
+- **Periodic box:** full 3D PBC with sensible, large-enough cell dimensions (a solute has
+  ≳ 10 Å of solvent to its periodic image).
+- **No severe atom overlaps** (min pairwise distance ≳ 0.7 Å); molecules are intact, not
+  inter-penetrating.
+
+**Do NOT flag (MD equilibration resolves these):**
+
+- Modest close contacts or a not-yet-equilibrated, slightly high-energy packing.
+- Lack of a relaxed radial distribution / perfect spacing — that's what the MD run produces.
+
+**Flag as substantive:** wrong composition or molecule counts, density wildly off (too dense →
+unresolvable overlaps; too sparse → vacuum voids / unintended interface), missing PBC, a charged
+box that should be neutral, demixed/empty regions, or broken (inter-penetrating) molecules.

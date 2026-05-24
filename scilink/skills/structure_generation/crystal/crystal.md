@@ -1,5 +1,6 @@
 ---
 description: Crystalline / periodic structure generation — bulk crystals, supercells, point defects (vacancies, substitutions, interstitials), surface slabs, and 2D monolayers via ASE / pymatgen / Materials Project, written as a VASP5 POSCAR.
+output_format: POSCAR
 ---
 ## Overview
 

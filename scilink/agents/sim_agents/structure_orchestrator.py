@@ -226,11 +226,25 @@ class StructureOrchestrator:
         )
         return body
 
+    def _load_output_format(self, structure_class: str) -> Optional[str]:
+        """Read the ``output_format`` frontmatter key of the
+        ``structure_generation/<structure_class>`` skill (e.g. POSCAR / xyz / pdb).
+        Returns None when no bundle / no key is set.
+        """
+        try:
+            from ...skills.loader import load_skill
+            parsed = load_skill(structure_class, domain="structure_generation")
+        except Exception:
+            return None
+        fmt = (parsed.get("meta") or {}).get("output_format")
+        return str(fmt) if fmt else None
+
     def generate_and_validate(self, user_request: str,
                               structure_class: Optional[str] = "crystal",
                               *,
                               skill_content: Optional[str] = None,
                               validation_rubric: Optional[str] = None,
+                              output_format: Optional[str] = None,
                               prior_script: Optional[str] = None,
                               validate: bool = True,
                               max_cycles: Optional[int] = None,
@@ -259,6 +273,10 @@ class StructureOrchestrator:
             validator. Defaults to the ``## Validation`` section of the
             ``structure_class`` skill when not supplied (and ``structure_class``
             is set).
+        output_format : str, optional
+            Structure file format to request (``POSCAR`` / ``xyz`` / ``pdb`` / ...).
+            Defaults to the ``output_format`` frontmatter of the ``structure_class``
+            skill, else ``POSCAR``.
         prior_script : str, optional
             A previously generated script to modify (variant builds); applied to
             the initial generation only.
@@ -285,6 +303,11 @@ class StructureOrchestrator:
         if validation_rubric is None and structure_class is not None:
             validation_rubric = self._load_validation_rubric(structure_class)
 
+        if output_format is None and structure_class is not None:
+            output_format = self._load_output_format(structure_class)
+        output_format = output_format or "POSCAR"
+        request = f"{user_request}. Save the structure in {output_format} format."
+
         max_cycles = self.max_refinement_cycles if max_cycles is None else max_cycles
 
         previous_script_content = None
@@ -304,7 +327,7 @@ class StructureOrchestrator:
                 print(f"    Addressing: {len(validator_feedback.get('all_identified_issues', []))} validation issues")
 
             gen_result = self.structure_generator.generate_script(
-                original_user_request=user_request + ". Save the structure in POSCAR format.",
+                original_user_request=request,
                 attempt_number_overall=cycle_num,
                 is_refinement_from_validation=(cycle > 0),
                 previous_script_content=previous_script_content if cycle > 0 else None,
