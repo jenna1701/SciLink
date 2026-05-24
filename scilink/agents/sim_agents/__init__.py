@@ -16,3 +16,4 @@ from .structure_orchestrator import StructureOrchestrator
 from .dft_orchestrator import DFTOrchestrator
 from .simulation_orchestrator import SimulationOrchestratorAgent, SimulationMode
 from .simulation_router import SimulationRouter, discover_scale_agents
+from .structure_planner import StructurePlanner, StructureSpec
