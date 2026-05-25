@@ -2,7 +2,7 @@
 description: Quantum ESPRESSO (pw.x) DFT input generation — namelist/card construction (&CONTROL/&SYSTEM/&ELECTRONS/&IONS/&CELL; ATOMIC_SPECIES, ATOMIC_POSITIONS, K_POINTS, CELL_PARAMETERS), plane-wave cutoffs, smearing, spin polarization, and pseudopotential conventions for metals, semiconductors, slabs, and molecules.
 detect:
   binaries: [pw.x]
-  env_vars: [ESPRESSO_PSEUDO, ESPRESSO_TMPDIR, ESPRESSO_ROOT]
+  env_vars: []
   python_modules: []
   guidance: |
     Quantum ESPRESSO's plane-wave SCF / relaxation engine is pw.x. On
@@ -10,8 +10,10 @@ detect:
     quantum-espresso/<version>` (or `qe/<version>`), so a bare $PATH
     check can miss it. Pseudopotentials are located via the `pseudo_dir`
     input variable or the $ESPRESSO_PSEUDO environment variable.
-    Detection should treat any pw.x on $PATH, or $ESPRESSO_PSEUDO /
-    $ESPRESSO_TMPDIR being set, as a positive hit.
+    Detection relies on pw.x being on $PATH (which `module load
+    quantum-espresso` provides). QE env vars like $ESPRESSO_PSEUDO point at a
+    pseudopotential directory, not the pw.x binary, so they are not used as a
+    detection hit.
 ---
 # Quantum ESPRESSO Input Generation Skill
 
@@ -106,7 +108,8 @@ count) and `ntyp` (number of distinct species). Use `ATOMIC_POSITIONS {crystal}`
 `cell_dofree` (e.g. `'2Dxy'` to relax only in-plane for a slab).
 
 **`K_POINTS`:**
-- **Bulk:** `K_POINTS automatic` with a Monkhorst-Pack mesh of ~0.03 Ang^-1 spacing;
+- **Bulk:** `K_POINTS automatic` with a Monkhorst-Pack mesh of ~0.15-0.25 Ang^-1 spacing
+  (≈ 8-16^3 on a cubic 3-4 Ang cell; denser for metals/small cells, sparser for large ones);
   Gamma-centered shift `0 0 0` for hexagonal cells and metals: `nk1 nk2 nk3 0 0 0`.
 - **Slab:** same in-plane density, `1` in the vacuum direction, e.g.
   `nk1 nk2 1 0 0 0`; set `assume_isolated='2D'` (or use `dipfield`/`edir`/`emaxpos`/
@@ -131,7 +134,7 @@ fix the bottom layers to mimic bulk.
   /
   &SYSTEM
     ibrav       = 0
-    nat         = 2
+    nat         = 4
     ntyp        = 1
     ecutwfc     = 50
     ecutrho     = 400
@@ -154,7 +157,9 @@ fix the bottom layers to mimic bulk.
     Cu  63.546  Cu.pbe-dn-kjpaw_psl.1.0.0.UPF
   ATOMIC_POSITIONS crystal
     Cu  0.0  0.0  0.0
-    Cu  0.5  0.5  0.5
+    Cu  0.5  0.5  0.0
+    Cu  0.5  0.0  0.5
+    Cu  0.0  0.5  0.5
   K_POINTS automatic
     12 12 12 0 0 0
   CELL_PARAMETERS angstrom
