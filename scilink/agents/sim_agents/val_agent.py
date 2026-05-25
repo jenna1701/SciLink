@@ -180,12 +180,21 @@ class StructureValidatorAgent:
         except Exception:
             pass
 
-        # Min pairwise distance with PBC — catches atom overlap / unphysical bonds
+        # Min pairwise distance — catches atom overlap / unphysical bonds.
+        # Use a KD-tree (O(N log N) memory) rather than the dense N×N
+        # get_all_distances matrix, which OOMs for large systems (a 20k-atom
+        # solvated protein needs ~3.4 GB and gets SIGKILLed).
         try:
-            dists = atoms.get_all_distances(mic=True)
-            np.fill_diagonal(dists, np.inf)
-            min_d = float(dists.min())
-            lines.append(f"- Min pairwise distance (with PBC): {min_d:.3f} Å")
+            from scipy.spatial import cKDTree
+            pos = atoms.get_positions()
+            boxsize = None
+            if bool(atoms.pbc.all()) and atoms.cell.orthorhombic:
+                boxsize = atoms.cell.lengths()
+                pos = pos % boxsize          # cKDTree(boxsize=...) needs coords in [0, L)
+            tree = cKDTree(pos, boxsize=boxsize)
+            nn = tree.query(pos, k=2)[0][:, 1]   # k=1 is the atom itself
+            min_d = float(nn.min())
+            lines.append(f"- Min pairwise distance{' (PBC)' if boxsize is not None else ''}: {min_d:.3f} Å")
         except Exception:
             pass
 
@@ -263,13 +272,21 @@ class StructureValidatorAgent:
 
 
     def _get_llm_validation_and_hints(self, original_request: str, generating_script_content: str,
-                                      structure_file_path: str, structure_file_content: str = "", 
+                                      structure_file_path: str, structure_file_content: str = "",
                                       image_paths: Dict[str, str] = None,
-                                      tool_documentation: str = None) -> dict:
+                                      tool_documentation: str = None,
+                                      validation_rubric: str = None) -> dict:
         """
         Uses an LLM to perform full validation including analysis of the actual structure file content and images.
+
+        ``validation_rubric`` (optional) carries the structure-class-specific
+        acceptance criteria (the ``## Validation`` section of a
+        structure_generation skill, e.g. crystal / molecular / condensed /
+        biomolecular). The base prompt is class-neutral; this rubric supplies the
+        authoritative, class-specific standard so e.g. a molecule isn't judged by
+        periodic-crystal supercell/vacuum expectations.
         """
-        
+
         # Format tool documentation section
         doc_section = ""
         if tool_documentation:
@@ -281,6 +298,15 @@ class StructureValidatorAgent:
     Use the proper syntax, classes, and methods shown in the documentation above when suggesting improvements.
 
     """
+
+        # Format structure-class validation rubric (authoritative per-class criteria)
+        rubric_section = ""
+        if validation_rubric:
+            rubric_section = f"""
+
+## STRUCTURE-CLASS VALIDATION CRITERIA (authoritative for this structure):
+{validation_rubric}
+"""
         
         # Format structure file content section
         structure_section = ""
@@ -307,7 +333,7 @@ class StructureValidatorAgent:
             original_request=original_request,
             generating_script_content=generating_script_content,
             structure_file_path=structure_file_path,
-        ) + stats_section + structure_section
+        ) + rubric_section + stats_section + structure_section
 
         # --- Build multi-modal prompt ---
         # The wrapper handles list inputs [text, image, image...]
@@ -383,11 +409,16 @@ class StructureValidatorAgent:
                 "script_modification_hints": []
             }
 
-    def validate_structure_and_script(self, structure_file_path: str, generating_script_content: str, 
-                                      original_request: str, tool_documentation: str = None) -> dict:
+    def validate_structure_and_script(self, structure_file_path: str, generating_script_content: str,
+                                      original_request: str, tool_documentation: str = None,
+                                      validation_rubric: str = None) -> dict:
         """
         Main validation method. Generates images and relies on LLM for all checks.
         Returns a dictionary with validation status, issues, and script modification hints.
+
+        ``validation_rubric`` (optional) supplies structure-class-specific
+        acceptance criteria injected as authoritative guidance (see
+        ``_get_llm_validation_and_hints``).
         """
         self.logger.info(f"Starting LLM-based validation with structure file analysis for '{structure_file_path}'")
     
@@ -419,7 +450,8 @@ class StructureValidatorAgent:
             structure_file_path=structure_file_path,
             structure_file_content=structure_file_content, # Pass raw file content
             image_paths=image_paths, # Pass generated image paths
-            tool_documentation=tool_documentation
+            tool_documentation=tool_documentation,
+            validation_rubric=validation_rubric,
         )
 
         final_feedback["overall_assessment"] = llm_feedback.get("overall_assessment", "LLM assessment missing or failed.")

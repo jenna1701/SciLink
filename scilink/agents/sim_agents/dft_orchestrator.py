@@ -1,24 +1,17 @@
 # scilink/agents/sim_agents/dft_orchestrator.py
 
 import os
-import sys
 import logging
 import json
-from io import StringIO
 from typing import Optional, Dict, Any
 from pathlib import Path
 
 from ase.io import read as ase_read
 
-from ...auth import (
-    get_api_key,
-    get_internal_proxy_key,
-    infer_provider,
-    APIKeyNotFoundError,
-)
+from ...auth import get_api_key
 from ._deprecation import normalize_params
-from .structure_agent import StructureGenerator
-from .val_agent import StructureValidatorAgent, IncarValidatorAgent
+from .structure_orchestrator import StructureOrchestrator
+from .val_agent import IncarValidatorAgent
 from .vasp_agent import VaspInputAgent
 from .vasp_updater import VaspUpdater
 # Atomate2Input is imported lazily in the "atomate2" branch so users picking
@@ -83,57 +76,32 @@ class DFTOrchestrator:
             source="DFTOrchestrator",
         )
 
-        # Auto-discover API keys: infer provider from the generator model
-        # (LiteLLM routes by model prefix, so the key must match the
-        # model's provider). Fall back to the internal-proxy key
-        # (SCILINK_API_KEY) when no provider-specific key is set.
-        if api_key is None and base_url is None:
-            provider = infer_provider(generator_model) or 'google'
-            api_key = get_api_key(provider) or get_internal_proxy_key()
-            if not api_key:
-                raise APIKeyNotFoundError(provider)
+        # Structure generation (Step 1) is delegated to a structure-class-aware,
+        # engine-agnostic StructureOrchestrator. It owns the structure
+        # generate → validate → refine loop, structure-class skill loading,
+        # API-key auto-discovery, and the shared run log. The DFT-specific agents
+        # below reuse its resolved credentials and run log.
+        self.structure = StructureOrchestrator(
+            api_key=api_key,
+            base_url=base_url,
+            mp_api_key=mp_api_key,
+            generator_model=generator_model,
+            validator_model=validator_model,
+            output_dir=output_dir,
+            max_refinement_cycles=max_refinement_cycles,
+            script_timeout=script_timeout,
+        )
+        api_key = self.api_key = self.structure.api_key
+        base_url = self.base_url = self.structure.base_url
+        self.logger = logging.getLogger(__name__)
+        self.log_capture = self.structure.log_capture
 
         if futurehouse_api_key is None:
             futurehouse_api_key = get_api_key('futurehouse')
-
-        if mp_api_key is None:
-            mp_api_key = get_api_key('materials_project')
-
-        # Setup logging
-        self.log_capture = StringIO()
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s: %(name)s: %(message)s',
-            force=True,
-            handlers=[
-                logging.StreamHandler(sys.stdout),
-                logging.StreamHandler(self.log_capture)
-            ]
-        )
-        self.logger = logging.getLogger(__name__)
-
-        self.api_key = api_key
-        self.base_url = base_url
         self.futurehouse_api_key = futurehouse_api_key
         self.output_dir = output_dir
         self.max_refinement_cycles = max_refinement_cycles
         self.vasp_generator_method = vasp_generator_method
-
-        # Initialize agents
-        self.structure_generator = StructureGenerator(
-            api_key=api_key,
-            base_url=base_url,
-            model_name=generator_model,
-            executor_timeout=script_timeout,
-            generated_script_dir=output_dir,
-            mp_api_key=mp_api_key,
-        )
-
-        self.structure_validator = StructureValidatorAgent(
-            api_key=api_key,
-            base_url=base_url,
-            model_name=validator_model,
-        )
 
         # Instantiate the correct VASP agent based on the chosen method.
         if self.vasp_generator_method == "llm":
@@ -178,9 +146,13 @@ class DFTOrchestrator:
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
 
-    def run_complete_workflow(self, user_request: str) -> Dict[str, Any]:
+    def run_complete_workflow(self, user_request: str,
+                              structure_class: str = "crystal") -> Dict[str, Any]:
         """
         Run the complete workflow from user request to final VASP inputs.
+
+        ``structure_class`` is forwarded to the StructureOrchestrator for Step 1
+        (structure generation); see ``StructureOrchestrator.build_structure``.
         """
         workflow_result = {
             "user_request": user_request,
@@ -199,7 +171,9 @@ class DFTOrchestrator:
         print(f"\n🏗️  WORKFLOW STEP 1: Structure Generation & Validation")
         print(f"{'─'*50}")
 
-        structure_result = self._generate_and_validate_structure(user_request)
+        structure_result = self.structure.generate_and_validate(
+            user_request, structure_class=structure_class
+        )
         workflow_result["structure_generation"] = structure_result
 
         if structure_result["status"] != "success":
@@ -257,7 +231,7 @@ class DFTOrchestrator:
         workflow_result["final_manifest"] = final_manifest
 
         # Save complete log
-        self._save_workflow_log()
+        self.structure._save_workflow_log()
 
         # Final summary
         self._print_final_summary(workflow_result)
@@ -317,182 +291,6 @@ class DFTOrchestrator:
             "message":       plan.get("message", ""),
             "explanation":    plan.get("explanation", {})
         }
-
-    def _generate_and_validate_structure(self, user_request: str) -> Dict[str, Any]:
-        """Generate and validate atomic structure with improved output formatting.
-
-        Includes a circuit-breaker that exits early when refinement stops making
-        progress (issue count not strictly decreasing for 2 consecutive cycles,
-        or generator returned an unchanged script).
-        """
-
-        previous_script_content = None
-        previous_structure_file = None
-        previous_final_script_path = None
-        validator_feedback = None
-        attempt_history: list = []   # full per-cycle log: {script, issues, hints}
-
-        for cycle in range(self.max_refinement_cycles + 1):
-            cycle_num = cycle + 1
-            total_cycles = self.max_refinement_cycles + 1
-
-            if cycle == 0:
-                print(f"🔨 Generating structure (attempt {cycle_num}/{total_cycles})")
-            else:
-                print(f"🔄 Refining structure (attempt {cycle_num}/{total_cycles})")
-                print(f"    Addressing: {len(validator_feedback.get('all_identified_issues', []))} validation issues")
-
-            gen_result = self.structure_generator.generate_script(
-                original_user_request=user_request + ". Save the structure in POSCAR format.",
-                attempt_number_overall=cycle_num,
-                is_refinement_from_validation=(cycle > 0),
-                previous_script_content=previous_script_content if cycle > 0 else None,
-                validator_feedback=validator_feedback if cycle > 0 else None,
-                attempt_history=attempt_history if cycle > 0 else None,
-            )
-
-            if gen_result["status"] != "success":
-                return {
-                    "status": "error",
-                    "message": f"Structure generation failed on cycle {cycle_num}: {gen_result.get('message')}",
-                    "cycle": cycle_num
-                }
-
-            structure_file = gen_result["output_file"]
-            script_content = gen_result["final_script_content"]
-
-            # CIRCUIT-BREAKER 1: generator returned an unchanged script.
-            # Treat as "the model has nothing more to fix" and accept current state.
-            if cycle > 0 and script_content == previous_script_content:
-                print(f"🛑 Generator returned an unchanged script — "
-                      f"accepting current structure (cycle {cycle_num}).")
-                return {
-                    "status": "success",
-                    "final_structure_path": previous_structure_file or structure_file,
-                    "final_script_path": previous_final_script_path or gen_result["final_script_path"],
-                    "cycles_used": cycle_num,
-                    "validation_result": validator_feedback,
-                    "warning": "Refinement stopped: generator made no further changes.",
-                }
-
-            previous_script_content = script_content
-            previous_structure_file = structure_file
-            previous_final_script_path = gen_result["final_script_path"]
-
-            print(f"    ✅ Structure file: {os.path.basename(structure_file)}")
-            print(f"    🐍 Script: {os.path.basename(gen_result['final_script_path'])}")
-
-            print(f"🔍 Validating structure...")
-            val_result = self.structure_validator.validate_structure_and_script(
-                structure_file_path=structure_file,
-                generating_script_content=script_content,
-                original_request=user_request
-            )
-
-            validator_feedback = val_result
-            self._print_validation_results(val_result, cycle_num)
-
-            # Record this cycle in the history for the next iteration's prompt
-            attempt_history.append({
-                "script": script_content,
-                "issues": list(val_result.get("all_identified_issues", []) or []),
-                "hints": list(val_result.get("script_modification_hints", []) or []),
-            })
-
-            if val_result["status"] == "success":
-                return {
-                    "status": "success",
-                    "final_structure_path": structure_file,
-                    "final_script_path": gen_result["final_script_path"],
-                    "cycles_used": cycle_num,
-                    "validation_result": val_result
-                }
-
-            # CIRCUIT-BREAKER 2: issue count failed to strictly decrease over
-            # the last 2 consecutive cycles. Two distinct sub-cases:
-            #   - PLATEAU (n2 == n1 == n0): same cosmetic complaints repeating
-            #   - DIVERGENCE (n0 > n2): refinement is making the structure
-            #     worse — each cycle introduces new issues without resolving
-            #     old ones. Surfaced as a louder warning so callers know the
-            #     final structure has substantial unresolved problems.
-            # In both cases we accept the current structure (continuing to
-            # refine wouldn't help), but the warning text differs.
-            if len(attempt_history) >= 3:
-                n_now = len(attempt_history[-1]["issues"])
-                n_prev = len(attempt_history[-2]["issues"])
-                n_prev2 = len(attempt_history[-3]["issues"])
-                if n_now >= n_prev and n_prev >= n_prev2:
-                    if n_now > n_prev2:
-                        print(f"🛑 Validator complaints diverging "
-                              f"({n_prev2} → {n_prev} → {n_now}); refinement is "
-                              f"making the structure worse, not better. Accepting "
-                              f"current structure but flagging unresolved issues.")
-                        warning = (
-                            f"Refinement stopped: validator complaints "
-                            f"diverging ({n_prev2} → {n_prev} → {n_now}). "
-                            f"Structure may have substantial unresolved issues; "
-                            f"review the validation feedback before relying on "
-                            f"the VASP inputs."
-                        )
-                    else:
-                        print(f"🛑 Issue count plateaued over 2 cycles "
-                              f"({n_prev2} → {n_prev} → {n_now}); validator "
-                              f"complaints appear cosmetic. Accepting current "
-                              f"structure.")
-                        warning = (
-                            "Refinement stopped: issue count plateaued "
-                            "(likely cosmetic)."
-                        )
-                    return {
-                        "status": "success",
-                        "final_structure_path": structure_file,
-                        "final_script_path": gen_result["final_script_path"],
-                        "cycles_used": cycle_num,
-                        "validation_result": val_result,
-                        "warning": warning,
-                    }
-
-            if cycle < self.max_refinement_cycles:
-                print(f"🔄 Issues found, attempting refinement...")
-                continue
-            else:
-                print(f"⚠️  Max refinement cycles reached, proceeding with current structure")
-                return {
-                    "status": "success",
-                    "final_structure_path": structure_file,
-                    "final_script_path": gen_result["final_script_path"],
-                    "cycles_used": cycle_num,
-                    "validation_result": val_result,
-                    "warning": "Structure may have validation issues"
-                }
-
-        return {"status": "error", "message": "Structure generation loop failed"}
-
-    def _print_validation_results(self, val_result: Dict[str, Any], cycle_num: int):
-        """Print validation results in a user-friendly format."""
-
-        if val_result["status"] == "success":
-            print(f"    ✅ Validation passed")
-            return
-
-        issues = val_result.get("all_identified_issues", [])
-        hints = val_result.get("script_modification_hints", [])
-        assessment = val_result.get("overall_assessment", "No assessment provided")
-
-        print(f"    ⚠️  Validation found {len(issues)} issue(s):")
-        print(f"\n    📋 Overall Assessment:")
-        print(f"       {assessment}")
-
-        if issues:
-            print(f"\n    🔍 Specific Issues:")
-            for i, issue in enumerate(issues, 1):
-                print(f"       {i}. {issue}")
-
-        if hints:
-            print(f"\n    💡 Suggested Improvements:")
-            for i, hint in enumerate(hints, 1):
-                print(f"       {i}. {hint}")
-        print()
 
     def _generate_vasp_inputs(self, structure_path: str, user_request: str) -> Dict[str, Any]:
         """Generate VASP INCAR and KPOINTS files using the selected method."""
@@ -630,21 +428,6 @@ class DFTOrchestrator:
                 summary += f"  KPOINTS: {final_files.get('kpoints', 'N/A')}\n"
                 summary += f"  Directory: {manifest['output_directory']}/\n"
         return summary
-
-    def _save_workflow_log(self) -> str:
-        """Save all captured logs to a file."""
-        try:
-            log_content = self.log_capture.getvalue()
-            log_path = os.path.join(self.output_dir, "workflow_log.txt")
-            with open(log_path, 'w') as f:
-                f.write(f"DFT Workflow Complete Log\n")
-                f.write(f"{'='*30}\n\n")
-                f.write(log_content)
-            print(f"📝 Complete workflow log saved: {log_path}")
-            return log_path
-        except Exception as e:
-            print(f"Warning: Could not save workflow log: {e}")
-            return ""
 
     def _create_final_files_manifest(self, workflow_result: Dict[str, Any]) -> Dict[str, str]:
         """Create a JSON manifest of final files."""
