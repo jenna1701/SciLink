@@ -13,6 +13,7 @@ import traceback
 from ....skills.hyperspectral.eels import eels as tools
 from ....skills._shared.image_processor import load_image
 from ..preprocess import HyperspectralPreprocessingAgent
+from ..metadata_converter import resolve_axis_spec, describe_axes_for_prompt
 from ..instruct import (
     COMPONENT_INITIAL_ESTIMATION_INSTRUCTIONS,
     COMPONENT_SELECTION_WITH_ELBOW_INSTRUCTIONS,
@@ -20,8 +21,8 @@ from ..instruct import (
     SPECTROSCOPY_HOLISTIC_SYNTHESIS_INSTRUCTIONS,
     SPECTROSCOPY_REFLECTION_INSTRUCTIONS,
     SPECTROSCOPY_REFLECTION_UPDATE_INSTRUCTIONS,
-    SPECTROSCOPY_VALIDATION_INTERPRETATION_INSTRUCTIONS,  
-    SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS,                  
+    SPECTROSCOPY_VALIDATION_INTERPRETATION_INSTRUCTIONS,
+    SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS,
 )
 
 from ....skills.hyperspectral.eels.eels import AGENT_METADATA_KEYS_TO_STRIP
@@ -310,10 +311,11 @@ class GetInitialComponentParamsController:
 
         h, w, e = state["hspy_data"].shape
         data_quality = state.get("data_quality", {})
+        axis_spec = resolve_axis_spec(state.get("system_info"))
 
         prompt_parts = [self.instructions]
         prompt_parts.append(f"\n\n--- Hyperspectral Data Information ---")
-        prompt_parts.append(f"Data dimensions: {h}x{w} spatial pixels, {e} spectral channels")
+        prompt_parts.append(f"Data dimensions: {describe_axes_for_prompt((h, w, e), axis_spec)}")
         prompt_parts.append(f"\n--- Data Quality Assessment (from Preprocessor) ---")
         prompt_parts.append(f"- Robust SNR Estimate: {data_quality.get('snr_estimate', 'N/A')}")
         prompt_parts.append(f"- Assessment: {data_quality.get('reasoning', 'N/A')}")
@@ -806,12 +808,13 @@ Use this context to guide your interpretation.
         
         # 3. Data Metadata
         h, w, e = state["hspy_data"].shape
-        _, energy_xlabel, _ = tools.create_energy_axis(e, state["system_info"])
-        
+        axis_spec = resolve_axis_spec(state.get("system_info"))
+        _, energy_xlabel, _ = tools.create_axis(e, state["system_info"], axis_index=2)
+
         metadata_info = f"""
 
 Hyperspectral Data Information:
-- Data shape: ({h}, {w}, {e})
+- Data shape: ({h}, {w}, {e}) = {describe_axes_for_prompt((h, w, e), axis_spec)}
 - X-axis: {energy_xlabel}
 """
         
@@ -1575,23 +1578,22 @@ class RunDynamicAnalysisController:
 
         # --- PREPARE DATA CONTEXT ---
         h, w, e = state["hspy_data"].shape
-        
-        # Axis & Unit Detection
+
+        # Axis & Unit Detection — reads through resolve_axis_spec so non-energy
+        # axes (time, voltage, frequency, ...) work the same as the legacy
+        # energy_range path. The state key remains "energy_axis" for backward
+        # compatibility with downstream consumers.
         sys_info = state.get("system_info", {})
-        axis_units = "unknown units"
-        
+        axis_spec = resolve_axis_spec(sys_info)
+        axis_2 = axis_spec["axis_2"]
+        axis_units = axis_2.get("units", "arbitrary units")
+
         if "energy_axis" not in state:
-            if sys_info.get("energy_range"):
-                start = sys_info["energy_range"]["start"]
-                end = sys_info["energy_range"]["end"]
-                state["energy_axis"] = np.linspace(start, end, e)
-                axis_units = sys_info["energy_range"].get("units", "arbitrary units")
+            if "start" in axis_2 and "end" in axis_2:
+                state["energy_axis"] = np.linspace(axis_2["start"], axis_2["end"], e)
             else:
                 state["energy_axis"] = np.arange(e)
                 axis_units = "channels"
-        else:
-            # Try to grab units if existing
-            axis_units = sys_info.get("energy_range", {}).get("units", "arbitrary units")
 
         self.logger.info(f"Data Axis Units detected as: {axis_units}")
 

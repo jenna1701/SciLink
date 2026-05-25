@@ -146,43 +146,70 @@ def run_spectral_unmixing(
 # ENERGY AXIS UTILITIES
 # =============================================================================
 
+def create_axis(
+    n_channels: int,
+    system_info: dict = None,
+    axis_index: int = 2,
+) -> tuple[np.ndarray, str, bool]:
+    """
+    Create a physical axis for a hyperspectral dataset axis.
+
+    Defaults to ``axis_index=2`` (the third / "signal" axis), which preserves
+    the historical (x, y, energy) layout. Reads through
+    ``metadata_converter.resolve_axis_spec`` so that callers see the same
+    behavior whether the metadata uses legacy ``energy_range`` or a generic
+    ``axis_spec``.
+
+    Returns ``(axis_values, xlabel, has_axis_info)``. Raises ``ValueError``
+    when the requested axis has no physical range (``start`` / ``end``)
+    available — same contract as the legacy ``create_energy_axis``.
+    """
+    # Local import to avoid an agents -> skills -> agents cycle at module load.
+    from ....agents.exp_agents.metadata_converter import resolve_axis_spec
+
+    spec = resolve_axis_spec(system_info)
+    key = f"axis_{axis_index}"
+    if key not in spec:
+        raise ValueError(f"axis_index {axis_index} is out of range for a 3D dataset.")
+
+    axis_info = spec[key]
+    name = axis_info.get("name", "axis")
+    units = axis_info.get("units", "a.u.")
+
+    if "start" not in axis_info or "end" not in axis_info:
+        # Preserve the legacy error message for the common energy case so that
+        # existing call sites and user-facing messaging are unchanged.
+        if name == "energy" and not (system_info and "axis_spec" in system_info):
+            raise ValueError(
+                "Energy axis information is required for hyperspectral analysis. "
+                "Metadata must include 'energy_range' with 'start' and 'end' values "
+                "(and optionally 'units')."
+            )
+        raise ValueError(
+            f"Axis {axis_index} ('{name}') is missing physical range. "
+            f"axis_spec.{key} must include 'start' and 'end' "
+            f"(or legacy energy_range for axis_2)."
+        )
+
+    start = axis_info["start"]
+    end = axis_info["end"]
+    axis_values = np.linspace(start, end, n_channels)
+    # Title-case the axis name for the label so "energy" -> "Energy (eV)"
+    # and "time" -> "Time (s)" without callers having to remember.
+    label_name = name[:1].upper() + name[1:] if name else "Axis"
+    xlabel = f"{label_name} ({units})"
+    return axis_values, xlabel, True
+
+
 def create_energy_axis(n_channels: int, system_info: dict = None) -> tuple[np.ndarray, str, bool]:
     """
-    Create energy axis from system_info.
+    Backwards-compatible shim for the legacy energy-axis API.
 
-    Raises ValueError when energy_range is missing, None, or incomplete
-    because a physical energy axis is required for meaningful hyperspectral
-    analysis.
+    Delegates to ``create_axis(n_channels, system_info, axis_index=2)`` so
+    existing call sites continue to work unchanged. New callers should use
+    ``create_axis`` directly when they need a non-default axis_index.
     """
-    if not system_info or "energy_range" not in system_info:
-        raise ValueError(
-            "Energy axis information is required for hyperspectral analysis. "
-            "Metadata must include 'energy_range' with 'start' and 'end' values "
-            "(and optionally 'units')."
-        )
-
-    energy_info = system_info["energy_range"]
-
-    if not energy_info or not isinstance(energy_info, dict):
-        raise ValueError(
-            "energy_range in metadata is empty or invalid. "
-            "It must be a dict with 'start' and 'end' keys "
-            "(e.g. {\"start\": 0, \"end\": 50, \"units\": \"eV\"})."
-        )
-
-    if "start" not in energy_info or "end" not in energy_info:
-        raise ValueError(
-            f"energy_range is incomplete: {energy_info}. "
-            "Both 'start' and 'end' are required."
-        )
-
-    start = energy_info["start"]
-    end = energy_info["end"]
-    units = energy_info.get("units", "eV")
-
-    energy_axis = np.linspace(start, end, n_channels)
-    xlabel = f"Energy ({units})"
-    return energy_axis, xlabel, True
+    return create_axis(n_channels, system_info, axis_index=2)
 
 
 def convert_energy_to_indices(
@@ -1100,14 +1127,31 @@ def apply_spectral_slice(
         
     sliced_data = original_hspy_data[..., slice_indices]
     
-    # We must also update the system_info to reflect this slice
+    # We must also update the system_info to reflect this slice. Update
+    # both legacy energy_range (when present) and the generic axis_spec
+    # (when present) so downstream callers using either form see the slice.
+    new_start = float(energy_axis[slice_indices[0]])
+    new_end = float(energy_axis[slice_indices[-1]])
+
     new_system_info = system_info.copy()
+    legacy_units = system_info.get("energy_range", {}).get("units", "unknown")
     new_system_info["energy_range"] = {
-        "start": float(energy_axis[slice_indices[0]]),
-        "end": float(energy_axis[slice_indices[-1]]),
-        "units": system_info.get("energy_range", {}).get("units", "unknown")
+        "start": new_start,
+        "end": new_end,
+        "units": legacy_units,
     }
-    
+    if "axis_spec" in system_info and system_info["axis_spec"]:
+        # Deep-copy the axis_spec so we don't mutate the caller's dict.
+        new_axis_spec = {k: dict(v) if isinstance(v, dict) else v
+                         for k, v in system_info["axis_spec"].items()}
+        axis_2 = new_axis_spec.get("axis_2") or {}
+        if not isinstance(axis_2, dict):
+            axis_2 = {}
+        axis_2["start"] = new_start
+        axis_2["end"] = new_end
+        new_axis_spec["axis_2"] = axis_2
+        new_system_info["axis_spec"] = new_axis_spec
+
     return sliced_data, new_system_info
 
 
