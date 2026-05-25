@@ -292,9 +292,9 @@ class RunPreprocessingController:
 class GetInitialComponentParamsController:
     """
     [🧠 LLM Step]
-    Asks LLM for initial n_components and decomposition method (NMF or PCA).
+    Asks LLM for initial n_components and decomposition method (NMF, PCA, or ICA).
     """
-    VALID_METHODS = ("nmf", "pca")
+    VALID_METHODS = ("nmf", "pca", "ica")
 
     def __init__(self, model, logger, generation_config, safety_settings, parse_fn: Callable):
         self.model = model
@@ -398,11 +398,25 @@ class RunComponentTestLoopController:
         if state.get("error_dict"): return state
         self.logger.info("\n\n🛠️ --- CALLING TOOL: COMPONENT TEST LOOP --- 🛠️\n")
 
+        method_name = state.get("settings", {}).get("method", "nmf").upper()
+
+        # ICA has no meaningful reconstruction-error trend in n_components, so
+        # the elbow loop is uninformative. Skip it and let the downstream
+        # selection controller fall back to the LLM's initial estimate.
+        if method_name == "ICA":
+            self.logger.info(
+                "ICA mode: skipping component test loop (no informative elbow). "
+                "Final n_components will use the LLM's initial estimate."
+            )
+            state["component_test_range"] = []
+            state["component_test_errors"] = []
+            state["component_test_visuals"] = []
+            return state
+
         tool_settings = self.settings.copy()
         for key in AGENT_METADATA_KEYS_TO_STRIP:
             tool_settings.pop(key, None)
 
-        method_name = state.get("settings", {}).get("method", "nmf").upper()
         initial_estimate = state.get("initial_n_components", 4)
         min_c = self.settings.get('min_auto_components', 2)
         max_c = self.settings.get('max_auto_components', min(initial_estimate + 4, 12))
@@ -655,10 +669,12 @@ class CreateAnalysisPlotsController:
         final_plots = []
         validated_bytes_list = []
 
-        if method_name == "PCA":
-            # --- PCA MODE: Summary-only (no per-component validation) ---
+        if method_name in ("PCA", "ICA"):
+            # --- PCA / ICA MODE: Summary-only (no per-component validation) ---
+            # Both produce signed components that don't map directly to physical
+            # phases, so we skip per-component reconstruction validation.
             self.logger.info(
-                f"PCA mode: Generating summary plot for {components.shape[0]} components..."
+                f"{method_name} mode: Generating summary plot for {components.shape[0]} components..."
             )
             summary_bytes = tools.create_nmf_summary_plot(
                 components, abundance_maps, components.shape[0],
@@ -821,6 +837,20 @@ Below is a PCA decomposition summary of the dataset.
 Top row: Principal Component spectra. Bottom row: Corresponding spatial loading maps.
 PCA components are exploratory — they capture variance directions, not necessarily physical phases.
 Identify spectral features of interest (peaks, edges, shifts) for custom code modeling.
+""")
+                # Append only the summary image (no per-component metrics)
+                for plot in state["component_pair_plots"]:
+                    prompt_parts.append(f"\n{plot['label']}:")
+                    prompt_parts.append({"mime_type": "image/jpeg", "data": plot['bytes']})
+            elif method_name == "ICA":
+                # ICA mode: summary-only, independent-source framing
+                prompt_parts.append(f"""
+Below is an ICA decomposition summary of the dataset.
+Top row: Independent Component spectra. Bottom row: Corresponding spatial loading maps.
+ICA components represent statistically independent sources rather than variance directions;
+they may overlap spectrally and can have signed loadings. Use them to identify candidate
+distinct contributions for custom code modeling, but do not treat them as physical phases
+without further validation.
 """)
                 # Append only the summary image (no per-component metrics)
                 for plot in state["component_pair_plots"]:
@@ -1290,10 +1320,10 @@ class GenerateHTMLReportController:
 
             # --- 2. Concept Triggers (The Safety Net) ---
 
-            # TRIGGER: Decomposition Summary (NMF or PCA)
+            # TRIGGER: Decomposition Summary (NMF, PCA, or ICA)
             # If the plot is a summary grid and the text mentions the method or "Components", show it.
             if "summary grid" in label_lower:
-                if "nmf" in lower_text or "pca" in lower_text or "component" in lower_text or "unmixing" in lower_text or "decomposition" in lower_text:
+                if "nmf" in lower_text or "pca" in lower_text or "ica" in lower_text or "component" in lower_text or "unmixing" in lower_text or "decomposition" in lower_text:
                     cited_images.append(img)
                     continue
 

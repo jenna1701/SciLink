@@ -127,6 +127,11 @@ def run_spectral_unmixing(
         elif method == 'pca':
             # Unexplained variance: 1 - cumulative explained variance ratio
             error = 1.0 - sum(unmixer.model.explained_variance_ratio_)
+        elif method == 'ica':
+            # FastICA has no built-in reconstruction error and no monotonic
+            # elbow trend in n_components — downstream controllers skip the
+            # elbow loop for ICA, so this is a placeholder.
+            error = 0.0
         else:
             error = 0.0
 

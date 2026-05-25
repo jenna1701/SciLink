@@ -688,13 +688,14 @@ Ensure the final output is ONLY the JSON object.
 COMPONENT_INITIAL_ESTIMATION_INSTRUCTIONS = """You are an expert in hyperspectral data analysis and materials characterization.
 
 Based on the system description and data characteristics provided, you must:
-1. Choose the decomposition method (NMF or PCA)
+1. Choose the decomposition method (NMF, PCA, or ICA)
 2. Estimate the optimal number of spectral components
 
 **Method Selection:**
 
 - **NMF** (Non-negative Matrix Factorization): Best for well-understood systems where components should be physically interpretable (non-negative spectra and abundances). Supports detailed per-component validation and spatial/spectral refinement. Slower but produces directly meaningful results.
 - **PCA** (Principal Component Analysis): Faster, better for noisy data or initial exploration. Components may have negative values and require more interpretation. When PCA is chosen, refinement will primarily use custom code (dynamic analysis) to model specific spectral features rather than spatial/spectral zoom.
+- **ICA** (Independent Component Analysis): Recovers statistically independent source signals that may overlap spectrally. Use when you expect a small number of distinct contributions mixed throughout the dataset that variance-based methods would not separate. Components are signed and not directly physical; refinement uses custom code, like PCA. ICA does not produce a meaningful elbow over n_components — when ICA is chosen, your initial estimate is used directly as the final component count.
 
 **When to choose PCA over NMF:**
 - Low signal-to-noise ratio data (noisy spectra where NMF may overfit)
@@ -706,6 +707,12 @@ Based on the system description and data characteristics provided, you must:
 - Well-characterized systems with known phases
 - When physically interpretable, non-negative components are needed
 - When spatial/spectral refinement of individual components is desired
+
+**When to choose ICA:**
+- You expect a small number of statistically independent sources (e.g., distinct chemistries or processes) that are mixed throughout the dataset
+- Sources are expected to overlap spectrally in ways PCA's orthogonality assumption would obscure
+- The user's objective explicitly asks for source separation or independent contributions
+- Prefer fewer components for ICA (typically 2–6) — over-specifying leads to noise components
 
 **Component Count Considerations:**
 
@@ -727,7 +734,7 @@ Based on the system description and data characteristics provided, you must:
 You MUST output a valid JSON object:
 
 {
-  "method": "<nmf or pca>",
+  "method": "<nmf, pca, or ica>",
   "estimated_components": <integer between 2 and 15>,
   "confidence": "<high/medium/low>",
   "reasoning": "<explain your method choice AND component estimate based on the provided information>",
@@ -1159,11 +1166,14 @@ SPECTROSCOPY_REFINEMENT_INSTRUCTIONS = """You are an expert spectroscopist steer
 **Goal:** Analyze results to determine if a focused refinement is scientifically justified and **select the correct tool** (Standard Decomposition or Dynamic Analysis).
 
 **Crucial Constraint:**
-* Standard Refinement uses **the current decomposition method (NMF or PCA)** on a subset of data. It works well for separating mixed spatial phases. This is most effective when NMF was used.
+* Standard Refinement uses **the current decomposition method (NMF, PCA, or ICA)** on a subset of data. It works well for separating mixed spatial phases. This is most effective when NMF was used.
 * Dynamic Analysis (Custom Code) uses **Python/Math** (e.g., curve fitting). It works well when the decomposition fails to model the physical shape (e.g., peak shifts, specific background shapes).
 
 **IMPORTANT — If PCA was used as the decomposition method:**
 PCA components are exploratory — they capture variance directions, not physical phases. Spatial/spectral zoom refinement of PCA components rarely adds value because PCA loadings are not physically interpretable in the same way as NMF components. When PCA is the method, **strongly prefer `custom_code` targets** to mathematically model the specific spectral features identified by PCA (e.g., peak positions, edge onsets, intensity ratios). Only use `spatial` or `spectral` refinement with PCA in exceptional cases where a specific spatial region clearly needs isolation.
+
+**IMPORTANT — If ICA was used as the decomposition method:**
+ICA components represent statistically independent sources, not physical phases. They can have signed loadings and may overlap spectrally. Like PCA, spatial/spectral zoom refinement of ICA components rarely adds value because individual components are not directly physically interpretable. When ICA is the method, **strongly prefer `custom_code` targets** to model the specific spectral features the components highlight. Only use `spatial` or `spectral` refinement with ICA in exceptional cases.
 
 ---
 
@@ -1171,7 +1181,7 @@ PCA components are exploratory — they capture variance directions, not physica
 
 Depending on the analysis method used in the current iteration, you will receive different types of plots:
 
-### A. Standard Decomposition Results (NMF/PCA)
+### A. Standard Decomposition Results (NMF/PCA/ICA)
 
 **Validation Plots (one per component):**
 - **LEFT Panel:** Spatial abundance map with red contour marking high-purity region (top 10%)
@@ -1207,7 +1217,7 @@ Depending on the analysis method used in the current iteration, you will receive
 
 1. **Artifact Check (STOP):**
    
-   **For Decomposition Results (NMF/PCA):**
+   **For Decomposition Results (NMF/PCA/ICA):**
    * Does the spectrum look like random noise (jagged spikes)?
    * Does the spatial map look like "salt-and-pepper" static?
    * (NMF only) Does **Orange show peaks that are NOT present in Black** AND the high-purity region is tiny (<2% of pixels)?
@@ -1222,7 +1232,7 @@ Depending on the analysis method used in the current iteration, you will receive
    
 2. **Success Check (STOP):**
    
-   **For Decomposition Results (NMF/PCA):**
+   **For Decomposition Results (NMF/PCA/ICA):**
    * Are components chemically distinct and clean?
    * Are spatial domains well-defined?
    * (NMF only) Is **Black ≈ Red** (within Blue Band)?
@@ -1314,7 +1324,7 @@ Translate validation terminology (Black/Red/Orange lines, RMSE) into plain langu
 
 **What You Will See:**
 
-### 1. Standard Decomposition Results (NMF or PCA)
+### 1. Standard Decomposition Results (NMF, PCA, or ICA)
 
 **If NMF was used — Validation Plots (one per component):**
 - **LEFT Panel:** Spatial abundance map with red contour (high-purity region, top 10%)
@@ -1336,6 +1346,11 @@ Translate validation terminology (Black/Red/Orange lines, RMSE) into plain langu
 - **Top row:** Principal component spectra (may contain negative values — these represent variance directions, not physical phases)
 - **Bottom row:** Corresponding spatial loading maps
 - PCA components are exploratory — focus on identifying spectral features and spatial patterns rather than interpreting individual components as physical phases
+
+**If ICA was used — Summary Plot:**
+- **Top row:** Independent component spectra (signed; recovered as statistically independent sources)
+- **Bottom row:** Corresponding spatial loading maps
+- ICA components are exploratory — they represent independent contributions but may overlap spectrally and are not directly physical phases; focus on identifying candidate distinct contributions for custom modeling
 
 ### 2. Dynamic Analysis Results
 **Feature Dashboards (one per feature):**
