@@ -353,14 +353,23 @@ class GetInitialComponentParamsController:
                 self.logger.warning(f"LLM initial estimation failed: {error_dict}. Using defaults.")
                 n_components = 4
                 selected_method = "nmf"
+                run_decomposition = True
             else:
+                # Defensive default: missing field => run decomposition. The
+                # skip path is opt-in via an explicit objective-driven decision.
+                run_decomposition = bool(result_json.get('run_decomposition', True))
                 n_components = result_json.get('estimated_components', 4)
                 selected_method = result_json.get('method', 'nmf').lower().strip()
                 reasoning = result_json.get('reasoning', 'No reasoning provided.')
-                self.logger.info(f"LLM initial estimate: method={selected_method}, {n_components} components. Reasoning: {reasoning}")
+                self.logger.info(
+                    f"LLM initial estimate: run_decomposition={run_decomposition}, "
+                    f"method={selected_method}, {n_components} components. "
+                    f"Reasoning: {reasoning}"
+                )
 
                 print("\n" + "="*80)
                 print("🧠 LLM REASONING (GetInitialComponentParamsController)")
+                print(f"  Run decomposition: {run_decomposition}")
                 print(f"  Selected method: {selected_method.upper()}")
                 print(f"  Suggested n_components: {n_components}")
                 print(f"  Explanation: {reasoning}")
@@ -377,13 +386,23 @@ class GetInitialComponentParamsController:
             state["initial_n_components"] = n_components
             state["selected_method"] = selected_method
             state["settings"]["method"] = selected_method
-            self.logger.info(f"✅ LLM Step Complete: method={selected_method.upper()}, initial components={n_components}.")
+            state["skip_decomposition"] = not run_decomposition
+            if not run_decomposition:
+                self.logger.info(
+                    "🚦 LLM gate selected SKIP: proceeding directly to dynamic "
+                    "analysis without decomposition."
+                )
+            self.logger.info(
+                f"✅ LLM Step Complete: skip_decomposition={state['skip_decomposition']}, "
+                f"method={selected_method.upper()}, initial components={n_components}."
+            )
 
         except Exception as e:
             self.logger.error(f"❌ LLM Step Failed: Initial component estimation: {e}", exc_info=True)
             state["initial_n_components"] = 4
             state["selected_method"] = "nmf"
             state["settings"]["method"] = "nmf"
+            state["skip_decomposition"] = False
 
         return state
 
@@ -398,6 +417,9 @@ class RunComponentTestLoopController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"): return state
+        if state.get("skip_decomposition"):
+            self.logger.info("Skip-decomposition gate active — bypassing component test loop.")
+            return state
         self.logger.info("\n\n🛠️ --- CALLING TOOL: COMPONENT TEST LOOP --- 🛠️\n")
 
         method_name = state.get("settings", {}).get("method", "nmf").upper()
@@ -482,6 +504,10 @@ class CreateElbowPlotController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"): return state
+        if state.get("skip_decomposition"):
+            self.logger.info("Skip-decomposition gate active — bypassing elbow plot.")
+            state["elbow_plot_bytes"] = None
+            return state
         self.logger.info("\n\n🛠️ --- CALLING TOOL: CREATE ELBOW PLOT --- 🛠️\n")
 
         method_name = state.get("settings", {}).get("method", "nmf").upper()
@@ -527,8 +553,11 @@ class GetFinalComponentSelectionController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"): return state
+        if state.get("skip_decomposition"):
+            self.logger.info("Skip-decomposition gate active — bypassing final component selection.")
+            return state
         self.logger.info("\n\n🧠 --- LLM STEP: SELECT FINAL N_COMPONENTS --- 🧠\n")
-        
+
         initial_estimate = state.get("initial_n_components", 4)
         component_range = state.get("component_test_range", [])
         
@@ -612,8 +641,11 @@ class RunFinalSpectralUnmixingController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"): return state
+        if state.get("skip_decomposition"):
+            self.logger.info("Skip-decomposition gate active — bypassing final spectral unmixing.")
+            return state
         self.logger.info("\n\n🛠️ --- CALLING TOOL: FINAL SPECTRAL UNMIXING --- 🛠️\n")
-        
+
         final_n_components = state.get("final_n_components")
         if not final_n_components:
             final_n_components = self.settings.get('n_components', 4)
@@ -651,6 +683,9 @@ class CreateAnalysisPlotsController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"):
+            return state
+        if state.get("skip_decomposition"):
+            self.logger.info("Skip-decomposition gate active — bypassing analysis plots.")
             return state
 
         self.logger.info("\n\n🛠️ --- CALLING TOOL: CREATE ANALYSIS PLOTS --- 🛠️\n")
@@ -805,7 +840,21 @@ class BuildHyperspectralPromptController:
 
 Use this context to guide your interpretation.
 """)
-        
+
+        # 2b. Skip-decomposition framing (when the gate selected direct analysis)
+        if state.get("skip_decomposition"):
+            prompt_parts.append("""
+
+### 🚦 CONTEXT: Unsupervised decomposition was skipped
+
+The user's objective is best served by direct per-pixel quantitative
+analysis (e.g. curve fitting, peak finding, integration) rather than
+unsupervised source separation. No NMF/PCA/ICA components are available.
+Frame your interpretation around the raw data characteristics and propose
+`custom_code` refinement targets that operate per-pixel on the (preprocessed)
+raw spectra.
+""")
+
         # 3. Data Metadata
         h, w, e = state["hspy_data"].shape
         axis_spec = resolve_axis_spec(state.get("system_info"))
@@ -938,7 +987,16 @@ class SelectRefinementTargetController:
 
         prompt_parts = [self.instructions]
         prompt_parts.append(f"\n\n--- Current Analysis: {state.get('iteration_title', 'Analysis')} ---")
-        
+
+        if state.get("skip_decomposition"):
+            prompt_parts.append("""
+
+🚦 NOTE: Unsupervised decomposition was skipped for this run because the
+user's objective specifies a direct per-pixel measurement. Only `custom_code`
+refinement targets are meaningful here — do not request `spatial` or
+`spectral` zoom refinement.
+""")
+
         # Add system info
         if state.get("system_info"):
             sys_info_str = json.dumps(state["system_info"], indent=2)
@@ -1082,10 +1140,19 @@ class GenerateRefinementTasksController:
 
                 if t_type == "spatial":
                     self.logger.info(f"Processing Spatial Task {i}: {t_desc}")
+                    if state.get("final_abundance_maps") is None:
+                        # Skip-decomposition path: no abundance maps exist, so
+                        # a spatial-mask refinement is not possible. The LLM
+                        # should be using custom_code targets instead.
+                        self.logger.warning(
+                            f"Skipping Spatial Task {i}: no decomposition abundance maps "
+                            f"available (skip-decomposition path)."
+                        )
+                        continue
                     component_index = int(t_value)
-                    if component_index > 0: component_index -= 1 
+                    if component_index > 0: component_index -= 1
                     else: component_index = 0
-                    
+
                     new_data = tools.apply_spatial_mask(
                         state["hspy_data"], state["final_abundance_maps"], component_index
                     )
@@ -1620,6 +1687,24 @@ class RunDynamicAnalysisController:
                 hints=state.get("analysis_hints"),
                 objective=state.get("analysis_objective"),
             )
+
+            # Append a preprocessing-mask hint when one exists and identifies
+            # excluded pixels. The mask is already applied to the data (zero-
+            # filled), so per-pixel fits will produce garbage values on
+            # excluded pixels; the LLM should be told to filter on the mask.
+            mask = state.get("preprocessing_mask")
+            if mask is not None and not bool(mask.all()):
+                n_kept = int(mask.sum())
+                n_total = int(mask.size)
+                base_prompt += f"""
+
+### PREPROCESSING MASK
+A boolean preprocessing mask of shape ({mask.shape[0]}, {mask.shape[1]}) is
+available indicating which (axis_0, axis_1) samples carry valid signal:
+{n_kept} of {n_total} samples are True (kept). The mask itself is NOT passed
+into the analysis function — operate on the raw spectra and, if your output
+maps should mark excluded samples, set them to np.nan in your returned maps.
+"""
 
             current_prompt = base_prompt
             retries = 0

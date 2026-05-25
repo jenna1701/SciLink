@@ -688,8 +688,9 @@ Ensure the final output is ONLY the JSON object.
 COMPONENT_INITIAL_ESTIMATION_INSTRUCTIONS = """You are an expert in hyperspectral data analysis and materials characterization.
 
 Based on the system description and data characteristics provided, you must:
-1. Choose the decomposition method (NMF, PCA, or ICA)
-2. Estimate the optimal number of spectral components
+1. Decide whether unsupervised decomposition is needed at all (`run_decomposition`)
+2. Choose the decomposition method (NMF, PCA, or ICA)
+3. Estimate the optimal number of spectral components
 
 **Method Selection:**
 
@@ -714,6 +715,14 @@ Based on the system description and data characteristics provided, you must:
 - The user's objective explicitly asks for source separation or independent contributions
 - Prefer fewer components for ICA (typically 2–6) — over-specifying leads to noise components
 
+**When to skip decomposition entirely (`run_decomposition: false`):**
+Decomposition is strongly preferred for exploratory work — it surfaces structure you would not anticipate. Set `run_decomposition: false` ONLY when ALL of the following hold:
+- The user has provided an explicit objective AND that objective specifies a per-pixel quantitative measurement that does not require source separation (e.g. "fit the Si 2p binding energy at each pixel", "integrate the peak between 530–540 eV at each pixel", "extract the FWHM of the dominant feature across the map").
+- The measurement can be expressed directly as a function of the raw spectrum at each pixel (curve fit, integration, peak finding) and does not depend on knowing which mixture of contributions is present.
+- The dataset is not described as a survey, exploration, or characterization task.
+
+Default to `true` when in doubt, when no objective is given, or when the objective is exploratory ("characterize the sample", "find phases", "identify components"). Skipping decomposition forfeits the exploratory survey step, so the bar must be high.
+
 **Component Count Considerations:**
 
 **System Complexity:**
@@ -734,12 +743,15 @@ Based on the system description and data characteristics provided, you must:
 You MUST output a valid JSON object:
 
 {
+  "run_decomposition": <true or false>,
   "method": "<nmf, pca, or ica>",
   "estimated_components": <integer between 2 and 15>,
   "confidence": "<high/medium/low>",
-  "reasoning": "<explain your method choice AND component estimate based on the provided information>",
+  "reasoning": "<explain your run_decomposition decision, method choice, AND component estimate based on the provided information>",
   "expected_components": "<briefly describe what the components might represent>"
 }
+
+When `run_decomposition` is `false`, the `method` and `estimated_components` fields are ignored downstream — you may still fill them with reasonable defaults but they will not be used.
 
 Focus on providing a reasonable estimate based on the available information about the material system and data characteristics.
 """
