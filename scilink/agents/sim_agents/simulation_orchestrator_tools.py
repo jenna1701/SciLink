@@ -187,9 +187,56 @@ class SimulationOrchestratorTools:
         )
 
         # =====================================================================
+        # 0c. PLAN STRUCTURE  (structure_class + simulation_scale + constraints)
+        # =====================================================================
+        def plan_structure(description: str, system_description: str = None) -> str:
+            """Decide HOW to build a structure: structure_class + simulation_scale
+            + the cross-term constraints (size / periodicity / solvation / charge).
+            Returns a StructureSpec as JSON."""
+            from .structure_planner import StructurePlanner
+            spec = StructurePlanner(model=self.orch.model).plan(
+                description, system_description=system_description)
+            self.orch.structure_plan = spec  # stash for subsequent generate_structure
+            return json.dumps(spec.to_dict(), indent=2)
+
+        self._register_tool(
+            func=plan_structure,
+            name="plan_structure",
+            description=(
+                "Decide how to build an atomic structure from a free-text request, "
+                "along TWO axes plus the constraints from their interaction: "
+                "structure_class (crystal / molecular / condensed / biomolecular — the "
+                "kind of structure) and simulation_scale (periodic_dft / molecular_dft / "
+                "molecular_dynamics / machine_learning_potentials — what it's for), and "
+                "derives size / periodicity / solvation / charge constraints (e.g. MD -> "
+                "large + explicit solvent; molecular DFT -> isolated + implicit). Returns "
+                "a StructureSpec JSON. Call before generate_structure when the build "
+                "approach isn't obvious: pass the returned structure_class to "
+                "generate_structure, and feed its size/periodicity/solvation into the "
+                "generate_structure `constraints` argument."
+            ),
+            parameters={
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "Natural-language description of the structure / system "
+                        "(e.g. 'a solvated lysozyme system', 'band structure of rutile TiO2')."
+                    ),
+                },
+                "system_description": {
+                    "type": "string",
+                    "description": "Optional extra context about the system; omit if unknown.",
+                },
+            },
+            required=["description"],
+        )
+
+        # =====================================================================
         # 1. GENERATE STRUCTURE  (build → validate → refine, internal)
         # =====================================================================
         def generate_structure(description: str, skill=None,
+                               structure_class: str = "crystal",
+                               constraints: str = None,
                                validate_and_refine: bool = True,
                                max_refinement_cycles: int = 3,
                                based_on_slug: str = None) -> str:
@@ -250,8 +297,9 @@ class SimulationOrchestratorTools:
             # lands it will set structure_class per request.)
             result = so.generate_and_validate(
                 description,
-                structure_class="crystal",
+                structure_class=structure_class,
                 skill_content=skill_content,
+                constraints=constraints,
                 prior_script=prior_script,
                 validate=validate_and_refine,
                 max_cycles=max_refinement_cycles,
@@ -357,6 +405,25 @@ class SimulationOrchestratorTools:
                         "(grain boundaries, bicrystals, Σ-value parametrized "
                         "interfaces). Omit for plain ASE / pymatgen "
                         "workflows; pass a list to combine multiple skills."
+                    ),
+                },
+                "structure_class": {
+                    "type": "string",
+                    "description": (
+                        "Structure archetype that selects the build skill + output "
+                        "format + validation rubric: 'crystal' (default; periodic "
+                        "solids/slabs/defects → POSCAR), 'molecular' (isolated "
+                        "molecules → xyz), 'condensed' (solvated/liquid boxes → "
+                        "POSCAR), 'biomolecular' (proteins/nucleic acids → pdb). "
+                        "Use the structure_class returned by plan_structure."
+                    ),
+                },
+                "constraints": {
+                    "type": "string",
+                    "description": (
+                        "Optional build-constraints block to honor (target size / "
+                        "periodicity / solvation / charge), typically the "
+                        "size+periodicity+solvation from a plan_structure result."
                     ),
                 },
                 "validate_and_refine": {

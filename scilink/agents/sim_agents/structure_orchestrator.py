@@ -245,6 +245,7 @@ class StructureOrchestrator:
                               skill_content: Optional[str] = None,
                               validation_rubric: Optional[str] = None,
                               output_format: Optional[str] = None,
+                              constraints: Optional[str] = None,
                               prior_script: Optional[str] = None,
                               validate: bool = True,
                               max_cycles: Optional[int] = None,
@@ -277,6 +278,10 @@ class StructureOrchestrator:
             Structure file format to request (``POSCAR`` / ``xyz`` / ``pdb`` / ...).
             Defaults to the ``output_format`` frontmatter of the ``structure_class``
             skill, else ``POSCAR``.
+        constraints : str, optional
+            A build-constraints block appended to the generation request (e.g. from
+            ``StructureSpec.as_constraints_text()`` — target size / periodicity /
+            solvation / charge), so the planner's cross-axis reasoning shapes the build.
         prior_script : str, optional
             A previously generated script to modify (variant builds); applied to
             the initial generation only.
@@ -307,6 +312,8 @@ class StructureOrchestrator:
             output_format = self._load_output_format(structure_class)
         output_format = output_format or "POSCAR"
         request = f"{user_request}. Save the structure in {output_format} format."
+        if constraints:
+            request += "\n\n" + constraints
 
         max_cycles = self.max_refinement_cycles if max_cycles is None else max_cycles
 

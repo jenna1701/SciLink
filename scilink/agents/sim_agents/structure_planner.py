@@ -102,6 +102,17 @@ class StructureSpec:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
+    def as_constraints_text(self) -> str:
+        """Render the build constraints as a prompt block for the structure generator
+        (empty string when none are set). This is how the planner's cross-axis
+        reasoning (size / periodicity / solvation / charge) actually shapes generation."""
+        fields = [("target size", self.size_target), ("periodicity", self.periodicity),
+                  ("solvation", self.solvation), ("charge/spin", self.charge_spin)]
+        lines = [f"- {label}: {val}" for label, val in fields if val]
+        if not lines:
+            return ""
+        return "Build constraints (from the structure plan — honor these):\n" + "\n".join(lines)
+
 
 class StructurePlanner:
     """LLM planner: free-text request -> :class:`StructureSpec` (two-axis + constraints).
