@@ -937,44 +937,69 @@ def create_annotated_heatmap(data_map: np.ndarray, title: str, units: str) -> by
     return resize_image_bytes(buf.getvalue())
 
 
-def create_feature_dashboard(data_map: np.ndarray, feature_name: str, units: str) -> bytes:
+def create_feature_dashboard(
+    data_map: np.ndarray,
+    feature_name: str,
+    units: str,
+    axis_spec: dict | None = None,
+) -> bytes:
     """
-    Creates a combined dashboard: Spatial Heatmap (Left) + Statistical Histogram (Right).
+    Creates a combined dashboard: 2D Heatmap (Left) + Statistical Histogram (Right).
+
+    ``axis_spec`` (from ``resolve_axis_spec``) controls the heatmap-panel
+    title and histogram count label: legacy spatial layouts keep the
+    "Spatial Map" / "Pixel Count" wording, generic layouts switch to
+    axis-name-driven wording. ``axis_spec=None`` preserves legacy text.
     """
+
+    # Decide labels from axis_spec. Default to the legacy spatial wording.
+    map_title_prefix = "Spatial Map"
+    count_label = "Pixel Count"
+    if axis_spec is not None:
+        a0 = axis_spec.get("axis_0", {})
+        a1 = axis_spec.get("axis_1", {})
+        leading_axes_are_spatial = (
+            a0.get("kind") == "spatial" and a1.get("kind") == "spatial"
+        )
+        if not leading_axes_are_spatial:
+            n0 = a0.get("name", "axis 0")
+            n1 = a1.get("name", "axis 1")
+            map_title_prefix = f"{n0.capitalize()}-{n1.capitalize()} Map"
+            count_label = "Sample Count"
 
     # 1. Clean Data for Histogram
     flat_data = data_map.ravel()
     valid_data = flat_data[~np.isnan(flat_data)]
-    
+
     if len(valid_data) == 0:
         return None
 
     # 2. Setup Figure (2 Columns)
     fig = plt.figure(figsize=(12, 5))
     gs = gridspec.GridSpec(1, 2, width_ratios=[1.5, 1]) # Map is slightly wider
-    
-    # --- LEFT PANEL: Spatial Heatmap ---
+
+    # --- LEFT PANEL: 2D Heatmap ---
     ax_map = fig.add_subplot(gs[0])
-    
+
     # Robust scaling (2nd-98th percentile) to ignore hot pixels
     vmin = np.nanpercentile(data_map, 2)
     vmax = np.nanpercentile(data_map, 98)
-    
+
     im = ax_map.imshow(data_map, cmap='plasma', vmin=vmin, vmax=vmax, origin='upper')
-    ax_map.set_title(f"Spatial Map: {feature_name}", fontsize=12, fontweight='bold')
+    ax_map.set_title(f"{map_title_prefix}: {feature_name}", fontsize=12, fontweight='bold')
     ax_map.axis('off') # Clean look
-    
+
     # Colorbar attached to map
     cbar = fig.colorbar(im, ax=ax_map, fraction=0.046, pad=0.04)
     cbar.set_label(units, rotation=270, labelpad=15)
 
     # --- RIGHT PANEL: Histogram ---
     ax_hist = fig.add_subplot(gs[1])
-    
+
     # Dynamic binning
     n_bins = min(50, max(15, int(len(valid_data)**0.4)))
     ax_hist.hist(valid_data, bins=n_bins, color='#2c3e50', alpha=0.75, edgecolor='white', linewidth=0.5)
-    
+
     # Statistics Box
     mu = np.mean(valid_data)
     sigma = np.std(valid_data)
@@ -982,9 +1007,9 @@ def create_feature_dashboard(data_map: np.ndarray, feature_name: str, units: str
     props = dict(boxstyle='round', facecolor='wheat', alpha=0.3)
     ax_hist.text(0.95, 0.95, stats_text, transform=ax_hist.transAxes, fontsize=10,
                  verticalalignment='top', horizontalalignment='right', bbox=props)
-    
+
     ax_hist.set_xlabel(f"{feature_name} ({units})")
-    ax_hist.set_ylabel("Pixel Count")
+    ax_hist.set_ylabel(count_label)
     ax_hist.set_title("Population Statistics")
     ax_hist.grid(True, linestyle=':', alpha=0.6)
     ax_hist.spines['top'].set_visible(False)

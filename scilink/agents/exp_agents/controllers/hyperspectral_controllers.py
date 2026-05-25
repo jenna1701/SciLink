@@ -1788,9 +1788,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
 
                         safe_feat = _sanitize_filename(feature_name)
 
-                        # 2. Generate Dashboard (Map + Histogram)
-                        # Assumes tools.create_feature_dashboard exists (as defined in previous turns)
-                        dashboard_bytes = tools.create_feature_dashboard(result_map, feature_name, current_unit)
+                        # 2. Generate Dashboard (Map + Histogram). Pass
+                        # axis_spec so non-spatial leading axes get axis-
+                        # name-driven labels ("Voltage-Time Map" / "Sample
+                        # Count") instead of "Spatial Map" / "Pixel Count".
+                        dashboard_bytes = tools.create_feature_dashboard(
+                            result_map, feature_name, current_unit,
+                            axis_spec=resolve_axis_spec(state.get("system_info")),
+                        )
 
                         if dashboard_bytes:
                             # 3. Visual QC (Generator-Judge Loop)
