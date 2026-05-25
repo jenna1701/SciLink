@@ -112,7 +112,7 @@ class StructureOrchestrator:
         os.makedirs(output_dir, exist_ok=True)
 
     def build_structure(self, user_request: str,
-                        structure_class: str = "crystal",
+                        structure_class: str,
                         **kwargs) -> Dict[str, Any]:
         """
         Generate and validate an atomic structure from a natural-language request.
@@ -127,12 +127,12 @@ class StructureOrchestrator:
         user_request : str
             Natural-language description of the structure to build.
         structure_class : str
-            Structure archetype whose generation skill guides the build
-            (``scilink/skills/structure_generation/<structure_class>/``). Defaults
-            to ``"crystal"`` (periodic crystals / supercells / defects / slabs).
-            Other classes such as ``"molecular"``, ``"condensed"``,
-            ``"biomolecular"`` are added as skill bundles; if no bundle exists,
-            generation falls back to generic.
+            **Required** — the structure archetype whose generation skill + validation
+            rubric + output format guide the build (``crystal`` / ``molecular`` /
+            ``condensed`` / ``biomolecular``). No default on this standalone entry point,
+            so a caller building e.g. a molecule must say so rather than silently getting
+            the crystal rubric. (The DFT path keeps a ``"crystal"`` default in
+            ``DFTOrchestrator.run_complete_workflow``, where it's contextually correct.)
         **kwargs
             Forwarded to :meth:`generate_and_validate` (``skill_content``,
             ``prior_script``, ``validate``, ``max_cycles``, ``output_dir``).
@@ -240,7 +240,7 @@ class StructureOrchestrator:
         return str(fmt) if fmt else None
 
     def generate_and_validate(self, user_request: str,
-                              structure_class: Optional[str] = "crystal",
+                              structure_class: Optional[str],
                               *,
                               skill_content: Optional[str] = None,
                               validation_rubric: Optional[str] = None,
@@ -261,10 +261,12 @@ class StructureOrchestrator:
         user_request : str
             Natural-language description of the structure to build.
         structure_class : str or None
-            Structure archetype; selects the ``structure_generation/<class>`` skill
-            bundle when ``skill_content`` is not supplied. Pass ``None`` to skip
-            auto-loading a class skill (e.g. when the caller fully controls
-            ``skill_content``).
+            **Required (no default)** — the structure archetype; selects the
+            ``structure_generation/<class>`` skill bundle + validation rubric +
+            output format when ``skill_content`` is not supplied. No silent default,
+            so a non-crystal build can't accidentally get the crystal rubric. Pass
+            ``None`` explicitly to skip auto-loading a class skill (e.g. when the
+            caller fully controls ``skill_content``).
         skill_content : str, optional
             Pre-rendered skill guidance injected verbatim. When given it is used
             as-is and ``structure_class`` is not consulted for skill loading — this

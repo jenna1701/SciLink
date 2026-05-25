@@ -87,9 +87,15 @@ SCALE_POLICY: Dict[str, Dict[str, str]] = {
 
 @dataclass
 class StructureSpec:
-    """The structure-build contract emitted by :class:`StructurePlanner`."""
-    structure_class: str                       # crystal | molecular | condensed | biomolecular
-    simulation_scale: str                      # periodic_dft | molecular_dft | molecular_dynamics | machine_learning_potentials
+    """The structure-build contract emitted by :class:`StructurePlanner`.
+
+    On a planning failure (LLM error or out-of-vocabulary axes), ``structure_class``
+    and ``simulation_scale`` are ``None`` and ``error`` is set — the planner does NOT
+    silently fall back to a default class. Programmatic callers should check
+    :attr:`is_valid` (or call :meth:`raise_if_error`) before using the spec.
+    """
+    structure_class: Optional[str] = None      # crystal | molecular | condensed | biomolecular (None on error)
+    simulation_scale: Optional[str] = None     # periodic_dft | molecular_dft | molecular_dynamics | machine_learning_potentials
     engine: Optional[str] = None               # vasp | qe | pyscf | lammps | mace | ...
     size_target: Optional[str] = None
     periodicity: Optional[str] = None
@@ -101,6 +107,19 @@ class StructureSpec:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    @property
+    def is_valid(self) -> bool:
+        """True when planning succeeded (no error and both axes resolved)."""
+        return (self.error is None
+                and self.structure_class is not None
+                and self.simulation_scale is not None)
+
+    def raise_if_error(self) -> "StructureSpec":
+        """Raise ValueError if planning failed; else return self (for chaining)."""
+        if not self.is_valid:
+            raise ValueError(self.error or "StructurePlanner returned an invalid StructureSpec")
+        return self
 
     def as_constraints_text(self) -> str:
         """Render the build constraints as a prompt block for the structure generator
@@ -156,7 +175,12 @@ class StructurePlanner:
     # ── public ────────────────────────────────────────────────────────
 
     def plan(self, request: str, system_description: Optional[str] = None) -> StructureSpec:
-        """Decide structure_class, simulation_scale, engine, and constraints for ``request``."""
+        """Decide structure_class, simulation_scale, engine, and constraints for ``request``.
+
+        On failure the returned spec has ``error`` set and ``structure_class`` /
+        ``simulation_scale`` = ``None`` (no silent default). Check ``spec.is_valid``
+        or call ``spec.raise_if_error()`` before using it.
+        """
         prompt = self._build_prompt(request, system_description)
         try:
             response = self.model.generate_content(
@@ -165,17 +189,14 @@ class StructurePlanner:
             text = getattr(response, "text", None) or str(response)
             decision = self._parse_response(text)
         except Exception as exc:
-            return StructureSpec(
-                structure_class="crystal", simulation_scale="periodic_dft",
-                error=f"Planner LLM call/parse failed: {exc!r}",
-            )
+            return StructureSpec(error=f"Planner LLM call/parse failed: {exc!r}")
 
         sclass = decision.get("structure_class")
         scale = decision.get("simulation_scale")
         if sclass not in STRUCTURE_CLASSES or scale not in self.scale_policy:
             return StructureSpec(
-                structure_class=sclass if sclass in STRUCTURE_CLASSES else "crystal",
-                simulation_scale=scale if scale in self.scale_policy else "periodic_dft",
+                structure_class=sclass if sclass in STRUCTURE_CLASSES else None,
+                simulation_scale=scale if scale in self.scale_policy else None,
                 error=(f"LLM returned out-of-vocabulary axis "
                        f"(structure_class={sclass!r}, simulation_scale={scale!r}); "
                        f"check the request or the prompt."),
