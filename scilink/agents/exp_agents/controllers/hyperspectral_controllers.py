@@ -830,18 +830,7 @@ class BuildHyperspectralPromptController:
         # 1. Base Instruction & Context
         prompt_parts = [state["instruction_prompt"]]
 
-        # 2. Parent Reasoning (if this is a refinement)
-        if state.get("parent_refinement_reasoning"):
-            prompt_parts.append(f"""
-
-### 🔍 CONTEXT: Why are we performing this focused analysis?
-
-**Reasoning from previous step:** "{state['parent_refinement_reasoning']}"
-
-Use this context to guide your interpretation.
-""")
-
-        # 2b. Skip-decomposition framing (when the gate selected direct analysis)
+        # 2. Skip-decomposition framing (when the gate selected direct analysis)
         if state.get("skip_decomposition"):
             prompt_parts.append("""
 
@@ -1102,138 +1091,6 @@ refinement targets are meaningful here — do not request `spatial` or
         return state
     
 
-class GenerateRefinementTasksController:
-    """
-    [🛠️ Tool Step]
-    Takes the list of targets from the LLM and generates new tasks.
-    """
-    MIN_SPECTRAL_CHANNELS = 10 
-
-    def __init__(self, logger: logging.Logger):
-        self.logger = logger
-
-    def execute(self, state: dict) -> dict:
-        self.logger.info("\n\n🛠️ --- CALLING TOOL: GENERATE REFINEMENT TASKS --- 🛠️\n")
-        
-        decision = state.get("refinement_decision")
-        if not decision or not decision.get("refinement_needed") or not decision.get("targets"):
-            state["new_tasks"] = []
-            return state
-
-        new_tasks = []
-        current_depth = state.get("current_depth", 0)
-        next_depth = current_depth + 1
-
-        # Iterate through targets with an index (1-based for humans)
-        for i, target in enumerate(decision["targets"], 1):
-            try:
-                t_type = target.get("type")
-                t_value = target.get("value")
-                t_desc = target.get("description", "refinement")
-
-                # Recursive spatial/spectral re-unmixing was removed — refinement
-                # now happens via custom_code only (executed in-place by
-                # RunDynamicAnalysisController, not as a queued task here).
-                # Defensive: if the LLM still emits a legacy target type,
-                # log and skip rather than crash.
-                if t_type in ("spatial", "spectral"):
-                    self.logger.warning(
-                        f"Ignoring legacy '{t_type}' refinement target {i}: "
-                        f"recursive decomposition is no longer supported. "
-                        f"Use a 'custom_code' target instead. (description: {t_desc})"
-                    )
-                    continue
-
-                # Create the Structured ID
-                # D = Depth, T = Target Number
-                short_title = f"Focused_Analysis_D{next_depth}_T{i}"
-
-                new_data = None
-                new_sys_info = state["system_info"]
-
-                if t_type == "spatial":
-                    self.logger.info(f"Processing Spatial Task {i}: {t_desc}")
-                    if state.get("final_abundance_maps") is None:
-                        # Skip-decomposition path: no abundance maps exist, so
-                        # a spatial-mask refinement is not possible. The LLM
-                        # should be using custom_code targets instead.
-                        self.logger.warning(
-                            f"Skipping Spatial Task {i}: no decomposition abundance maps "
-                            f"available (skip-decomposition path)."
-                        )
-                        continue
-                    component_index = int(t_value)
-                    if component_index > 0: component_index -= 1
-                    else: component_index = 0
-
-                    new_data = tools.apply_spatial_mask(
-                        state["hspy_data"], state["final_abundance_maps"], component_index
-                    )
-
-                elif t_type == "spectral":
-                    self.logger.info(f"Processing Spectral Task {i}: {t_desc}")
-                    
-                    # t_value comes from LLM as physical units, e.g., [0.6, 1.0]
-                    target_start_ev, target_end_ev = t_value[0], t_value[1]
-                    
-                    # 1. Reconstruct the full energy axis for the ORIGINAL data
-                    h, w, e = state["original_hspy_data"].shape
-                    # (Assuming you have access to create_energy_axis from tools)
-                    energy_axis, _, _ = tools.create_energy_axis(e, state["system_info"])
-                    
-                    # 2. Find the closest integer indices for these physical values
-                    start_idx, end_idx = tools.convert_energy_to_indices(
-                        energy_axis, 
-                        target_start_ev, 
-                        target_end_ev, 
-                        min_channels=self.MIN_SPECTRAL_CHANNELS
-                    )
-
-                    # 3. Perform the slicing using INDICES
-                    # Note: We pass the indices to the tool, NOT the physical values
-                    # Use the calculated safe indices to get safe physical range for the tool
-                    safe_physical_range = [energy_axis[start_idx], energy_axis[end_idx]]
-
-                    new_data, _ = tools.apply_spectral_slice(
-                        state["original_hspy_data"], 
-                        state["system_info"], 
-                        safe_physical_range
-                    )
-
-                    # 4. Update System Info with the NEW Physical Range
-                    new_sys_info = state["system_info"].copy()
-                    new_sys_info['energy_range'] = {
-                        'start': float(energy_axis[start_idx]),
-                        'end': float(energy_axis[end_idx]),
-                        'units': state["system_info"].get('energy_range', {}).get('units', 'units')
-                    }
-                    
-                    self.logger.info(f"Recalibrated axis: {state['system_info']['energy_range']['start']:.2f}-{state['system_info']['energy_range']['end']:.2f} -> {new_sys_info['energy_range']['start']:.2f}-{new_sys_info['energy_range']['end']:.2f}")
-
-                    if new_data.shape[-1] < self.MIN_SPECTRAL_CHANNELS:
-                        self.logger.warning(f"Skipping spectral task '{short_title}': too few channels.")
-                        continue
-
-                if new_data is not None:
-                    task = {
-                        "data": new_data,
-                        "system_info": new_sys_info,
-                        # SHORT TITLE for Reports/Files
-                        "title": short_title, 
-                        # LONG DESCRIPTION for LLM Context (Re-injected later)
-                        "parent_reasoning": t_desc, 
-                        "source_depth": next_depth
-                    }
-                    new_tasks.append(task)
-
-            except Exception as e:
-                self.logger.error(f"Failed to generate task for target {target}: {e}")
-
-        state["new_tasks"] = new_tasks
-        self.logger.info(f"✅ Generated {len(new_tasks)} new analysis tasks.")
-        return state
-    
-
 class BuildHolisticSynthesisPromptController:
     """
     [📝 Prep Step]
@@ -1278,11 +1135,6 @@ class BuildHolisticSynthesisPromptController:
             iter_ref_id = _sanitize_filename(raw_title)
             
             prompt_parts.append(f"\n\n### SECTION {i+1}: {raw_title}")
-            
-            # Context: Why did we do this?
-            context_desc = iter_result.get('parent_refinement_reasoning') 
-            if context_desc:
-                prompt_parts.append(f"**Target Description:** \"{context_desc}\"")
 
             # --- DYNAMIC ANALYSIS INJECTION
             # Retrieve the list of features generated by the custom code

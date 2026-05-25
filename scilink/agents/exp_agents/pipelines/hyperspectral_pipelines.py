@@ -11,11 +11,10 @@ from ..controllers.hyperspectral_controllers import (
     BuildHyperspectralPromptController,
     RunDynamicAnalysisController,
     SelectRefinementTargetController,
-    GenerateRefinementTasksController,
     BuildHolisticSynthesisPromptController,
     GenerateHTMLReportController,
-    RunSelfReflectionController,      
-    ApplyReflectionUpdatesController   
+    RunSelfReflectionController,
+    ApplyReflectionUpdatesController
 )
 from ..controllers.base_controllers import (
     RunFinalInterpretationController,
@@ -95,11 +94,8 @@ def create_hyperspectral_iteration_pipeline(
     pipeline.append(RunDynamicAnalysisController(
         model, logger, generation_config, safety_settings, parse_fn
     ))
-    
-    # 3f. [🛠️ Tool] Prepare data for next loop (Standard NMF tasks)
-    pipeline.append(GenerateRefinementTasksController(logger))
 
-    logger.info(f"Hyperspectral *iteration* pipeline created with {len(pipeline)} steps.")
+    logger.info(f"Hyperspectral iteration pipeline created with {len(pipeline)} steps.")
     return pipeline
 
 def create_hyperspectral_synthesis_pipeline(

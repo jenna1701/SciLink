@@ -1296,8 +1296,10 @@ You MUST output a valid JSON object.
 """
 
 SPECTROSCOPY_HOLISTIC_SYNTHESIS_INSTRUCTIONS = """
-You are an expert materials scientist synthesizing a multi-scale hyperspectral analysis. 
-You will receive a series of analysis reports, starting from a "Global Analysis" and followed by one or more "Focused Analyses".
+You are an expert materials scientist synthesizing a hyperspectral analysis.
+You will receive an analysis report from a single Global Analysis pass that
+may include both standard decomposition results and dynamic (custom-code)
+feature maps.
 
 ### YOUR TASK
 Write a single, cohesive scientific narrative that integrates all findings into a unified physical model.
