@@ -29,40 +29,62 @@ from ....skills.hyperspectral.eels.eels import AGENT_METADATA_KEYS_TO_STRIP
 from ....executors import ExecutionTimeout
 
 
+def _render_skill_block(state: dict, stage: str) -> str:
+    """Render the active domain skill's block for ``stage`` as a single string.
+
+    Returns ``""`` when no skill is active or no content exists for the
+    requested stage. Use this from prompt builders that assemble a single
+    string (e.g. ``build_code_generation_prompt``); the list-mode wrapper
+    ``_append_skill_context`` below uses this internally.
+    """
+    sections = state.get("skill_sections")
+    if not sections:
+        return ""
+    content = sections.get(stage, "")
+    if not content:
+        return ""
+
+    skill_name = state.get("skill_name", "domain skill")
+    parts = [
+        f"\n## MANDATORY Domain Skill Rules: {skill_name} ({stage})",
+        (
+            "The following rules are MANDATORY. Your analysis plan and implementation "
+            "MUST conform to these domain-specific requirements. These rules encode "
+            "validated domain expertise and take precedence over general-purpose defaults. "
+            "Do NOT substitute your own preferences where these rules specify a method, "
+            "treatment, or constraint."
+        ),
+        content,
+    ]
+
+    # Include validation rules during planning, interpretation, and
+    # implementation so the LLM knows quality criteria upfront — at planning
+    # to shape the approach, at interpretation/implementation to shape the
+    # output and the generated code.
+    if stage in ("planning", "interpretation", "implementation"):
+        validation = sections.get("validation", "")
+        if validation:
+            parts.append(f"\n## MANDATORY Domain Validation Rules ({skill_name})")
+            parts.append(validation)
+
+    return "\n".join(parts)
+
+
 def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
-    """Append domain skill knowledge to an LLM prompt for the given stage.
+    """Append domain skill knowledge to an LLM prompt list for the given stage.
+
+    Thin list-mode wrapper around ``_render_skill_block`` for prompt
+    builders that assemble multi-part (text + image) prompts.
 
     Args:
         prompt: Mutable list of prompt parts to extend.
         state: Pipeline state dict containing ``skill_sections`` and ``skill_name``.
-        stage: One of ``"planning"``, ``"analysis"``, ``"interpretation"``, ``"validation"``.
+        stage: One of ``"planning"``, ``"analysis"``, ``"interpretation"``,
+               ``"validation"``, ``"implementation"``.
     """
-    sections = state.get("skill_sections")
-    if not sections:
-        return
-
-    skill_name = state.get("skill_name", "domain skill")
-    content = sections.get(stage, "")
-    if not content:
-        return
-
-    prompt.append(f"\n## MANDATORY Domain Skill Rules: {skill_name} ({stage})")
-    prompt.append(
-        "The following rules are MANDATORY. Your analysis plan and implementation "
-        "MUST conform to these domain-specific requirements. These rules encode "
-        "validated domain expertise and take precedence over general-purpose defaults. "
-        "Do NOT substitute your own preferences where these rules specify a method, "
-        "treatment, or constraint."
-    )
-    prompt.append(content)
-
-    # Include validation rules during planning and interpretation
-    # so the LLM knows quality criteria upfront
-    if stage in ("planning", "interpretation"):
-        validation = sections.get("validation", "")
-        if validation:
-            prompt.append(f"\n## MANDATORY Domain Validation Rules ({skill_name})")
-            prompt.append(validation)
+    block = _render_skill_block(state, stage)
+    if block:
+        prompt.append(block)
 
 
 def _append_prior_knowledge_context(prompt: list, state: dict) -> None:
@@ -144,7 +166,21 @@ def build_code_generation_prompt(
     hints: str | None = None,
     objective: str | None = None,
     required_outputs: list[str] | None = None,
+    skill_implementation: str | None = None,
 ) -> str:
+    skill_section = ""
+    if skill_implementation:
+        skill_section = f"""
+
+### 0. ACTIVE DOMAIN SKILL — IMPLEMENTATION GUIDANCE
+{skill_implementation}
+
+If the skill's guidance suggests map key names that differ from the
+REQUIRED OUTPUTS block (when present), the REQUIRED OUTPUTS keys are
+authoritative — produce maps under those exact names even if the skill
+recommends different naming.
+"""
+
     hints_section = ""
     if required_outputs:
         keys_str = ", ".join(f'"{n}"' for n in required_outputs)
@@ -182,12 +218,12 @@ The user has indicated interest in: {hints}
 Prioritize this guidance in your analysis, but also capture any other significant features present in the data.
 """
     return f"""
-You are a Python Data Scientist specialized in Spectroscopy. 
+You are a Python Data Scientist specialized in Spectroscopy.
 The standard NMF tool failed to model a spectral feature described as: "{target_desc}".
 
-Your task: Write a Python function to mathematically model this feature. 
+Your task: Write a Python function to mathematically model this feature.
 Since complex features often require multiple parameters (e.g., Peak Position AND Peak Width), your function must be able to return MULTIPLE maps.
-
+{skill_section}
 ### 1. DATA CONTEXT
 - Input Data `hspy_data`: Shape ({h}, {w}, {e}) (Numpy array)
 - X-Axis `axis`: Shape ({e},) (Numpy array). **Units: {axis_units}**
@@ -1584,6 +1620,11 @@ class RunDynamicAnalysisController:
                 hints=state.get("analysis_hints"),
                 objective=state.get("analysis_objective"),
                 required_outputs=required_outputs,
+                # Inject the active skill's `implementation` section so the
+                # code-gen LLM gets domain-specific recipe guidance (lineshape,
+                # baseline, library choice). Empty string when no skill is
+                # active or no implementation section is defined.
+                skill_implementation=_render_skill_block(state, "implementation"),
             )
 
             # Append a preprocessing-mask hint when one exists and identifies
@@ -1790,11 +1831,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             state["dynamic_analysis_failed"] = True
             return state
 
-        # Stack maps from ALL scripts into one 3D array (H, W, N)
-        state["final_abundance_maps"] = np.stack(all_valid_maps, axis=-1)
+        # Commit per-feature metadata; downstream synthesis reads
+        # custom_analysis_metadata_list. We no longer overwrite the NMF/PCA/ICA
+        # state["final_abundance_maps"] key with the stacked custom maps —
+        # that write had no downstream reader after the Phase C cleanup and
+        # would have collided semantically with the decomposition's own
+        # abundance maps. method_used and new_tasks writes are likewise gone
+        # (no consumers).
         state["custom_analysis_metadata_list"] = all_valid_meta
-        state["method_used"] = "Dynamic Code Generation"
-        state["new_tasks"] = [] 
 
         self.logger.info(f"✅ Dynamic Analysis Complete. Total unique maps generated: {len(all_valid_maps)}")
         return state
