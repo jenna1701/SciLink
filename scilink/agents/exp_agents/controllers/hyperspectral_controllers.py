@@ -1123,18 +1123,31 @@ class GenerateRefinementTasksController:
         new_tasks = []
         current_depth = state.get("current_depth", 0)
         next_depth = current_depth + 1
-        
+
         # Iterate through targets with an index (1-based for humans)
         for i, target in enumerate(decision["targets"], 1):
             try:
                 t_type = target.get("type")
                 t_value = target.get("value")
                 t_desc = target.get("description", "refinement")
-                
+
+                # Recursive spatial/spectral re-unmixing was removed — refinement
+                # now happens via custom_code only (executed in-place by
+                # RunDynamicAnalysisController, not as a queued task here).
+                # Defensive: if the LLM still emits a legacy target type,
+                # log and skip rather than crash.
+                if t_type in ("spatial", "spectral"):
+                    self.logger.warning(
+                        f"Ignoring legacy '{t_type}' refinement target {i}: "
+                        f"recursive decomposition is no longer supported. "
+                        f"Use a 'custom_code' target instead. (description: {t_desc})"
+                    )
+                    continue
+
                 # Create the Structured ID
                 # D = Depth, T = Target Number
                 short_title = f"Focused_Analysis_D{next_depth}_T{i}"
-                
+
                 new_data = None
                 new_sys_info = state["system_info"]
 

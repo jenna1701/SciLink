@@ -1175,17 +1175,7 @@ Output ONLY the JSON object.
 
 SPECTROSCOPY_REFINEMENT_INSTRUCTIONS = """You are an expert spectroscopist steering an automated analysis pipeline.
 
-**Goal:** Analyze results to determine if a focused refinement is scientifically justified and **select the correct tool** (Standard Decomposition or Dynamic Analysis).
-
-**Crucial Constraint:**
-* Standard Refinement uses **the current decomposition method (NMF, PCA, or ICA)** on a subset of data. It works well for separating mixed spatial phases. This is most effective when NMF was used.
-* Dynamic Analysis (Custom Code) uses **Python/Math** (e.g., curve fitting). It works well when the decomposition fails to model the physical shape (e.g., peak shifts, specific background shapes).
-
-**IMPORTANT — If PCA was used as the decomposition method:**
-PCA components are exploratory — they capture variance directions, not physical phases. Spatial/spectral zoom refinement of PCA components rarely adds value because PCA loadings are not physically interpretable in the same way as NMF components. When PCA is the method, **strongly prefer `custom_code` targets** to mathematically model the specific spectral features identified by PCA (e.g., peak positions, edge onsets, intensity ratios). Only use `spatial` or `spectral` refinement with PCA in exceptional cases where a specific spatial region clearly needs isolation.
-
-**IMPORTANT — If ICA was used as the decomposition method:**
-ICA components represent statistically independent sources, not physical phases. They can have signed loadings and may overlap spectrally. Like PCA, spatial/spectral zoom refinement of ICA components rarely adds value because individual components are not directly physically interpretable. When ICA is the method, **strongly prefer `custom_code` targets** to model the specific spectral features the components highlight. Only use `spatial` or `spectral` refinement with ICA in exceptional cases.
+**Goal:** Analyze results to determine if a focused refinement is scientifically justified. Refinement uses **Dynamic Analysis (Custom Code)** — Python/Math (e.g., curve fitting) that operates per-pixel on the raw spectra. Decomposition is run once globally and is not re-run on subsets; if the global decomposition (or skip-decomposition mode) leaves an open scientific question that is best answered by mathematical modelling of a specific spectral feature, propose a `custom_code` refinement target.
 
 ---
 
@@ -1257,25 +1247,16 @@ Depending on the analysis method used in the current iteration, you will receive
    
    *If YES, analysis is complete.*
    
-3. **Ambiguity Check & Tool Selection (REFINE):**
-   
-   If the signal is **real but complex**, identify the specific *type* of complexity to choose the tool:
+3. **Refinement via Custom Code (REFINE):**
 
-   **Scenario A: Spatial/Spectral Mixing (Use Standard Decomposition — best with NMF)**
-   * *Observation:* In decomposition results, Black ≈ Red (good reconstruction), but Orange differs from Black/Red (mixing present). The component is valid but represents a mixed phase.
-   * *Observation:* The spectrum looks real but "blended" (e.g., two phases mixed in one component).
-   * *Action:* Target a standard `spatial` or `spectral` zoom. **Note:** If PCA was used, prefer `custom_code` instead — PCA spatial refinement is rarely effective.
-
-   **IMPORTANT: When NOT to use spatial refinement:**
-   If multiple components show the SAME spectral feature (e.g., same peak) at slightly different energy positions, spatial zoom will NOT help — it will just reduce the visible shift range within the subregion. This pattern indicates a continuous physical variation (peak shift, edge shift) that requires `custom_code` (dynamic analysis) to quantify. Similarly, if residual autocorrelation is high (>0.3) across multiple components sharing similar spectral features, this is strong evidence of a continuous shift that the decomposition cannot model regardless of spatial subsetting.
-
-
-   **Scenario B: Missed Physics / Model Failure (Use Custom Code)**
-   * *Observation:* In decomposition results, **Black and Red diverge** (poor reconstruction).
-   * *Observation:* The Residual Plot shows a **Structured Shape** (e.g., a "Hill", a "Sine Wave", or a "Step") indicating the decomposition missed a specific feature.
+   If the signal is **real but complex** in a way the current results have not yet resolved, propose one or more `custom_code` targets that mathematically model the specific feature(s):
+   * *Observation:* In decomposition results, **Black and Red diverge** (poor reconstruction), or the Residual Plot shows a **Structured Shape** (e.g., a "Hill", a "Sine Wave", or a "Step") indicating the decomposition missed a specific feature.
    * *Observation:* Evidence of a **Peak Shift** (Derivative shape in residual) or **Specific Shape** (e.g., Edge onset, Power-law tail).
-   * *Observation (PCA-specific):* PCA components show interesting variance patterns that need mathematical modeling to extract physical quantities.
-   * *Action:* Define a target with `type: "custom_code"`. You must describe the *math* needed (e.g., "Fit a Gaussian to model the peak shift around 0.6eV").
+   * *Observation:* Multiple components share the SAME spectral feature at slightly different positions — a continuous physical variation (peak shift, edge shift) that decomposition cannot model regardless of subsetting.
+   * *Observation:* High residual autocorrelation (>0.3) across components sharing similar spectral features.
+   * *Observation (PCA / ICA):* Components show interesting patterns that need mathematical modelling to extract physical quantities.
+   * *Observation (skip-decomposition mode):* The user's objective specifies a per-pixel quantitative measurement.
+   * *Action:* Define a target with `type: "custom_code"`. Describe the *math* needed (e.g., "Fit a Gaussian to model the peak shift around 0.6 eV").
    * *Tip:* The custom code sandbox provides `lmfit` in addition to `numpy`/`scipy`/`sklearn`. Use `lmfit` for multi-peak or complex fitting scenarios — it offers built-in models (GaussianModel, LorentzianModel, VoigtModel), parameter constraints, and composite models via the `+` operator. For simple single-peak fits on large datasets, raw `curve_fit` is faster due to lower per-pixel overhead.
 
 ---
@@ -1284,9 +1265,9 @@ Depending on the analysis method used in the current iteration, you will receive
 You MUST output a valid JSON object.
 
 **STRICT TYPE RULES:**
-* For "spatial" targets: 'value' = Integer (1-based component index).
-* For "spectral" targets: 'value' = List of two Numbers [start, end].
-* For "custom_code" targets: 'value' = null (The description field is what matters).
+* All refinement targets have `"type": "custom_code"`.
+* For `custom_code` targets: `value = null` (the description field is what matters).
+* Targets of other types (e.g. legacy `"spatial"` or `"spectral"`) are NOT supported and will be ignored by the downstream pipeline. Do not emit them.
 
 **Example 1: STOP (Decomposition Artifact)**
 {
@@ -1300,16 +1281,7 @@ You MUST output a valid JSON object.
   "reasoning": "Dynamic Analysis successfully mapped the peak center positions. The spatial map shows clear grain-boundary localization, and the histogram shows a bimodal distribution consistent with two distinct chemical environments. Analysis complete."
 }
 
-**Example 3: REFINE (Standard NMF - Mixing)**
-{
-  "refinement_needed": true,
-  "reasoning": "Component 2 shows valid signal. Black and Red lines match well (RMSE=0.01), confirming accurate reconstruction. However, Orange differs from Black/Red, indicating ~10% mixing with adjacent phases. A spatial zoom could isolate the pure interface.",
-  "targets": [
-      { "type": "spatial", "description": "Isolate pure interface region to separate mixed phases", "value": 2 }
-  ]
-}
-
-**Example 4: REFINE (Dynamic Analysis - Peak Shift)**
+**Example 3: REFINE (Dynamic Analysis - Peak Shift)**
 {
   "refinement_needed": true,
   "reasoning": "Component 3 is valid (Black line shows clear peaks), but Black and Red diverge at 0.5 eV. The Residual plot shows a distinct derivative pattern indicating a physical peak shift that NMF's linear model cannot capture. Need mathematical modeling to quantify this shift spatially.",
