@@ -114,6 +114,13 @@ to `analysis` when image_analysis joined, and is now `implementation` in
 the most recent sim_agents and hyperspectral work. Going forward, prefer
 `implementation`.
 
+**Recommended structure for new analysis-agent skills:** `Overview →
+Planning → Implementation → Interpretation → Validation`. This five-
+section pattern follows the cognitive flow of an analysis run — what the
+technique is, how to plan a use of it, how to write the code, how to
+read the output, and how to verify it. New skills should use this
+ordering; legacy `analysis` is accepted by the loader for backcompat.
+
 ## Plan-mode capability boundaries
 
 Two settled conventions on where capability lives in plan mode:
