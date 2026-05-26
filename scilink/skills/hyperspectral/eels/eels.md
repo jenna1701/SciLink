@@ -27,11 +27,15 @@ mapping, phase identification, and chemical-state analysis.
 **Component count estimation:**
 - Start with the number of distinct core-loss edges present in the energy
   range, plus one for the background/plural-scattering component.
-- For a dataset spanning Ti L2,3 and O K edges in a TiO2/SrTiO3 system:
-  expect ~3-5 components (Ti4+ phase, Ti3+ or reduced phase, O-K
-  environment, background, possible interface component).
-- Datasets with a single edge region: 2-4 components typically suffice.
-- If the energy range includes both low-loss and core-loss: add 1-2
+- Add one component per distinct chemical environment / oxidation state
+  you expect for each element (e.g. mixed-valence phases, interface
+  states). *Example:* a dataset spanning two adjacent edges in a
+  mixed-valence transition-metal oxide (such as Ti L2,3 + O K in a
+  TiO2/SrTiO3 system) typically calls for ~3–5 components — one per
+  oxidation state, one per ligand environment, plus a background. Other
+  systems scale by the same logic.
+- Datasets with a single edge region: 2–4 components typically suffice.
+- If the energy range includes both low-loss and core-loss: add 1–2
   components for plasmon/zero-loss tail contributions.
 
 **Energy range considerations:**
@@ -78,7 +82,11 @@ Initialization and bounds:
 
 ## interpretation
 
-**Reference edge energies (core-loss onset values):**
+**Reference edge energies (core-loss onset values).** The entries below
+are illustrative examples covering commonly encountered edges; the same
+chemical-shift / fine-structure principles apply to any core-loss edge.
+Consult tabulated EELS atlases (Gatan EELS Atlas, EELS.info) for
+elements and edges not listed.
 
 Titanium Ti L2,3:
 - Ti L3 onset: ~456 eV (metal), ~458 eV (TiO2)
@@ -155,5 +163,6 @@ Nitrogen N K:
   within the energy resolution of the instrument (typically 0.5-1.5 eV
   for standard EELS, <0.1 eV for monochromated systems).
 - Spatial distributions should correlate with known sample morphology
-  (e.g., a Ti component should be concentrated in Ti-containing regions).
+  (e.g., a component associated with a given element should be
+  concentrated in regions of the sample that contain that element).
 - If HAADF-STEM or EDS data is available, verify spatial consistency.
