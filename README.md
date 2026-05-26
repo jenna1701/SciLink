@@ -482,63 +482,91 @@ analysis_session/
 
 # Simulation Agents
 
-Drives atomistic simulations from natural-language research goals. The DFT (VASP) side is the most developed; LAMMPS-side agents (`LAMMPSSimulationAgent`, `LAMMPSAnalysisAgent`, `LAMMPSOrchestrator`) provide an analogous structure for classical MD.
+Drive atomistic simulations from natural-language goals. The interactive chat surface
+is `scilink simulate`; the underlying orchestrators (`SimulationOrchestratorAgent`,
+`StructureOrchestrator`, `DFTOrchestrator`, `LAMMPSOrchestrator`) can also be driven
+programmatically.
 
-## DFT (VASP)
+## Structure generation
+
+`StructureOrchestrator` runs the build → validate → refine loop for four structure
+classes (`crystal`, `molecular`, `condensed`, `biomolecular`), each driven by a
+markdown skill bundle that supplies the build guidance, the output format
+(POSCAR / xyz / pdb), and the class-specific validation rubric. `StructurePlanner`
+maps a free-text request onto the right `structure_class` and downstream
+`simulation_scale` (periodic DFT / molecular DFT / classical MD / MLIP).
+
+## Periodic DFT
+
+`PeriodicDFTAgent` is engine-agnostic; the engine is selected by skill bundle. Two
+engines ship today — **VASP** and **Quantum ESPRESSO** — under
+`scilink/skills/periodic_dft/{vasp,qe}/`. Adding ABINIT or CP2K is a drop-in
+markdown bundle, no agent code changes.
 
 | Agent | Purpose |
-|-------|---------|
-| `DFTOrchestrator` | Generate POSCAR / INCAR / KPOINTS from a natural-language description |
-| `VaspUpdater` | Recover from failed runs by proposing corrected inputs from VASP error logs |
+|---|---|
+| `DFTOrchestrator` | End-to-end VASP pipeline (structure → inputs → optional literature validation) |
+| `PeriodicDFTAgent` | Engine-agnostic input generation (`software="vasp"` or `software="qe"`) |
+| `VaspUpdater` | Recover from failed VASP runs by parsing stdout/stderr logs |
 | `VaspQualityAgent` | Post-run quality assessment with structured findings + recommendations |
 
-### Skill graduation
+## Classical MD and MLIPs
 
-Sim-side agents support **on-the-fly skill graduation** — record an observation during a run, crystallize it into a Markdown skill that's automatically loaded into agent context on subsequent runs. No code changes needed to teach the agents new domain rules.
+`LAMMPSOrchestrator` drives the LAMMPS chain (`LAMMPSSimulationAgent`,
+`ForceFieldAgent`, `PackmolAgent`, `LAMMPSAnalysisAgent`, `LAMMPSUpdater`).
+`MLIPAgent` handles machine-learned-potential training and deployment.
+Less developed than the DFT side today but built on the same orchestrator pattern.
 
-```python
-qa = VaspQualityAgent()
-kid = qa.record_knowledge({
-    "summary": "ALGO=All + ISMEAR=-5 produces a tetrahedron-not-variational warning",
-    "fix": "Use ALGO=Normal with tetrahedron, or switch ISMEAR=0 with ALGO=All",
-})
-qa.graduate_to_skill(kid)
-# → ~/.scilink/graduated_skills/vasp/<name>/<name>.md, auto-loaded next run
+## CLI
+
+```bash
+scilink simulate                                            # co-pilot chat
+scilink simulate --mode autopilot                           # AI proceeds with defaults
+scilink simulate --request "rutile TiO2 supercell with one O vacancy"
 ```
 
-### Python API
+## Python API
 
 ```python
-from scilink.agents.sim_agents.dft_orchestrator import DFTOrchestrator
-from scilink.agents.sim_agents.vasp_quality import VaspQualityAgent
-from scilink.agents.sim_agents.vasp_updater import VaspUpdater
-
-# Generate inputs from a description
-orch = DFTOrchestrator(generator_model="claude-opus-4-6")
-result = orch.run_complete_workflow(
-    "diamond Si, 2-atom primitive cell, ground-state SCF"
+from scilink.agents.sim_agents import (
+    StructureOrchestrator, DFTOrchestrator, PeriodicDFTAgent,
+    VaspQualityAgent, VaspUpdater,
 )
 
-# Quality check on a converged run
-qa = VaspQualityAgent()
-quality = qa.run_quality_check(
-    output_dir=result["output_directory"],
-    research_goal="diamond Si ground-state SCF",
+# Structure-only build (engine-agnostic, class-aware)
+so = StructureOrchestrator(generator_model="claude-opus-4-6")
+res = so.build_structure("a single water molecule", structure_class="molecular")
+# → res["final_structure_path"] points at structure.xyz
+
+# Full VASP pipeline (structure + inputs together)
+DFTOrchestrator().run_complete_workflow("diamond Si, 2-atom primitive cell, ground-state SCF")
+
+# Quantum ESPRESSO inputs via the engine-agnostic agent
+PeriodicDFTAgent().generate_inputs(
+    structure_file="POSCAR",
+    request="vc-relax of Cu fcc",
+    software="qe",
 )
 
-# Recover from a failure
-updater = VaspUpdater()
-fix = updater.refine_inputs(
+# Post-run quality check and error-log-driven recovery
+VaspQualityAgent().run_quality_check(output_dir="./run/", research_goal="diamond Si SCF")
+VaspUpdater().refine_inputs(
     poscar_path="POSCAR", incar_path="INCAR", kpoints_path="KPOINTS",
     vasp_log=open("vasp.out").read(),
     original_request="diamond Si ground-state SCF",
 )
 ```
 
-### Example scripts
+# Skill Graduation
 
-End-to-end pipelines under [`examples/vasp/`](examples/vasp/):
+SciLink's chat orchestrators (plan, analyze, simulate) don't just consume skills — they **grow them**. During a
+session, the agent records observations into a session-scoped knowledge store. When an
+observation looks like a recurring pattern (a recurring failure mode, a non-obvious
+parameter choice, a domain rule), it can be **graduated** into a Markdown skill bundle
+that's stored on disk and auto-loaded into agent context on every subsequent run. No
+code changes, no manual skill authoring.
 
-- `benchmark_suite.py` — generate VASP inputs for a registry of systems + per-case SLURM scripts.
-- `breakage_benchmark.py` — engineered-failure harness for testing `VaspUpdater` against known error classes.
-- `e2e_pipeline.py` — post-cluster pipeline: classify each result, run the quality agent or updater, optionally graduate observations to skills.
+The graduation tool is exposed in all three modes — `analyze`, `plan`, and `simulate` —
+under the same name (`graduate_to_skill`). In **autopilot** and **autonomous** modes the
+agent decides itself when an observation is worth graduating; in **co-pilot** it surfaces
+the candidate and asks first.
