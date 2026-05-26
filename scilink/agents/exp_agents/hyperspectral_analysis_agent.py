@@ -8,7 +8,6 @@ import numpy as np
 import cv2
 from pathlib import Path
 from typing import Dict, Any
-from collections import deque
 
 from .base_agent import BaseAnalysisAgent, AnalysisInput
 from .instruct import (
@@ -31,35 +30,34 @@ from ._deprecation import normalize_params
 
 class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
-    Hyperspectral Analysis Agent with recursive "survey-then-focus" loop.
-    
-    This agent analyzes hyperspectral/spectroscopic data using NMF decomposition
-    and LLM-guided interpretation.
-    
+    Hyperspectral Analysis Agent.
+
+    Single-pass pipeline: preprocess → optional NMF/PCA/ICA decomposition
+    (gated by an LLM that may skip it for direct per-pixel objectives) →
+    LLM interpretation → optional dynamic-analysis (custom-code) refinement
+    → synthesis + HTML report.
+
     Features:
-        - Automatic component number selection via elbow method
-        - Recursive refinement with spatial/spectral zooming
+        - Automatic component number selection via elbow method (NMF/PCA)
         - Optional structure image correlation
         - Human-in-the-loop feedback
         - HTML report generation
-    
+
     Example:
         agent = HyperspectralAnalysisAgent(api_key="...")
-        
+
         # Single file
         result = agent.analyze("spectrum.npy")
-        
+
         # With metadata
         result = agent.analyze(
             "spectrum.npy",
             system_info={"sample": "TiO2", "technique": "EELS"}
         )
-        
+
         # Get measurement recommendations
         recommendations = agent.recommend_measurements(analysis_result=result)
     """
-    
-    MAX_REFINEMENT_ITERATIONS = 2
 
     def __init__(
         self,
@@ -634,92 +632,50 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 except Exception as e:
                     self.logger.warning(f"Could not load structure image: {e}")
             
-            # Initialize task queue
-            initial_task = {
-                "data": original_hspy_data,
+            # Single-pass iteration. Recursive refinement was removed (custom_code
+            # refinement now executes in-place inside RunDynamicAnalysisController).
+            self.logger.info("\n=== Global_Analysis ===\n")
+            iteration_state = {
+                "data_path": data_path,
+                "hspy_data": original_hspy_data,
+                "original_hspy_data": original_hspy_data,
                 "system_info": system_info,
-                "title": "Global_Analysis",
-                "parent_reasoning": None,
-                "depth": 0
+                "instruction_prompt": instruction_prompt,
+                "settings": self.spectral_settings.copy(),
+                "iteration_title": "Global_Analysis",
+                # IterativeFeedbackController gates on current_depth in
+                # feedback_depths (default [0]) — must be set so the
+                # human-feedback prompt fires when enable_human_feedback
+                # is on. Phase C collapsed the recursion loop but kept
+                # this depth-based gate intact.
+                "current_depth": 0,
+                "structure_image_path": structure_image_path,
+                "structure_system_info": self._handle_system_info(structure_system_info),
+                "structure_image_blob": structure_image_blob,
+                "analysis_hints": hints,
+                "analysis_objective": objective,
+                "prior_knowledge": prior_knowledge or [],
+                "analysis_images": [],
+                "error_dict": None,
+                **skill_state,
+                **auxiliary_state,
             }
-            
-            task_queue = deque([initial_task])
-            all_completed_results = []
-            task_counter = 0
-            
-            # Process tasks
-            while task_queue:
-                current_task = task_queue.popleft()
-                task_counter += 1
-                
-                if current_task["depth"] > self.MAX_REFINEMENT_ITERATIONS:
-                    self.logger.info(f"Skipping '{current_task['title']}': max depth reached")
-                    continue
 
-                self.logger.info(f"\n=== TASK {task_counter}: {current_task['title']} (Depth {current_task['depth']}) ===\n")
-
-                iteration_state = {
-                    "data_path": data_path,
-                    "hspy_data": current_task["data"],
-                    "original_hspy_data": original_hspy_data,
-                    "system_info": current_task["system_info"],
-                    "instruction_prompt": instruction_prompt,
-                    "settings": self.spectral_settings.copy(),
-                    "iteration_title": current_task["title"],
-                    "parent_refinement_reasoning": current_task["parent_reasoning"],
-                    "current_depth": current_task["depth"],
-                    "structure_image_path": structure_image_path,
-                    "structure_system_info": self._handle_system_info(structure_system_info),
-                    "structure_image_blob": structure_image_blob,
-                    "analysis_hints": hints,
-                    "analysis_objective": objective,
-                    "prior_knowledge": prior_knowledge or [],
-                    "analysis_images": [],
-                    "error_dict": None,
-                    **skill_state,
-                    **auxiliary_state
-                }
-
-                if current_task["depth"] > 0:
-                    iteration_state["settings"]['run_preprocessing'] = False
-                    # Carry forward the preprocessing mask from the parent so
-                    # refinement iterations retain knowledge of masked pixels.
-                    parent_mask = current_task.get("preprocessing_mask")
-                    if parent_mask is not None:
-                        iteration_state["preprocessing_mask"] = parent_mask
-
-                # Run iteration pipeline
-                for controller in self.iteration_pipeline:
-                    iteration_state = controller.execute(iteration_state)
-                    if iteration_state.get("error_dict"):
-                        self.logger.error(f"Pipeline failed at {controller.__class__.__name__}")
-                        break
-                
+            for controller in self.iteration_pipeline:
+                iteration_state = controller.execute(iteration_state)
                 if iteration_state.get("error_dict"):
-                    continue
+                    self.logger.error(f"Pipeline failed at {controller.__class__.__name__}")
+                    break
 
-                # Store results
-                result_summary = {
+            all_completed_results = []
+            if not iteration_state.get("error_dict"):
+                all_completed_results.append({
                     "iteration_title": iteration_state.get("iteration_title"),
                     "iteration_analysis_text": iteration_state.get("result_json", {}).get("detailed_analysis", ""),
                     "analysis_images": iteration_state.get("analysis_images", []),
                     "refinement_decision": iteration_state.get("refinement_decision", {}),
-                    "depth": current_task["depth"],
                     "custom_analysis_metadata_list": iteration_state.get("custom_analysis_metadata_list"),
-                    "parent_refinement_reasoning": iteration_state.get("parent_refinement_reasoning"),
-                }
-                all_completed_results.append(result_summary)
-
-                # Process new tasks
-                for t in iteration_state.get("new_tasks", []):
-                    task_queue.append({
-                        "data": t["data"],
-                        "system_info": t["system_info"],
-                        "title": t["title"],
-                        "parent_reasoning": t["parent_reasoning"],
-                        "depth": t["source_depth"],
-                        "preprocessing_mask": iteration_state.get("preprocessing_mask"),
-                    })
+                })
 
             # Run synthesis
             self.logger.info(f"\n=== Synthesizing {len(all_completed_results)} analyses ===\n")

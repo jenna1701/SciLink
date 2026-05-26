@@ -10,12 +10,13 @@ import matplotlib.pyplot as plt
 from io import BytesIO
 
 from .base_agent import BaseUtilityAgent
+from .metadata_converter import resolve_axis_spec
 
 from .instruct import (
     PRE_PROCESSING_STRATEGY_INSTRUCTIONS,
     CUSTOM_PREPROCESSING_SCRIPT_INSTRUCTIONS,
     CUSTOM_SCRIPT_CORRECTION_INSTRUCTIONS,
-    CUSTOM_PREPROCESSING_SCRIPT_1D_INSTRUCTIONS, 
+    CUSTOM_PREPROCESSING_SCRIPT_1D_INSTRUCTIONS,
     CUSTOM_SCRIPT_CORRECTION_1D_INSTRUCTIONS,
     CURVE_PREPROCESSING_STRATEGY_INSTRUCTIONS,
     PREPROCESSING_QUALITY_ASSESSMENT_INSTRUCTIONS
@@ -166,12 +167,15 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
 
         else:
             self.logger.info("No custom instruction. Running standard LLM strategy selection.")
-            
+
             # 4. Get cleaning strategy from LLM
             strategy = self._llm_select_preprocessing_strategy(stats, system_info)
-            
-            # 5. Apply the LLM's cleaning strategy
-            processed_data, mask_2d = self._apply_preprocessing(hspy_data, strategy)
+
+            # 5. Apply the LLM's cleaning strategy. axis_spec gates the
+            # legacy "clip negatives" and "(k, k, 1) despike kernel" choices
+            # so non-(spatial, spatial, signal-counts) layouts work correctly.
+            axis_spec = resolve_axis_spec(system_info)
+            processed_data, mask_2d = self._apply_preprocessing(hspy_data, strategy, axis_spec)
 
         # 6. Return all results
         return processed_data, mask_2d, data_quality
@@ -230,25 +234,57 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
               "reasoning": "Fallback: Default clipping and masking strategy."
             }
 
-    def _apply_preprocessing(self, hspy_data: np.ndarray, strategy: dict) -> tuple[np.ndarray, np.ndarray]:
+    def _apply_preprocessing(
+        self,
+        hspy_data: np.ndarray,
+        strategy: dict,
+        axis_spec: dict | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Applies a robust pre-processing pipeline.
-        
+
+        ``axis_spec`` (from ``resolve_axis_spec``) controls layout-dependent
+        steps:
+        * the despike kernel uses a 2D (k, k, 1) shape when both leading
+          axes are spatial (default) and a 1D (1, 1, k) shape otherwise, so
+          unrelated parameter samples are not medianed together;
+        * the "clip negatives" step runs only when the signal axis is
+          declared non-negative (default true — preserves legacy behavior).
+        ``axis_spec=None`` is equivalent to the legacy defaults.
         """
         #self.logger.info("\n\n🤖 --- DATA AGENT STEP: APPLYING PRE-PROCESSING --- 🤖")
         data_to_process = hspy_data.copy()
         mask_2d = None
 
+        leading_axes_are_spatial = True
+        signal_is_nonnegative = True
+        if axis_spec is not None:
+            leading_axes_are_spatial = (
+                axis_spec.get("axis_0", {}).get("kind") == "spatial"
+                and axis_spec.get("axis_1", {}).get("kind") == "spatial"
+            )
+            signal_is_nonnegative = bool(axis_spec.get("signal_is_nonnegative", True))
+
         # 1. Apply Despiking
         if strategy.get('apply_despike', False):
             kernel_size = int(strategy.get('despike_kernel_size', 3))
-            kernel_tuple = (kernel_size, kernel_size, 1)
+            if leading_axes_are_spatial:
+                kernel_tuple = (kernel_size, kernel_size, 1)
+            else:
+                # Non-spatial leading axes have no neighborhood structure, so
+                # median over the signal axis only.
+                kernel_tuple = (1, 1, kernel_size)
             self.logger.info(f"Applying 3D Median Filter (despike) with kernel {kernel_tuple}...")
             data_to_process = median_filter(data_to_process, size=kernel_tuple)
-        
-        # 2. Clip all negative values to zero
-        self.logger.info("Clipping all negative data points to 0.0...")
-        np.clip(data_to_process, 0, None, out=data_to_process)
+
+        # 2. Clip negatives — only when signal is physically non-negative.
+        if signal_is_nonnegative:
+            self.logger.info("Clipping all negative data points to 0.0...")
+            np.clip(data_to_process, 0, None, out=data_to_process)
+        else:
+            self.logger.info(
+                "axis_spec.signal_is_nonnegative is False — preserving signed values."
+            )
 
         # 3. Calculate Masking strategy
         if strategy.get('apply_masking', False):

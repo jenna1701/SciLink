@@ -13,6 +13,7 @@ import traceback
 from ....skills.hyperspectral.eels import eels as tools
 from ....skills._shared.image_processor import load_image
 from ..preprocess import HyperspectralPreprocessingAgent
+from ..metadata_converter import resolve_axis_spec, describe_axes_for_prompt
 from ..instruct import (
     COMPONENT_INITIAL_ESTIMATION_INSTRUCTIONS,
     COMPONENT_SELECTION_WITH_ELBOW_INSTRUCTIONS,
@@ -20,48 +21,70 @@ from ..instruct import (
     SPECTROSCOPY_HOLISTIC_SYNTHESIS_INSTRUCTIONS,
     SPECTROSCOPY_REFLECTION_INSTRUCTIONS,
     SPECTROSCOPY_REFLECTION_UPDATE_INSTRUCTIONS,
-    SPECTROSCOPY_VALIDATION_INTERPRETATION_INSTRUCTIONS,  
-    SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS,                  
+    SPECTROSCOPY_VALIDATION_INTERPRETATION_INSTRUCTIONS,
+    SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS,
 )
 
 from ....skills.hyperspectral.eels.eels import AGENT_METADATA_KEYS_TO_STRIP
 from ....executors import ExecutionTimeout
 
 
+def _render_skill_block(state: dict, stage: str) -> str:
+    """Render the active domain skill's block for ``stage`` as a single string.
+
+    Returns ``""`` when no skill is active or no content exists for the
+    requested stage. Use this from prompt builders that assemble a single
+    string (e.g. ``build_code_generation_prompt``); the list-mode wrapper
+    ``_append_skill_context`` below uses this internally.
+    """
+    sections = state.get("skill_sections")
+    if not sections:
+        return ""
+    content = sections.get(stage, "")
+    if not content:
+        return ""
+
+    skill_name = state.get("skill_name", "domain skill")
+    parts = [
+        f"\n## MANDATORY Domain Skill Rules: {skill_name} ({stage})",
+        (
+            "The following rules are MANDATORY. Your analysis plan and implementation "
+            "MUST conform to these domain-specific requirements. These rules encode "
+            "validated domain expertise and take precedence over general-purpose defaults. "
+            "Do NOT substitute your own preferences where these rules specify a method, "
+            "treatment, or constraint."
+        ),
+        content,
+    ]
+
+    # Include validation rules during planning, interpretation, and
+    # implementation so the LLM knows quality criteria upfront — at planning
+    # to shape the approach, at interpretation/implementation to shape the
+    # output and the generated code.
+    if stage in ("planning", "interpretation", "implementation"):
+        validation = sections.get("validation", "")
+        if validation:
+            parts.append(f"\n## MANDATORY Domain Validation Rules ({skill_name})")
+            parts.append(validation)
+
+    return "\n".join(parts)
+
+
 def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
-    """Append domain skill knowledge to an LLM prompt for the given stage.
+    """Append domain skill knowledge to an LLM prompt list for the given stage.
+
+    Thin list-mode wrapper around ``_render_skill_block`` for prompt
+    builders that assemble multi-part (text + image) prompts.
 
     Args:
         prompt: Mutable list of prompt parts to extend.
         state: Pipeline state dict containing ``skill_sections`` and ``skill_name``.
-        stage: One of ``"planning"``, ``"analysis"``, ``"interpretation"``, ``"validation"``.
+        stage: One of ``"planning"``, ``"analysis"``, ``"interpretation"``,
+               ``"validation"``, ``"implementation"``.
     """
-    sections = state.get("skill_sections")
-    if not sections:
-        return
-
-    skill_name = state.get("skill_name", "domain skill")
-    content = sections.get(stage, "")
-    if not content:
-        return
-
-    prompt.append(f"\n## MANDATORY Domain Skill Rules: {skill_name} ({stage})")
-    prompt.append(
-        "The following rules are MANDATORY. Your analysis plan and implementation "
-        "MUST conform to these domain-specific requirements. These rules encode "
-        "validated domain expertise and take precedence over general-purpose defaults. "
-        "Do NOT substitute your own preferences where these rules specify a method, "
-        "treatment, or constraint."
-    )
-    prompt.append(content)
-
-    # Include validation rules during planning and interpretation
-    # so the LLM knows quality criteria upfront
-    if stage in ("planning", "interpretation"):
-        validation = sections.get("validation", "")
-        if validation:
-            prompt.append(f"\n## MANDATORY Domain Validation Rules ({skill_name})")
-            prompt.append(validation)
+    block = _render_skill_block(state, stage)
+    if block:
+        prompt.append(block)
 
 
 def _append_prior_knowledge_context(prompt: list, state: dict) -> None:
@@ -142,8 +165,44 @@ def build_code_generation_prompt(
     processing_note: str,
     hints: str | None = None,
     objective: str | None = None,
+    required_outputs: list[str] | None = None,
+    skill_implementation: str | None = None,
 ) -> str:
+    skill_section = ""
+    if skill_implementation:
+        skill_section = f"""
+
+### 0. ACTIVE DOMAIN SKILL — IMPLEMENTATION GUIDANCE
+{skill_implementation}
+
+If the skill's guidance suggests map key names that differ from the
+REQUIRED OUTPUTS block (when present), the REQUIRED OUTPUTS keys are
+authoritative — produce maps under those exact names even if the skill
+recommends different naming.
+"""
+
     hints_section = ""
+    if required_outputs:
+        keys_str = ", ".join(f'"{n}"' for n in required_outputs)
+        hints_section += f"""
+
+### REQUIRED OUTPUTS
+Your `maps` dict MUST contain the following keys (exact spelling):
+{keys_str}
+
+These keys represent quantities the user specifically asked for. Failure
+to include any of them — or producing them with values that visually fail
+quality checks (e.g. rail-gazing at parameter bounds, all-NaN, salt-and-
+pepper noise) — will cause this task to fail and force a retry. You MAY
+return additional keys, but the listed ones must be present and
+physically meaningful.
+
+If a previous attempt failed because a required output rail-gazed at
+parameter bounds, the fix is usually one of: (a) widen the parameter
+bounds, (b) use a better per-pixel initial guess (e.g. argmax of the
+spectrum after smoothing), (c) switch lineshape (Lorentzian vs Gaussian
+vs Voigt), or (d) add light per-pixel smoothing before fitting.
+"""
     if objective:
         hints_section += f"""
 
@@ -159,12 +218,12 @@ The user has indicated interest in: {hints}
 Prioritize this guidance in your analysis, but also capture any other significant features present in the data.
 """
     return f"""
-You are a Python Data Scientist specialized in Spectroscopy. 
+You are a Python Data Scientist specialized in Spectroscopy.
 The standard NMF tool failed to model a spectral feature described as: "{target_desc}".
 
-Your task: Write a Python function to mathematically model this feature. 
+Your task: Write a Python function to mathematically model this feature.
 Since complex features often require multiple parameters (e.g., Peak Position AND Peak Width), your function must be able to return MULTIPLE maps.
-
+{skill_section}
 ### 1. DATA CONTEXT
 - Input Data `hspy_data`: Shape ({h}, {w}, {e}) (Numpy array)
 - X-Axis `axis`: Shape ({e},) (Numpy array). **Units: {axis_units}**
@@ -292,9 +351,9 @@ class RunPreprocessingController:
 class GetInitialComponentParamsController:
     """
     [🧠 LLM Step]
-    Asks LLM for initial n_components and decomposition method (NMF or PCA).
+    Asks LLM for initial n_components and decomposition method (NMF, PCA, or ICA).
     """
-    VALID_METHODS = ("nmf", "pca")
+    VALID_METHODS = ("nmf", "pca", "ica")
 
     def __init__(self, model, logger, generation_config, safety_settings, parse_fn: Callable):
         self.model = model
@@ -310,10 +369,11 @@ class GetInitialComponentParamsController:
 
         h, w, e = state["hspy_data"].shape
         data_quality = state.get("data_quality", {})
+        axis_spec = resolve_axis_spec(state.get("system_info"))
 
         prompt_parts = [self.instructions]
         prompt_parts.append(f"\n\n--- Hyperspectral Data Information ---")
-        prompt_parts.append(f"Data dimensions: {h}x{w} spatial pixels, {e} spectral channels")
+        prompt_parts.append(f"Data dimensions: {describe_axes_for_prompt((h, w, e), axis_spec)}")
         prompt_parts.append(f"\n--- Data Quality Assessment (from Preprocessor) ---")
         prompt_parts.append(f"- Robust SNR Estimate: {data_quality.get('snr_estimate', 'N/A')}")
         prompt_parts.append(f"- Assessment: {data_quality.get('reasoning', 'N/A')}")
@@ -351,14 +411,23 @@ class GetInitialComponentParamsController:
                 self.logger.warning(f"LLM initial estimation failed: {error_dict}. Using defaults.")
                 n_components = 4
                 selected_method = "nmf"
+                run_decomposition = True
             else:
+                # Defensive default: missing field => run decomposition. The
+                # skip path is opt-in via an explicit objective-driven decision.
+                run_decomposition = bool(result_json.get('run_decomposition', True))
                 n_components = result_json.get('estimated_components', 4)
                 selected_method = result_json.get('method', 'nmf').lower().strip()
                 reasoning = result_json.get('reasoning', 'No reasoning provided.')
-                self.logger.info(f"LLM initial estimate: method={selected_method}, {n_components} components. Reasoning: {reasoning}")
+                self.logger.info(
+                    f"LLM initial estimate: run_decomposition={run_decomposition}, "
+                    f"method={selected_method}, {n_components} components. "
+                    f"Reasoning: {reasoning}"
+                )
 
                 print("\n" + "="*80)
                 print("🧠 LLM REASONING (GetInitialComponentParamsController)")
+                print(f"  Run decomposition: {run_decomposition}")
                 print(f"  Selected method: {selected_method.upper()}")
                 print(f"  Suggested n_components: {n_components}")
                 print(f"  Explanation: {reasoning}")
@@ -375,13 +444,23 @@ class GetInitialComponentParamsController:
             state["initial_n_components"] = n_components
             state["selected_method"] = selected_method
             state["settings"]["method"] = selected_method
-            self.logger.info(f"✅ LLM Step Complete: method={selected_method.upper()}, initial components={n_components}.")
+            state["skip_decomposition"] = not run_decomposition
+            if not run_decomposition:
+                self.logger.info(
+                    "🚦 LLM gate selected SKIP: proceeding directly to dynamic "
+                    "analysis without decomposition."
+                )
+            self.logger.info(
+                f"✅ LLM Step Complete: skip_decomposition={state['skip_decomposition']}, "
+                f"method={selected_method.upper()}, initial components={n_components}."
+            )
 
         except Exception as e:
             self.logger.error(f"❌ LLM Step Failed: Initial component estimation: {e}", exc_info=True)
             state["initial_n_components"] = 4
             state["selected_method"] = "nmf"
             state["settings"]["method"] = "nmf"
+            state["skip_decomposition"] = False
 
         return state
 
@@ -396,13 +475,30 @@ class RunComponentTestLoopController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"): return state
+        if state.get("skip_decomposition"):
+            self.logger.info("Skip-decomposition gate active — bypassing component test loop.")
+            return state
         self.logger.info("\n\n🛠️ --- CALLING TOOL: COMPONENT TEST LOOP --- 🛠️\n")
+
+        method_name = state.get("settings", {}).get("method", "nmf").upper()
+
+        # ICA has no meaningful reconstruction-error trend in n_components, so
+        # the elbow loop is uninformative. Skip it and let the downstream
+        # selection controller fall back to the LLM's initial estimate.
+        if method_name == "ICA":
+            self.logger.info(
+                "ICA mode: skipping component test loop (no informative elbow). "
+                "Final n_components will use the LLM's initial estimate."
+            )
+            state["component_test_range"] = []
+            state["component_test_errors"] = []
+            state["component_test_visuals"] = []
+            return state
 
         tool_settings = self.settings.copy()
         for key in AGENT_METADATA_KEYS_TO_STRIP:
             tool_settings.pop(key, None)
 
-        method_name = state.get("settings", {}).get("method", "nmf").upper()
         initial_estimate = state.get("initial_n_components", 4)
         min_c = self.settings.get('min_auto_components', 2)
         max_c = self.settings.get('max_auto_components', min(initial_estimate + 4, 12))
@@ -466,6 +562,10 @@ class CreateElbowPlotController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"): return state
+        if state.get("skip_decomposition"):
+            self.logger.info("Skip-decomposition gate active — bypassing elbow plot.")
+            state["elbow_plot_bytes"] = None
+            return state
         self.logger.info("\n\n🛠️ --- CALLING TOOL: CREATE ELBOW PLOT --- 🛠️\n")
 
         method_name = state.get("settings", {}).get("method", "nmf").upper()
@@ -511,8 +611,11 @@ class GetFinalComponentSelectionController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"): return state
+        if state.get("skip_decomposition"):
+            self.logger.info("Skip-decomposition gate active — bypassing final component selection.")
+            return state
         self.logger.info("\n\n🧠 --- LLM STEP: SELECT FINAL N_COMPONENTS --- 🧠\n")
-        
+
         initial_estimate = state.get("initial_n_components", 4)
         component_range = state.get("component_test_range", [])
         
@@ -596,8 +699,11 @@ class RunFinalSpectralUnmixingController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"): return state
+        if state.get("skip_decomposition"):
+            self.logger.info("Skip-decomposition gate active — bypassing final spectral unmixing.")
+            return state
         self.logger.info("\n\n🛠️ --- CALLING TOOL: FINAL SPECTRAL UNMIXING --- 🛠️\n")
-        
+
         final_n_components = state.get("final_n_components")
         if not final_n_components:
             final_n_components = self.settings.get('n_components', 4)
@@ -636,6 +742,9 @@ class CreateAnalysisPlotsController:
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"):
             return state
+        if state.get("skip_decomposition"):
+            self.logger.info("Skip-decomposition gate active — bypassing analysis plots.")
+            return state
 
         self.logger.info("\n\n🛠️ --- CALLING TOOL: CREATE ANALYSIS PLOTS --- 🛠️\n")
 
@@ -655,10 +764,12 @@ class CreateAnalysisPlotsController:
         final_plots = []
         validated_bytes_list = []
 
-        if method_name == "PCA":
-            # --- PCA MODE: Summary-only (no per-component validation) ---
+        if method_name in ("PCA", "ICA"):
+            # --- PCA / ICA MODE: Summary-only (no per-component validation) ---
+            # Both produce signed components that don't map directly to physical
+            # phases, so we skip per-component reconstruction validation.
             self.logger.info(
-                f"PCA mode: Generating summary plot for {components.shape[0]} components..."
+                f"{method_name} mode: Generating summary plot for {components.shape[0]} components..."
             )
             summary_bytes = tools.create_nmf_summary_plot(
                 components, abundance_maps, components.shape[0],
@@ -763,39 +874,45 @@ class CreateAnalysisPlotsController:
 class BuildHyperspectralPromptController:
     """
     [📝 Prep Step]
-    Assembles all results into the final prompt for interpretation.
-    THIS IS FOR A SINGLE ITERATION, NOT THE FINAL SYNTHESIS.
+    Assembles per-iteration decomposition results into the interpretation
+    prompt for this iteration. Distinct from
+    BuildHolisticSynthesisPromptController, which assembles the synthesis
+    prompt run after dynamic analysis completes.
     """
     def __init__(self, logger: logging.Logger):
         self.logger = logger
 
     def execute(self, state: dict) -> dict:
-        if state.get("error_dict"): 
+        if state.get("error_dict"):
             return state
-        self.logger.info("\n\n📝 --- PREP STEP: BUILDING FINAL PROMPT --- 📝\n")
+        self.logger.info("\n\n📝 --- PREP STEP: BUILDING ITERATION INTERPRETATION PROMPT --- 📝\n")
         
         # 1. Base Instruction & Context
         prompt_parts = [state["instruction_prompt"]]
 
-        # 2. Parent Reasoning (if this is a refinement)
-        if state.get("parent_refinement_reasoning"):
-            prompt_parts.append(f"""
+        # 2. Skip-decomposition framing (when the gate selected direct analysis)
+        if state.get("skip_decomposition"):
+            prompt_parts.append("""
 
-### 🔍 CONTEXT: Why are we performing this focused analysis?
+### 🚦 CONTEXT: Unsupervised decomposition was skipped
 
-**Reasoning from previous step:** "{state['parent_refinement_reasoning']}"
-
-Use this context to guide your interpretation.
+The user's objective is best served by direct per-pixel quantitative
+analysis (e.g. curve fitting, peak finding, integration) rather than
+unsupervised source separation. No NMF/PCA/ICA components are available.
+Frame your interpretation around the raw data characteristics and propose
+`custom_code` refinement targets that operate per-pixel on the (preprocessed)
+raw spectra.
 """)
-        
+
         # 3. Data Metadata
         h, w, e = state["hspy_data"].shape
-        _, energy_xlabel, _ = tools.create_energy_axis(e, state["system_info"])
-        
+        axis_spec = resolve_axis_spec(state.get("system_info"))
+        _, energy_xlabel, _ = tools.create_axis(e, state["system_info"], axis_index=2)
+
         metadata_info = f"""
 
 Hyperspectral Data Information:
-- Data shape: ({h}, {w}, {e})
+- Data shape: ({h}, {w}, {e}) = {describe_axes_for_prompt((h, w, e), axis_spec)}
 - X-axis: {energy_xlabel}
 """
         
@@ -821,6 +938,20 @@ Below is a PCA decomposition summary of the dataset.
 Top row: Principal Component spectra. Bottom row: Corresponding spatial loading maps.
 PCA components are exploratory — they capture variance directions, not necessarily physical phases.
 Identify spectral features of interest (peaks, edges, shifts) for custom code modeling.
+""")
+                # Append only the summary image (no per-component metrics)
+                for plot in state["component_pair_plots"]:
+                    prompt_parts.append(f"\n{plot['label']}:")
+                    prompt_parts.append({"mime_type": "image/jpeg", "data": plot['bytes']})
+            elif method_name == "ICA":
+                # ICA mode: summary-only, independent-source framing
+                prompt_parts.append(f"""
+Below is an ICA decomposition summary of the dataset.
+Top row: Independent Component spectra. Bottom row: Corresponding spatial loading maps.
+ICA components represent statistically independent sources rather than variance directions;
+they may overlap spectrally and can have signed loadings. Use them to identify candidate
+distinct contributions for custom code modeling, but do not treat them as physical phases
+without further validation.
 """)
                 # Append only the summary image (no per-component metrics)
                 for plot in state["component_pair_plots"]:
@@ -882,7 +1013,7 @@ Overlays showing where components are concentrated on the structural image.
         prompt_parts.append("\n\nProvide your analysis in the requested JSON format.")
 
         state["final_prompt_parts"] = prompt_parts
-        self.logger.info("✅ Prep Step Complete: Final prompt is ready.")
+        self.logger.info("✅ Prep Step Complete: Iteration interpretation prompt is ready.")
         return state
 
 
@@ -905,7 +1036,16 @@ class SelectRefinementTargetController:
 
         prompt_parts = [self.instructions]
         prompt_parts.append(f"\n\n--- Current Analysis: {state.get('iteration_title', 'Analysis')} ---")
-        
+
+        if state.get("skip_decomposition"):
+            prompt_parts.append("""
+
+🚦 NOTE: Unsupervised decomposition was skipped for this run because the
+user's objective specifies a direct per-pixel measurement. Only `custom_code`
+refinement targets are meaningful here — do not request `spatial` or
+`spectral` zoom refinement.
+""")
+
         # Add system info
         if state.get("system_info"):
             sys_info_str = json.dumps(state["system_info"], indent=2)
@@ -1011,116 +1151,6 @@ class SelectRefinementTargetController:
         return state
     
 
-class GenerateRefinementTasksController:
-    """
-    [🛠️ Tool Step]
-    Takes the list of targets from the LLM and generates new tasks.
-    """
-    MIN_SPECTRAL_CHANNELS = 10 
-
-    def __init__(self, logger: logging.Logger):
-        self.logger = logger
-
-    def execute(self, state: dict) -> dict:
-        self.logger.info("\n\n🛠️ --- CALLING TOOL: GENERATE REFINEMENT TASKS --- 🛠️\n")
-        
-        decision = state.get("refinement_decision")
-        if not decision or not decision.get("refinement_needed") or not decision.get("targets"):
-            state["new_tasks"] = []
-            return state
-
-        new_tasks = []
-        current_depth = state.get("current_depth", 0)
-        next_depth = current_depth + 1
-        
-        # Iterate through targets with an index (1-based for humans)
-        for i, target in enumerate(decision["targets"], 1):
-            try:
-                t_type = target.get("type")
-                t_value = target.get("value")
-                t_desc = target.get("description", "refinement")
-                
-                # Create the Structured ID
-                # D = Depth, T = Target Number
-                short_title = f"Focused_Analysis_D{next_depth}_T{i}"
-                
-                new_data = None
-                new_sys_info = state["system_info"]
-
-                if t_type == "spatial":
-                    self.logger.info(f"Processing Spatial Task {i}: {t_desc}")
-                    component_index = int(t_value)
-                    if component_index > 0: component_index -= 1 
-                    else: component_index = 0
-                    
-                    new_data = tools.apply_spatial_mask(
-                        state["hspy_data"], state["final_abundance_maps"], component_index
-                    )
-
-                elif t_type == "spectral":
-                    self.logger.info(f"Processing Spectral Task {i}: {t_desc}")
-                    
-                    # t_value comes from LLM as physical units, e.g., [0.6, 1.0]
-                    target_start_ev, target_end_ev = t_value[0], t_value[1]
-                    
-                    # 1. Reconstruct the full energy axis for the ORIGINAL data
-                    h, w, e = state["original_hspy_data"].shape
-                    # (Assuming you have access to create_energy_axis from tools)
-                    energy_axis, _, _ = tools.create_energy_axis(e, state["system_info"])
-                    
-                    # 2. Find the closest integer indices for these physical values
-                    start_idx, end_idx = tools.convert_energy_to_indices(
-                        energy_axis, 
-                        target_start_ev, 
-                        target_end_ev, 
-                        min_channels=self.MIN_SPECTRAL_CHANNELS
-                    )
-
-                    # 3. Perform the slicing using INDICES
-                    # Note: We pass the indices to the tool, NOT the physical values
-                    # Use the calculated safe indices to get safe physical range for the tool
-                    safe_physical_range = [energy_axis[start_idx], energy_axis[end_idx]]
-
-                    new_data, _ = tools.apply_spectral_slice(
-                        state["original_hspy_data"], 
-                        state["system_info"], 
-                        safe_physical_range
-                    )
-
-                    # 4. Update System Info with the NEW Physical Range
-                    new_sys_info = state["system_info"].copy()
-                    new_sys_info['energy_range'] = {
-                        'start': float(energy_axis[start_idx]),
-                        'end': float(energy_axis[end_idx]),
-                        'units': state["system_info"].get('energy_range', {}).get('units', 'units')
-                    }
-                    
-                    self.logger.info(f"Recalibrated axis: {state['system_info']['energy_range']['start']:.2f}-{state['system_info']['energy_range']['end']:.2f} -> {new_sys_info['energy_range']['start']:.2f}-{new_sys_info['energy_range']['end']:.2f}")
-
-                    if new_data.shape[-1] < self.MIN_SPECTRAL_CHANNELS:
-                        self.logger.warning(f"Skipping spectral task '{short_title}': too few channels.")
-                        continue
-
-                if new_data is not None:
-                    task = {
-                        "data": new_data,
-                        "system_info": new_sys_info,
-                        # SHORT TITLE for Reports/Files
-                        "title": short_title, 
-                        # LONG DESCRIPTION for LLM Context (Re-injected later)
-                        "parent_reasoning": t_desc, 
-                        "source_depth": next_depth
-                    }
-                    new_tasks.append(task)
-
-            except Exception as e:
-                self.logger.error(f"Failed to generate task for target {target}: {e}")
-
-        state["new_tasks"] = new_tasks
-        self.logger.info(f"✅ Generated {len(new_tasks)} new analysis tasks.")
-        return state
-    
-
 class BuildHolisticSynthesisPromptController:
     """
     [📝 Prep Step]
@@ -1165,11 +1195,6 @@ class BuildHolisticSynthesisPromptController:
             iter_ref_id = _sanitize_filename(raw_title)
             
             prompt_parts.append(f"\n\n### SECTION {i+1}: {raw_title}")
-            
-            # Context: Why did we do this?
-            context_desc = iter_result.get('parent_refinement_reasoning') 
-            if context_desc:
-                prompt_parts.append(f"**Target Description:** \"{context_desc}\"")
 
             # --- DYNAMIC ANALYSIS INJECTION
             # Retrieve the list of features generated by the custom code
@@ -1290,10 +1315,10 @@ class GenerateHTMLReportController:
 
             # --- 2. Concept Triggers (The Safety Net) ---
 
-            # TRIGGER: Decomposition Summary (NMF or PCA)
+            # TRIGGER: Decomposition Summary (NMF, PCA, or ICA)
             # If the plot is a summary grid and the text mentions the method or "Components", show it.
             if "summary grid" in label_lower:
-                if "nmf" in lower_text or "pca" in lower_text or "component" in lower_text or "unmixing" in lower_text or "decomposition" in lower_text:
+                if "nmf" in lower_text or "pca" in lower_text or "ica" in lower_text or "component" in lower_text or "unmixing" in lower_text or "decomposition" in lower_text:
                     cited_images.append(img)
                     continue
 
@@ -1545,23 +1570,22 @@ class RunDynamicAnalysisController:
 
         # --- PREPARE DATA CONTEXT ---
         h, w, e = state["hspy_data"].shape
-        
-        # Axis & Unit Detection
+
+        # Axis & Unit Detection — reads through resolve_axis_spec so non-energy
+        # axes (time, voltage, frequency, ...) work the same as the legacy
+        # energy_range path. The state key remains "energy_axis" for backward
+        # compatibility with downstream consumers.
         sys_info = state.get("system_info", {})
-        axis_units = "unknown units"
-        
+        axis_spec = resolve_axis_spec(sys_info)
+        axis_2 = axis_spec["axis_2"]
+        axis_units = axis_2.get("units", "arbitrary units")
+
         if "energy_axis" not in state:
-            if sys_info.get("energy_range"):
-                start = sys_info["energy_range"]["start"]
-                end = sys_info["energy_range"]["end"]
-                state["energy_axis"] = np.linspace(start, end, e)
-                axis_units = sys_info["energy_range"].get("units", "arbitrary units")
+            if "start" in axis_2 and "end" in axis_2:
+                state["energy_axis"] = np.linspace(axis_2["start"], axis_2["end"], e)
             else:
                 state["energy_axis"] = np.arange(e)
                 axis_units = "channels"
-        else:
-            # Try to grab units if existing
-            axis_units = sys_info.get("energy_range", {}).get("units", "arbitrary units")
 
         self.logger.info(f"Data Axis Units detected as: {axis_units}")
 
@@ -1575,7 +1599,17 @@ class RunDynamicAnalysisController:
         # --- MAIN LOOP: Process each target description separately ---
         for i, target in enumerate(custom_targets, 1):
             target_desc = target.get("description", "Analyze feature")
-            self.logger.info(f"👉 Task {i}/{len(custom_targets)}: {target_desc}")
+            # Objective-aware required outputs: when the refinement-LLM marked
+            # specific map keys as mandatory (driven by the user's stated
+            # objective), failing any of them triggers a retry instead of
+            # being silently dropped by the partial-success threshold.
+            required_outputs = list(target.get("required_outputs") or [])
+            if required_outputs:
+                self.logger.info(
+                    f"👉 Task {i}/{len(custom_targets)} (required outputs: {required_outputs}): {target_desc}"
+                )
+            else:
+                self.logger.info(f"👉 Task {i}/{len(custom_targets)}: {target_desc}")
 
             # 1. Define Prompt for this specific task
             base_prompt = build_code_generation_prompt(
@@ -1587,7 +1621,31 @@ class RunDynamicAnalysisController:
                 processing_note=processing_note,
                 hints=state.get("analysis_hints"),
                 objective=state.get("analysis_objective"),
+                required_outputs=required_outputs,
+                # Inject the active skill's `implementation` section so the
+                # code-gen LLM gets domain-specific recipe guidance (lineshape,
+                # baseline, library choice). Empty string when no skill is
+                # active or no implementation section is defined.
+                skill_implementation=_render_skill_block(state, "implementation"),
             )
+
+            # Append a preprocessing-mask hint when one exists and identifies
+            # excluded pixels. The mask is already applied to the data (zero-
+            # filled), so per-pixel fits will produce garbage values on
+            # excluded pixels; the LLM should be told to filter on the mask.
+            mask = state.get("preprocessing_mask")
+            if mask is not None and not bool(mask.all()):
+                n_kept = int(mask.sum())
+                n_total = int(mask.size)
+                base_prompt += f"""
+
+### PREPROCESSING MASK
+A boolean preprocessing mask of shape ({mask.shape[0]}, {mask.shape[1]}) is
+available indicating which (axis_0, axis_1) samples carry valid signal:
+{n_kept} of {n_total} samples are True (kept). The mask itself is NOT passed
+into the analysis function — operate on the raw spectra and, if your output
+maps should mark excluded samples, set them to np.nan in your returned maps.
+"""
 
             current_prompt = base_prompt
             retries = 0
@@ -1671,9 +1729,14 @@ class RunDynamicAnalysisController:
 
                         safe_feat = _sanitize_filename(feature_name)
 
-                        # 2. Generate Dashboard (Map + Histogram)
-                        # Assumes tools.create_feature_dashboard exists (as defined in previous turns)
-                        dashboard_bytes = tools.create_feature_dashboard(result_map, feature_name, current_unit)
+                        # 2. Generate Dashboard (Map + Histogram). Pass
+                        # axis_spec so non-spatial leading axes get axis-
+                        # name-driven labels ("Voltage-Time Map" / "Sample
+                        # Count") instead of "Spatial Map" / "Pixel Count".
+                        dashboard_bytes = tools.create_feature_dashboard(
+                            result_map, feature_name, current_unit,
+                            axis_spec=resolve_axis_spec(state.get("system_info")),
+                        )
 
                         if dashboard_bytes:
                             # 3. Visual QC (Generator-Judge Loop)
@@ -1702,24 +1765,52 @@ class RunDynamicAnalysisController:
                                 self.logger.warning(f"    ❌ Visual QC rejected {feature_name}: {critique}")
                                 qc_failures.append(f"{feature_name}: {critique}")
 
-                    # --- F. SUCCESS DECISION (Threshold Logic) ---
+                    # --- F. SUCCESS DECISION (Threshold + Required-Outputs Logic) ---
                     valid_count = len(current_run_valid_maps)
                     success_rate = valid_count / total_maps_expected if total_maps_expected > 0 else 0
 
-                    if valid_count > 0 and success_rate >= self.SUCCESS_THRESHOLD:                        
+                    # Required-outputs gate: every named output must be
+                    # present AND QC-pass. Failure here forces a retry, so
+                    # the partial-success threshold never silently drops the
+                    # user-asked-for quantity.
+                    valid_names = {m['name'] for m in current_run_valid_meta}
+                    missing_required = [n for n in required_outputs if n not in valid_names]
+                    if missing_required:
+                        relevant_critiques = [
+                            c for c in qc_failures
+                            if any(req in c for req in missing_required)
+                        ]
+                        absent_from_output = [
+                            n for n in missing_required if n not in maps_dict
+                        ]
+                        detail_parts = []
+                        if absent_from_output:
+                            detail_parts.append(
+                                f"keys absent from your `maps` dict: {absent_from_output}"
+                            )
+                        if relevant_critiques:
+                            detail_parts.append(
+                                f"QC critiques on required outputs: {relevant_critiques}"
+                            )
+                        detail = "; ".join(detail_parts) or "no further detail"
+                        raise ValueError(
+                            f"Required outputs failed: {missing_required}. {detail}"
+                        )
+
+                    if valid_count > 0 and success_rate >= self.SUCCESS_THRESHOLD:
                         status_msg = "✅ Success" if valid_count == total_maps_expected else "⚠️ Partial Success"
                         self.logger.info(f"    {status_msg} ({valid_count}/{total_maps_expected} passed). Committing valid maps.")
-                        
+
                         # 1. COMMIT Valid Images
                         for img_item in current_run_valid_images:
                             tools.save_image_bytes(img_item['data'], output_dir, img_item['filename'], self.logger)
                             if "analysis_images" not in state: state["analysis_images"] = []
                             state["analysis_images"].append(img_item)
-                        
+
                         # 2. COMMIT Data
                         all_valid_maps.extend(current_run_valid_maps)
                         all_valid_meta.extend(current_run_valid_meta)
-                        
+
                         task_success = True
                         break # Exit Retry Loop
                     else:
@@ -1742,11 +1833,14 @@ class RunDynamicAnalysisController:
             state["dynamic_analysis_failed"] = True
             return state
 
-        # Stack maps from ALL scripts into one 3D array (H, W, N)
-        state["final_abundance_maps"] = np.stack(all_valid_maps, axis=-1)
+        # Commit per-feature metadata; downstream synthesis reads
+        # custom_analysis_metadata_list. We no longer overwrite the NMF/PCA/ICA
+        # state["final_abundance_maps"] key with the stacked custom maps —
+        # that write had no downstream reader after the Phase C cleanup and
+        # would have collided semantically with the decomposition's own
+        # abundance maps. method_used and new_tasks writes are likewise gone
+        # (no consumers).
         state["custom_analysis_metadata_list"] = all_valid_meta
-        state["method_used"] = "Dynamic Code Generation"
-        state["new_tasks"] = [] 
 
         self.logger.info(f"✅ Dynamic Analysis Complete. Total unique maps generated: {len(all_valid_maps)}")
         return state

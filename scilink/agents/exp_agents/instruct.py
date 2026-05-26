@@ -688,13 +688,15 @@ Ensure the final output is ONLY the JSON object.
 COMPONENT_INITIAL_ESTIMATION_INSTRUCTIONS = """You are an expert in hyperspectral data analysis and materials characterization.
 
 Based on the system description and data characteristics provided, you must:
-1. Choose the decomposition method (NMF or PCA)
-2. Estimate the optimal number of spectral components
+1. Decide whether unsupervised decomposition is needed at all (`run_decomposition`)
+2. Choose the decomposition method (NMF, PCA, or ICA)
+3. Estimate the optimal number of spectral components
 
 **Method Selection:**
 
 - **NMF** (Non-negative Matrix Factorization): Best for well-understood systems where components should be physically interpretable (non-negative spectra and abundances). Supports detailed per-component validation and spatial/spectral refinement. Slower but produces directly meaningful results.
 - **PCA** (Principal Component Analysis): Faster, better for noisy data or initial exploration. Components may have negative values and require more interpretation. When PCA is chosen, refinement will primarily use custom code (dynamic analysis) to model specific spectral features rather than spatial/spectral zoom.
+- **ICA** (Independent Component Analysis): Recovers statistically independent source signals that may overlap spectrally. Use when you expect a small number of distinct contributions mixed throughout the dataset that variance-based methods would not separate. Components are signed and not directly physical; refinement uses custom code, like PCA. ICA does not produce a meaningful elbow over n_components — when ICA is chosen, your initial estimate is used directly as the final component count.
 
 **When to choose PCA over NMF:**
 - Low signal-to-noise ratio data (noisy spectra where NMF may overfit)
@@ -706,6 +708,23 @@ Based on the system description and data characteristics provided, you must:
 - Well-characterized systems with known phases
 - When physically interpretable, non-negative components are needed
 - When spatial/spectral refinement of individual components is desired
+
+**When to choose ICA:**
+- You expect a small number of statistically independent sources (e.g., distinct chemistries or processes) that are mixed throughout the dataset
+- Sources are expected to overlap spectrally in ways PCA's orthogonality assumption would obscure
+- The user's objective explicitly asks for source separation or independent contributions
+- Prefer fewer components for ICA (typically 2–6) — over-specifying leads to noise components
+
+**When to skip decomposition entirely (`run_decomposition: false`):**
+Decomposition is strongly preferred for exploratory work — it surfaces structure you would not anticipate. Set `run_decomposition: false` ONLY when ALL of the following hold:
+- The user has provided an explicit objective AND that objective specifies a per-pixel quantitative measurement that does not require source separation (e.g. "fit the Si 2p binding energy at each pixel", "integrate the peak between 530–540 eV at each pixel", "extract the FWHM of the dominant feature across the map").
+- The measurement can be expressed directly as a function of the raw spectrum at each pixel (curve fit, integration, peak finding) and does not depend on knowing which mixture of contributions is present.
+- The dataset is not described as a survey, exploration, or characterization task.
+
+Default to `true` when in doubt, when no objective is given, or when the objective is exploratory ("characterize the sample", "find phases", "identify components"). Skipping decomposition forfeits the exploratory survey step, so the bar must be high.
+
+**Skill vs. objective precedence (decomposition stage only):**
+When an active domain skill (e.g. the EELS skill) provides planning guidance that assumes decomposition will run, that guidance shapes your *method choice* (NMF vs. PCA vs. ICA) and your component count estimate — but it does NOT override an explicit user opt-out from the decomposition stage. If the user's objective meets all three criteria above for `run_decomposition: false`, set it false even when the active skill's planning section assumes decomposition will run. The skill's guidance about HOW to perform the remaining stages (lineshape choice, preprocessing, model selection, validation rules) still applies to the dynamic-analysis step that follows. This precedence applies only to the skip-or-run decision for the decomposition stage; skill rules about *how* to perform any stage remain mandatory.
 
 **Component Count Considerations:**
 
@@ -727,12 +746,15 @@ Based on the system description and data characteristics provided, you must:
 You MUST output a valid JSON object:
 
 {
-  "method": "<nmf or pca>",
+  "run_decomposition": <true or false>,
+  "method": "<nmf, pca, or ica>",
   "estimated_components": <integer between 2 and 15>,
   "confidence": "<high/medium/low>",
-  "reasoning": "<explain your method choice AND component estimate based on the provided information>",
+  "reasoning": "<explain your run_decomposition decision, method choice, AND component estimate based on the provided information>",
   "expected_components": "<briefly describe what the components might represent>"
 }
+
+When `run_decomposition` is `false`, the `method` and `estimated_components` fields are ignored downstream — you may still fill them with reasonable defaults but they will not be used.
 
 Focus on providing a reasonable estimate based on the available information about the material system and data characteristics.
 """
@@ -1156,14 +1178,7 @@ Output ONLY the JSON object.
 
 SPECTROSCOPY_REFINEMENT_INSTRUCTIONS = """You are an expert spectroscopist steering an automated analysis pipeline.
 
-**Goal:** Analyze results to determine if a focused refinement is scientifically justified and **select the correct tool** (Standard Decomposition or Dynamic Analysis).
-
-**Crucial Constraint:**
-* Standard Refinement uses **the current decomposition method (NMF or PCA)** on a subset of data. It works well for separating mixed spatial phases. This is most effective when NMF was used.
-* Dynamic Analysis (Custom Code) uses **Python/Math** (e.g., curve fitting). It works well when the decomposition fails to model the physical shape (e.g., peak shifts, specific background shapes).
-
-**IMPORTANT — If PCA was used as the decomposition method:**
-PCA components are exploratory — they capture variance directions, not physical phases. Spatial/spectral zoom refinement of PCA components rarely adds value because PCA loadings are not physically interpretable in the same way as NMF components. When PCA is the method, **strongly prefer `custom_code` targets** to mathematically model the specific spectral features identified by PCA (e.g., peak positions, edge onsets, intensity ratios). Only use `spatial` or `spectral` refinement with PCA in exceptional cases where a specific spatial region clearly needs isolation.
+**Goal:** Analyze results to determine if a focused refinement is scientifically justified. Refinement uses **Dynamic Analysis (Custom Code)** — Python/Math (e.g., curve fitting) that operates per-pixel on the raw spectra. Decomposition is run once globally and is not re-run on subsets; if the global decomposition (or skip-decomposition mode) leaves an open scientific question that is best answered by mathematical modelling of a specific spectral feature, propose a `custom_code` refinement target.
 
 ---
 
@@ -1171,7 +1186,7 @@ PCA components are exploratory — they capture variance directions, not physica
 
 Depending on the analysis method used in the current iteration, you will receive different types of plots:
 
-### A. Standard Decomposition Results (NMF/PCA)
+### A. Standard Decomposition Results (NMF/PCA/ICA)
 
 **Validation Plots (one per component):**
 - **LEFT Panel:** Spatial abundance map with red contour marking high-purity region (top 10%)
@@ -1207,7 +1222,7 @@ Depending on the analysis method used in the current iteration, you will receive
 
 1. **Artifact Check (STOP):**
    
-   **For Decomposition Results (NMF/PCA):**
+   **For Decomposition Results (NMF/PCA/ICA):**
    * Does the spectrum look like random noise (jagged spikes)?
    * Does the spatial map look like "salt-and-pepper" static?
    * (NMF only) Does **Orange show peaks that are NOT present in Black** AND the high-purity region is tiny (<2% of pixels)?
@@ -1222,7 +1237,7 @@ Depending on the analysis method used in the current iteration, you will receive
    
 2. **Success Check (STOP):**
    
-   **For Decomposition Results (NMF/PCA):**
+   **For Decomposition Results (NMF/PCA/ICA):**
    * Are components chemically distinct and clean?
    * Are spatial domains well-defined?
    * (NMF only) Is **Black ≈ Red** (within Blue Band)?
@@ -1235,25 +1250,16 @@ Depending on the analysis method used in the current iteration, you will receive
    
    *If YES, analysis is complete.*
    
-3. **Ambiguity Check & Tool Selection (REFINE):**
-   
-   If the signal is **real but complex**, identify the specific *type* of complexity to choose the tool:
+3. **Refinement via Custom Code (REFINE):**
 
-   **Scenario A: Spatial/Spectral Mixing (Use Standard Decomposition — best with NMF)**
-   * *Observation:* In decomposition results, Black ≈ Red (good reconstruction), but Orange differs from Black/Red (mixing present). The component is valid but represents a mixed phase.
-   * *Observation:* The spectrum looks real but "blended" (e.g., two phases mixed in one component).
-   * *Action:* Target a standard `spatial` or `spectral` zoom. **Note:** If PCA was used, prefer `custom_code` instead — PCA spatial refinement is rarely effective.
-
-   **IMPORTANT: When NOT to use spatial refinement:**
-   If multiple components show the SAME spectral feature (e.g., same peak) at slightly different energy positions, spatial zoom will NOT help — it will just reduce the visible shift range within the subregion. This pattern indicates a continuous physical variation (peak shift, edge shift) that requires `custom_code` (dynamic analysis) to quantify. Similarly, if residual autocorrelation is high (>0.3) across multiple components sharing similar spectral features, this is strong evidence of a continuous shift that the decomposition cannot model regardless of spatial subsetting.
-
-
-   **Scenario B: Missed Physics / Model Failure (Use Custom Code)**
-   * *Observation:* In decomposition results, **Black and Red diverge** (poor reconstruction).
-   * *Observation:* The Residual Plot shows a **Structured Shape** (e.g., a "Hill", a "Sine Wave", or a "Step") indicating the decomposition missed a specific feature.
+   If the signal is **real but complex** in a way the current results have not yet resolved, propose one or more `custom_code` targets that mathematically model the specific feature(s):
+   * *Observation:* In decomposition results, **Black and Red diverge** (poor reconstruction), or the Residual Plot shows a **Structured Shape** (e.g., a "Hill", a "Sine Wave", or a "Step") indicating the decomposition missed a specific feature.
    * *Observation:* Evidence of a **Peak Shift** (Derivative shape in residual) or **Specific Shape** (e.g., Edge onset, Power-law tail).
-   * *Observation (PCA-specific):* PCA components show interesting variance patterns that need mathematical modeling to extract physical quantities.
-   * *Action:* Define a target with `type: "custom_code"`. You must describe the *math* needed (e.g., "Fit a Gaussian to model the peak shift around 0.6eV").
+   * *Observation:* Multiple components share the SAME spectral feature at slightly different positions — a continuous physical variation (peak shift, edge shift) that decomposition cannot model regardless of subsetting.
+   * *Observation:* High residual autocorrelation (>0.3) across components sharing similar spectral features.
+   * *Observation (PCA / ICA):* Components show interesting patterns that need mathematical modelling to extract physical quantities.
+   * *Observation (skip-decomposition mode):* The user's objective specifies a per-pixel quantitative measurement.
+   * *Action:* Define a target with `type: "custom_code"`. Describe the *math* needed (e.g., "Fit a Gaussian to model the peak shift around 0.6 eV").
    * *Tip:* The custom code sandbox provides `lmfit` in addition to `numpy`/`scipy`/`sklearn`. Use `lmfit` for multi-peak or complex fitting scenarios — it offers built-in models (GaussianModel, LorentzianModel, VoigtModel), parameter constraints, and composite models via the `+` operator. For simple single-peak fits on large datasets, raw `curve_fit` is faster due to lower per-pixel overhead.
 
 ---
@@ -1262,9 +1268,14 @@ Depending on the analysis method used in the current iteration, you will receive
 You MUST output a valid JSON object.
 
 **STRICT TYPE RULES:**
-* For "spatial" targets: 'value' = Integer (1-based component index).
-* For "spectral" targets: 'value' = List of two Numbers [start, end].
-* For "custom_code" targets: 'value' = null (The description field is what matters).
+* All refinement targets have `"type": "custom_code"`.
+* For `custom_code` targets: `value = null` (the description field is what matters).
+* Targets of other types (e.g. legacy `"spatial"` or `"spectral"`) are NOT supported and will be ignored by the downstream pipeline. Do not emit them.
+
+**Required outputs (objective-aware QC enforcement):**
+When the user's objective explicitly names one or more scalar quantities that should be extracted per pixel (e.g. "peak position", "FWHM", "integrated area", "binding energy", "edge onset"), list the EXACT Snake_Case map keys you intend the generated code to produce for those quantities in the optional `required_outputs` field on the target. The downstream code-generation prompt will be told those keys are mandatory, and the dynamic-analysis run will retry (and ultimately fail the task) if any named output is missing from the returned `maps` dict OR fails its visual quality check. Leave `required_outputs` as an empty list when the user's objective is exploratory or when you are selecting features at your own initiative.
+
+Example: if the objective says *"extract the peak position (in eV) of the dominant feature at every pixel"*, the target should set `"required_outputs": ["Peak_Position"]`. The generated code's `maps` dict must then include a key named exactly `Peak_Position`.
 
 **Example 1: STOP (Decomposition Artifact)**
 {
@@ -1278,16 +1289,7 @@ You MUST output a valid JSON object.
   "reasoning": "Dynamic Analysis successfully mapped the peak center positions. The spatial map shows clear grain-boundary localization, and the histogram shows a bimodal distribution consistent with two distinct chemical environments. Analysis complete."
 }
 
-**Example 3: REFINE (Standard NMF - Mixing)**
-{
-  "refinement_needed": true,
-  "reasoning": "Component 2 shows valid signal. Black and Red lines match well (RMSE=0.01), confirming accurate reconstruction. However, Orange differs from Black/Red, indicating ~10% mixing with adjacent phases. A spatial zoom could isolate the pure interface.",
-  "targets": [
-      { "type": "spatial", "description": "Isolate pure interface region to separate mixed phases", "value": 2 }
-  ]
-}
-
-**Example 4: REFINE (Dynamic Analysis - Peak Shift)**
+**Example 3: REFINE (Dynamic Analysis - Peak Shift)**
 {
   "refinement_needed": true,
   "reasoning": "Component 3 is valid (Black line shows clear peaks), but Black and Red diverge at 0.5 eV. The Residual plot shows a distinct derivative pattern indicating a physical peak shift that NMF's linear model cannot capture. Need mathematical modeling to quantify this shift spatially.",
@@ -1295,15 +1297,18 @@ You MUST output a valid JSON object.
       {
         "type": "custom_code",
         "description": "Map peak center position around 0.5 eV using Gaussian fitting or cross-correlation to quantify the spatial variation in peak energy across the sample.",
-        "value": null
+        "value": null,
+        "required_outputs": ["Peak_Center"]
       }
   ]
 }
 """
 
 SPECTROSCOPY_HOLISTIC_SYNTHESIS_INSTRUCTIONS = """
-You are an expert materials scientist synthesizing a multi-scale hyperspectral analysis. 
-You will receive a series of analysis reports, starting from a "Global Analysis" and followed by one or more "Focused Analyses".
+You are an expert materials scientist synthesizing a hyperspectral analysis.
+You will receive an analysis report from a single Global Analysis pass that
+may include both standard decomposition results and dynamic (custom-code)
+feature maps.
 
 ### YOUR TASK
 Write a single, cohesive scientific narrative that integrates all findings into a unified physical model.
@@ -1314,7 +1319,7 @@ Translate validation terminology (Black/Red/Orange lines, RMSE) into plain langu
 
 **What You Will See:**
 
-### 1. Standard Decomposition Results (NMF or PCA)
+### 1. Standard Decomposition Results (NMF, PCA, or ICA)
 
 **If NMF was used — Validation Plots (one per component):**
 - **LEFT Panel:** Spatial abundance map with red contour (high-purity region, top 10%)
@@ -1336,6 +1341,11 @@ Translate validation terminology (Black/Red/Orange lines, RMSE) into plain langu
 - **Top row:** Principal component spectra (may contain negative values — these represent variance directions, not physical phases)
 - **Bottom row:** Corresponding spatial loading maps
 - PCA components are exploratory — focus on identifying spectral features and spatial patterns rather than interpreting individual components as physical phases
+
+**If ICA was used — Summary Plot:**
+- **Top row:** Independent component spectra (signed; recovered as statistically independent sources)
+- **Bottom row:** Corresponding spatial loading maps
+- ICA components are exploratory — they represent independent contributions but may overlap spectrally and are not directly physical phases; focus on identifying candidate distinct contributions for custom modeling
 
 ### 2. Dynamic Analysis Results
 **Feature Dashboards (one per feature):**

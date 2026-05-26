@@ -1,8 +1,9 @@
 # SciLink — Architecture Notes
 
 Forward-looking design decisions and conventions. Intended for AI assistants
-and contributors working on the orchestrator stack. Codebase tour and
-per-module docs are elsewhere; this file is about *direction*.
+and contributors working on the agentic stack — orchestrators, foundation
+agents, and the skill subsystem. Codebase tour and per-module docs are
+elsewhere; this file is about *direction*.
 
 ## The mode universe is fixed at three
 
@@ -98,6 +99,28 @@ single-objective BO, multi-objective, DoE, active learning); in
 simulation it could be computational method (DFT, classical MD,
 machine-learning potentials). Each foundation agent picks its own axis;
 the definition is agnostic about *what counts as a modality*.
+
+A note on the `analysis` / `implementation` section pair: codegen-capable
+foundation agents inject the active skill's `implementation` section into
+per-task code-gen prompts. The skill loader treats `analysis` and
+`implementation` as synonyms when only one is authored — copying the
+content to the other — so skills written under either name flow into
+code-gen identically. When *both* are authored (e.g. `force_field/amber`,
+`molecular_dynamics/lammps`, `machine_learning_potentials/chgnet`), they
+are left distinct: the author's convention there is `analysis` for input
+characterization ("what kind of system is this?") and `implementation`
+for the runnable script recipe. This synonym fold is historical: the
+section was originally `fitting` in the curve-fitting-only era, renamed
+to `analysis` when image_analysis joined, and is now `implementation` in
+the most recent sim_agents and hyperspectral work. Going forward, prefer
+`implementation`.
+
+**Recommended structure for new analysis-agent skills:** `Overview →
+Planning → Implementation → Interpretation → Validation`. This five-
+section pattern follows the cognitive flow of an analysis run — what the
+technique is, how to plan a use of it, how to write the code, how to
+read the output, and how to verify it. New skills should use this
+ordering; legacy `analysis` is accepted by the loader for backcompat.
 
 ## Plan-mode capability boundaries
 
