@@ -52,7 +52,7 @@ mapping, phase identification, and chemical-state analysis.
 - Negative values from background subtraction or deconvolution violate
   NMF constraints. Either clip to zero or switch to PCA.
 
-## analysis
+## implementation
 
 **Per-pixel fitting recipes for EELS features.**
 
