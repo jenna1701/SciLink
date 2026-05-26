@@ -134,20 +134,36 @@ class IterativeFeedbackController:
             return state
 
         self.logger.info("\n\n👤 --- USER STEP: REVIEW ANALYSIS PLAN --- 👤\n")
-        
+
         # --- 1. Display Current Decision to User and Collect Feedback ---
+        # In skip-decomposition mode no iteration-stage analysis has run
+        # yet, so there's no current-analysis summary to show — the
+        # "summary" would be the pre-emptive LLM narrative that we now
+        # skip in RunFinalInterpretationController. Suppress the summary
+        # block when there is no real analysis text to display.
+        skip_mode = bool(state.get("skip_decomposition"))
         iteration_title = state.get("iteration_title", "Current Analysis")
-        analysis_text = state.get("result_json", {}).get("detailed_analysis", "No analysis text provided.")
+        result_json = state.get("result_json") or {}
+        analysis_text = result_json.get("detailed_analysis", "").strip()
         targets = decision.get("targets", [])
-        
+
         print("\n" + "="*80)
-        print(f"🎯 ANALYSIS STEP REVIEW: {iteration_title}")
+        header = "ANALYSIS PLAN REVIEW" if skip_mode else "ANALYSIS STEP REVIEW"
+        print(f"🎯 {header}: {iteration_title}")
         print("="*80)
-        print("\n**SUMMARY OF CURRENT ANALYSIS:**")
-        print(analysis_text)
-        print("-" * 80)
-        
-        print(f"🧠 LLM's Proposed Plan: Refinement Needed = **{decision.get('refinement_needed', False)}**")
+
+        if analysis_text:
+            print("\n**SUMMARY OF CURRENT ANALYSIS:**")
+            print(analysis_text)
+            print("-" * 80)
+        elif skip_mode:
+            print("\n(Skip-decomposition mode — no iteration-stage analysis "
+                  "to summarize; the synthesis stage will interpret after the "
+                  "dynamic-analysis step runs.)")
+            print("-" * 80)
+
+        plan_label = "Analysis Plan Ready" if skip_mode else "Refinement Needed"
+        print(f"🧠 LLM's Proposed Plan: {plan_label} = **{decision.get('refinement_needed', False)}**")
         print(f"Reasoning: {decision.get('reasoning', 'N/A')}")
         print()
         print("-" * 80)
@@ -175,7 +191,8 @@ class IterativeFeedbackController:
             return state
 
         if not user_feedback:
-            self.logger.info("✅ User accepted original refinement decision.")
+            decision_label = "analysis plan" if skip_mode else "refinement decision"
+            self.logger.info(f"✅ User accepted original {decision_label}.")
             return state
         
         # --- 3. Run LLM Refinement with Full Context ---

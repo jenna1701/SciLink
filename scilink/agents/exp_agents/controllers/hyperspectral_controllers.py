@@ -1032,12 +1032,21 @@ class SelectRefinementTargetController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"): return state
-        self.logger.info("\n\n🧠 --- LLM STEP: SELECT REFINEMENT TARGET --- 🧠\n")
+        # Log header reflects whether this is "select a plan from scratch"
+        # (skip-decomposition mode — no prior analysis to refine) vs.
+        # "refine the existing decomposition results".
+        skip_mode = bool(state.get("skip_decomposition"))
+        header = (
+            "🧠 --- LLM STEP: SELECT ANALYSIS PLAN --- 🧠"
+            if skip_mode
+            else "🧠 --- LLM STEP: SELECT REFINEMENT TARGET --- 🧠"
+        )
+        self.logger.info(f"\n\n{header}\n")
 
         prompt_parts = [self.instructions]
         prompt_parts.append(f"\n\n--- Current Analysis: {state.get('iteration_title', 'Analysis')} ---")
 
-        if state.get("skip_decomposition"):
+        if skip_mode:
             prompt_parts.append("""
 
 🚦 NOTE: Unsupervised decomposition was skipped for this run because the
@@ -1055,7 +1064,14 @@ refinement targets are meaningful here — do not request `spatial` or
         prompt_parts.append("\n\n--- Analysis Results ---")
         analysis_images = state.get("analysis_images", [])
         if not analysis_images:
-            self.logger.warning("No analysis images found for refinement selection.")
+            # In skip-decomposition mode the absence of analysis images is
+            # expected (no decomposition → no decomposition plots), not a
+            # warning condition. In normal mode it indicates a real upstream
+            # issue worth flagging.
+            if skip_mode:
+                self.logger.info("Skip-decomposition mode — no decomposition images to review (expected).")
+            else:
+                self.logger.warning("No analysis images found for refinement selection.")
             prompt_parts.append("(No visual results available)")
 
         for img in analysis_images:
@@ -1114,8 +1130,9 @@ refinement targets are meaningful here — do not request `spatial` or
             if custom_code_targets:
                 # Winner-Takes-All: If code is needed, focus ONLY on that.
                 # We pick the first custom target and ignore standard zooms for this turn.
-                top_target = custom_code_targets[0] 
-                self.logger.info(f"🎯 Priority Target Selected (Custom Code): {top_target.get('description')}")
+                top_target = custom_code_targets[0]
+                label = "Analysis Plan" if skip_mode else "Priority Target Selected"
+                self.logger.info(f"🎯 {label} (Custom Code): {top_target.get('description')}")
                 final_targets = [top_target]
                 requires_custom_code = True
             else:
@@ -1127,15 +1144,19 @@ refinement targets are meaningful here — do not request `spatial` or
             state["refinement_decision"] = {
                 "refinement_needed": is_needed,
                 "reasoning": result_json.get("reasoning", "No reasoning provided."),
-                "targets": final_targets,                
-                "requires_custom_code": requires_custom_code 
+                "targets": final_targets,
+                "requires_custom_code": requires_custom_code
             }
 
-            self.logger.info(f"✅ LLM Step Complete: Refinement decision: {state['refinement_decision']['reasoning']}")
-            
+            step_label = "Analysis plan" if skip_mode else "Refinement decision"
+            self.logger.info(f"✅ LLM Step Complete: {step_label}: {state['refinement_decision']['reasoning']}")
+
             print("\n" + "="*80)
             print("🧠 LLM REASONING (SelectRefinementTargetController)")
-            print(f"  Refinement Needed: {is_needed}")
+            if skip_mode:
+                print(f"  Analysis Plan Ready: {is_needed}")
+            else:
+                print(f"  Refinement Needed: {is_needed}")
             print(f"  Custom Code Triggered: {requires_custom_code}")
             print(f"  Explanation: {state['refinement_decision']['reasoning']}")
             print(f"  Targets Found: {len(final_targets)}")
