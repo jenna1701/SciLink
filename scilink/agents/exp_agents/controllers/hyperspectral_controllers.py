@@ -1702,14 +1702,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     }
                     
                     # Execute Code
-                    with ExecutionTimeout(seconds=300):
+                    with ExecutionTimeout(seconds=600):
                         exec(code_str, global_scope, local_scope)
                     
                         if "analyze_feature" not in local_scope:
                             raise ValueError("Function 'analyze_feature' was not found in generated code.")
                         
                         # --- D. RUN ON DATA ---
-                        self.logger.info("    Executing generated code (timeout: 300s)...")
+                        self.logger.info("    Executing generated code (timeout: 600s)...")
                         func = local_scope["analyze_feature"]
                         result_dict = func(optimal_data, state["energy_axis"])
                     
