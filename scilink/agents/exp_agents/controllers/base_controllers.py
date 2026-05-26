@@ -18,6 +18,24 @@ class RunFinalInterpretationController:
         self._parse_llm_response = parse_fn  # Pass in the agent's parser
 
     def execute(self, state: dict) -> dict:
+        # In skip-decomposition mode the iteration-stage interpretation
+        # has nothing to interpret — no NMF/PCA/ICA results, no dynamic
+        # analysis output yet — so it would generate a pre-emptive
+        # narrative that misleads the human-feedback step and downstream
+        # readers. The synthesis stage runs its own interpretation after
+        # dynamic analysis completes, so skipping here loses nothing.
+        # Detect the iteration-stage skip by the presence of
+        # state["skip_decomposition"]; the synthesis stage builds its
+        # state dict without that key, so the synthesis interpretation
+        # runs normally.
+        if state.get("skip_decomposition"):
+            self.logger.info(
+                "Skip-decomposition gate active — bypassing iteration-stage "
+                "interpretation. The synthesis stage will interpret after "
+                "dynamic analysis completes."
+            )
+            return state
+
         self.logger.info("🧠 LLM Step: Generating scientific interpretation...")
         prompt = state.get("final_prompt_parts")
 
@@ -116,20 +134,36 @@ class IterativeFeedbackController:
             return state
 
         self.logger.info("\n\n👤 --- USER STEP: REVIEW ANALYSIS PLAN --- 👤\n")
-        
+
         # --- 1. Display Current Decision to User and Collect Feedback ---
+        # In skip-decomposition mode no iteration-stage analysis has run
+        # yet, so there's no current-analysis summary to show — the
+        # "summary" would be the pre-emptive LLM narrative that we now
+        # skip in RunFinalInterpretationController. Suppress the summary
+        # block when there is no real analysis text to display.
+        skip_mode = bool(state.get("skip_decomposition"))
         iteration_title = state.get("iteration_title", "Current Analysis")
-        analysis_text = state.get("result_json", {}).get("detailed_analysis", "No analysis text provided.")
+        result_json = state.get("result_json") or {}
+        analysis_text = result_json.get("detailed_analysis", "").strip()
         targets = decision.get("targets", [])
-        
+
         print("\n" + "="*80)
-        print(f"🎯 ANALYSIS STEP REVIEW: {iteration_title}")
+        header = "ANALYSIS PLAN REVIEW" if skip_mode else "ANALYSIS STEP REVIEW"
+        print(f"🎯 {header}: {iteration_title}")
         print("="*80)
-        print("\n**SUMMARY OF CURRENT ANALYSIS:**")
-        print(analysis_text)
-        print("-" * 80)
-        
-        print(f"🧠 LLM's Proposed Plan: Refinement Needed = **{decision.get('refinement_needed', False)}**")
+
+        if analysis_text:
+            print("\n**SUMMARY OF CURRENT ANALYSIS:**")
+            print(analysis_text)
+            print("-" * 80)
+        elif skip_mode:
+            print("\n(Skip-decomposition mode — no iteration-stage analysis "
+                  "to summarize; the synthesis stage will interpret after the "
+                  "dynamic-analysis step runs.)")
+            print("-" * 80)
+
+        plan_label = "Analysis Plan Ready" if skip_mode else "Refinement Needed"
+        print(f"🧠 LLM's Proposed Plan: {plan_label} = **{decision.get('refinement_needed', False)}**")
         print(f"Reasoning: {decision.get('reasoning', 'N/A')}")
         print()
         print("-" * 80)
@@ -141,10 +175,16 @@ class IterativeFeedbackController:
 
         for i, t in enumerate(targets, 1):
             t_type = t.get('type', 'N/A')
-            t_value = t.get('value', 'N/A')
+            t_value = t.get('value', None)
             t_desc = t.get('description', 'No description provided.')
 
-            print(f"\n  [{i}] {t_type}  (value: {t_value})")
+            # custom_code targets carry value=None by schema design —
+            # the description is the payload. Skip the value annotation
+            # in that case to avoid the meaningless "(value: None)" noise.
+            header = f"  [{i}] {t_type}"
+            if t_value is not None:
+                header += f"  (value: {t_value})"
+            print(f"\n{header}")
             for line in textwrap.wrap(t_desc, width=70):
                 print(f"      {line}")
 
@@ -157,7 +197,8 @@ class IterativeFeedbackController:
             return state
 
         if not user_feedback:
-            self.logger.info("✅ User accepted original refinement decision.")
+            decision_label = "analysis plan" if skip_mode else "refinement decision"
+            self.logger.info(f"✅ User accepted original {decision_label}.")
             return state
         
         # --- 3. Run LLM Refinement with Full Context ---

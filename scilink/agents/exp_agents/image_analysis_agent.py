@@ -147,7 +147,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         futurehouse_api_key: str | None = None,
         use_literature: bool = False,
         enable_human_feedback: bool = True,
-        executor_timeout: int = 300,
+        executor_timeout: int = 600,
         max_wait_time: int = 1000,
         # Analysis depth
         analysis_depth: str = "auto",

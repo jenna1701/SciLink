@@ -71,7 +71,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Agent specific params
         spectral_unmixing_settings: dict | None = None,
         run_preprocessing: bool = True,
-        enable_human_feedback: bool = True
+        enable_human_feedback: bool = True,
+        executor_timeout: int = 600,
     ):
         
         if not require_sandbox_approval(
@@ -114,16 +115,23 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.spectral_settings['output_dir'] = str(self.output_dir)
         self.spectral_settings['feedback_depths'] = [0]
         
-        # Sub-agent initialization
+        # Sub-agent initialization. Pass executor_timeout so the
+        # preprocessor's custom-script execution honors the same limit
+        # the user set on the parent agent.
+        self.executor_timeout = executor_timeout
         preprocess_dir = self.output_dir / "preprocessing"
         self.preprocessor = HyperspectralPreprocessingAgent(
             api_key=self.api_key,
             model_name=model_name,
             base_url=self.base_url,
-            output_dir=str(preprocess_dir)
+            output_dir=str(preprocess_dir),
+            executor_timeout=executor_timeout,
         )
 
-        # Pipeline initialization
+        # Pipeline initialization. Shared kwargs go into pipeline_args;
+        # executor_timeout is iteration-only (the codegen sandbox lives
+        # in the iteration pipeline; the synthesis pipeline runs LLM
+        # calls + plotting only and has no code-execution step).
         pipeline_args = {
             "model": self.model,
             "logger": self.logger,
@@ -135,7 +143,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         self.iteration_pipeline = create_hyperspectral_iteration_pipeline(
             **pipeline_args,
-            preprocessor=self.preprocessor
+            preprocessor=self.preprocessor,
+            executor_timeout=executor_timeout,
         )
         self.synthesis_pipeline = create_hyperspectral_synthesis_pipeline(
             **pipeline_args,

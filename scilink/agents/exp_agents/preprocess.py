@@ -37,7 +37,7 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
 
     def __init__(self, *args,
                  output_dir: str = "preprocessing_output",
-                 executor_timeout: int = 300,
+                 executor_timeout: int = 600,
                  **kwargs):
         """Initialize the pre-processing agent."""
 
@@ -482,7 +482,7 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
 
     def __init__(self, *args,
                  output_dir: str = "preprocessing_output",
-                 executor_timeout: int = 300,
+                 executor_timeout: int = 600,
                  **kwargs):
         """Initialize the 1D pre-processing agent."""
         # Pass output_dir to BaseAnalysisAgent for state management

@@ -941,7 +941,19 @@ else:
                 st.session_state.selected_preview_file = None
     
             with tree_col:
-                st.subheader("Session Files")
+                header_col, refresh_col = st.columns([3, 1])
+                with header_col:
+                    st.subheader("Session Files")
+                with refresh_col:
+                    # Streamlit only re-runs on user interaction, so agent
+                    # output files written while the page is idle don't
+                    # appear until the next click. This button forces a
+                    # rerun, which re-evaluates the rglob below and shows
+                    # any newly-created files.
+                    if st.button("🔄 Refresh", key="files_refresh_btn",
+                                 use_container_width=True,
+                                 help="Re-scan the session directory for new files."):
+                        st.rerun()
     
                 all_files = list(session_path.rglob("*"))
                 has_files = any(f.is_file() for f in all_files)

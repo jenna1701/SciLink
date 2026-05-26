@@ -1032,12 +1032,21 @@ class SelectRefinementTargetController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"): return state
-        self.logger.info("\n\n🧠 --- LLM STEP: SELECT REFINEMENT TARGET --- 🧠\n")
+        # Log header reflects whether this is "select a plan from scratch"
+        # (skip-decomposition mode — no prior analysis to refine) vs.
+        # "refine the existing decomposition results".
+        skip_mode = bool(state.get("skip_decomposition"))
+        header = (
+            "🧠 --- LLM STEP: SELECT ANALYSIS PLAN --- 🧠"
+            if skip_mode
+            else "🧠 --- LLM STEP: SELECT REFINEMENT TARGET --- 🧠"
+        )
+        self.logger.info(f"\n\n{header}\n")
 
         prompt_parts = [self.instructions]
         prompt_parts.append(f"\n\n--- Current Analysis: {state.get('iteration_title', 'Analysis')} ---")
 
-        if state.get("skip_decomposition"):
+        if skip_mode:
             prompt_parts.append("""
 
 🚦 NOTE: Unsupervised decomposition was skipped for this run because the
@@ -1055,7 +1064,14 @@ refinement targets are meaningful here — do not request `spatial` or
         prompt_parts.append("\n\n--- Analysis Results ---")
         analysis_images = state.get("analysis_images", [])
         if not analysis_images:
-            self.logger.warning("No analysis images found for refinement selection.")
+            # In skip-decomposition mode the absence of analysis images is
+            # expected (no decomposition → no decomposition plots), not a
+            # warning condition. In normal mode it indicates a real upstream
+            # issue worth flagging.
+            if skip_mode:
+                self.logger.info("Skip-decomposition mode — no decomposition images to review (expected).")
+            else:
+                self.logger.warning("No analysis images found for refinement selection.")
             prompt_parts.append("(No visual results available)")
 
         for img in analysis_images:
@@ -1114,8 +1130,9 @@ refinement targets are meaningful here — do not request `spatial` or
             if custom_code_targets:
                 # Winner-Takes-All: If code is needed, focus ONLY on that.
                 # We pick the first custom target and ignore standard zooms for this turn.
-                top_target = custom_code_targets[0] 
-                self.logger.info(f"🎯 Priority Target Selected (Custom Code): {top_target.get('description')}")
+                top_target = custom_code_targets[0]
+                label = "Analysis Plan" if skip_mode else "Priority Target Selected"
+                self.logger.info(f"🎯 {label} (Custom Code): {top_target.get('description')}")
                 final_targets = [top_target]
                 requires_custom_code = True
             else:
@@ -1127,15 +1144,19 @@ refinement targets are meaningful here — do not request `spatial` or
             state["refinement_decision"] = {
                 "refinement_needed": is_needed,
                 "reasoning": result_json.get("reasoning", "No reasoning provided."),
-                "targets": final_targets,                
-                "requires_custom_code": requires_custom_code 
+                "targets": final_targets,
+                "requires_custom_code": requires_custom_code
             }
 
-            self.logger.info(f"✅ LLM Step Complete: Refinement decision: {state['refinement_decision']['reasoning']}")
-            
+            step_label = "Analysis plan" if skip_mode else "Refinement decision"
+            self.logger.info(f"✅ LLM Step Complete: {step_label}: {state['refinement_decision']['reasoning']}")
+
             print("\n" + "="*80)
             print("🧠 LLM REASONING (SelectRefinementTargetController)")
-            print(f"  Refinement Needed: {is_needed}")
+            if skip_mode:
+                print(f"  Analysis Plan Ready: {is_needed}")
+            else:
+                print(f"  Refinement Needed: {is_needed}")
             print(f"  Custom Code Triggered: {requires_custom_code}")
             print(f"  Explanation: {state['refinement_decision']['reasoning']}")
             print(f"  Targets Found: {len(final_targets)}")
@@ -1541,11 +1562,17 @@ class RunDynamicAnalysisController:
     MAX_RETRIES = 5
     SUCCESS_THRESHOLD = 0.5  # If >50% of maps in a script pass QC, accept the run.
 
-    def __init__(self, model, logger, generation_config, safety_settings, parse_fn):
+    def __init__(self, model, logger, generation_config, safety_settings, parse_fn,
+                 executor_timeout: int = 600):
         self.model = model
         self.logger = logger
         self.generation_config = generation_config
         self.safety_settings = safety_settings
+        # In-process ExecutionTimeout for the generated code's exec()
+        # sandbox. Plumbed from HyperspectralAnalysisAgent's
+        # executor_timeout kwarg so the user's chosen limit is honored
+        # and the log line below reports the actual value.
+        self.executor_timeout = executor_timeout
         self._parse_llm_response = parse_fn
 
     def execute(self, state: dict) -> dict:
@@ -1681,14 +1708,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     }
                     
                     # Execute Code
-                    with ExecutionTimeout(seconds=300):
+                    with ExecutionTimeout(seconds=self.executor_timeout):
                         exec(code_str, global_scope, local_scope)
                     
                         if "analyze_feature" not in local_scope:
                             raise ValueError("Function 'analyze_feature' was not found in generated code.")
                         
                         # --- D. RUN ON DATA ---
-                        self.logger.info("    Executing generated code (timeout: 300s)...")
+                        self.logger.info(f"    Executing generated code (timeout: {self.executor_timeout}s)...")
                         func = local_scope["analyze_feature"]
                         result_dict = func(optimal_data, state["energy_axis"])
                     
