@@ -66,7 +66,9 @@ TOOL_SPEC = ToolSpec(
                 "Spec: {chemistry: list[str] OR list[list[str]] (required), "
                 "space_group_hints?: list[int], lattice_param_ranges?: "
                 "{a: (min,max), ...}, max_e_above_hull?: float, top_n?: int "
-                "(default 10, per chemistry hypothesis).\n\n"
+                "(default 10, per chemistry hypothesis), z_range?: "
+                "(int, int), density_range?: (float, float) (g/cm³), "
+                "anonymous_formula?: str (e.g. 'AB2').\n\n"
                 "Use a single list for one hypothesis: chemistry=['Ti','O']. "
                 "Use a list of lists when the chemistry is unknown and you "
                 "want to test multiple candidates in one call: "
@@ -75,7 +77,13 @@ TOOL_SPEC = ToolSpec(
                 "ranked across all hypotheses. This is the canonical way "
                 "to handle the post-fit (no-hint) path — one search_structures "
                 "call covering several element hypotheses, never multiple "
-                "calls from inside a loop."
+                "calls from inside a loop.\n\n"
+                "z_range filters by number of sites per unit cell (MP's "
+                "`nsites`, pymatgen's `Structure.num_sites`). density_range "
+                "filters by bulk density. anonymous_formula filters by the "
+                "stoichiometry template (matches pymatgen's "
+                "`Composition.anonymized_formula`). The three are all "
+                "optional and ignored by backends that don't carry the data."
             ),
         },
         "sources": {
@@ -214,6 +222,16 @@ def _coerce_query_specs(query: dict) -> list[QuerySpec]:
     max_e = query.get("max_e_above_hull")
     top_n = int(query.get("top_n", 10))
 
+    z_range = query.get("z_range")
+    if z_range is not None:
+        z_range = (int(z_range[0]), int(z_range[1]))
+    density_range = query.get("density_range")
+    if density_range is not None:
+        density_range = (float(density_range[0]), float(density_range[1]))
+    anonymous_formula = query.get("anonymous_formula")
+    if anonymous_formula is not None:
+        anonymous_formula = str(anonymous_formula)
+
     return [
         QuerySpec(
             chemistry=c,
@@ -221,6 +239,9 @@ def _coerce_query_specs(query: dict) -> list[QuerySpec]:
             lattice_param_ranges=lattice_ranges,
             max_e_above_hull=max_e,
             top_n=top_n,
+            z_range=z_range,
+            density_range=density_range,
+            anonymous_formula=anonymous_formula,
         )
         for c in chemistries
     ]
