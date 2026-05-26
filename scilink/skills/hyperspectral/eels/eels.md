@@ -67,18 +67,26 @@ peaks with `lmfit.models.StepModel` + `GaussianModel` / `LorentzianModel`.
 Low-loss plasmons: a Drude-Lorentz oscillator in loss space is the most
 physically faithful model. A Lorentzian-on-linear-background is an
 acceptable approximation when the peak sits well inside the measurement
-window. When the peak appears to lie outside the window, leave the
-center parameter unbounded above the window — the lineshape constrains
-it from the tail curvature.
+window.
+
+A peak whose center lies outside the measurement window cannot be
+honestly measured from a tail-only fit — mathematically the lineshape
+admits a center value, but the uncertainty is large and the result is
+extrapolation, not measurement. The correct strategy is to **bound the
+center to the measurement window** and **NaN out pixels whose fit
+converges at the bound** (those pixels' peak is outside the window;
+the result is "no measurement available", not "peak at the bound").
+Do not widen bounds beyond the window to chase those pixels.
 
 Initialization and bounds:
 - Initialize peak center at the argmax of a lightly smoothed (Savitzky-
   Golay, window 5–9, polyorder 2) spectrum, not a fixed value.
-- Keep parameter bounds wider than the prior expectation — tight bounds
-  cause rail-gazing failures that the visual QC step will flag.
+- Bound the peak center to the measurement window (`[axis_start,
+  axis_end]`).
 - Mark per-pixel fits with R² < ~0.5 or parameters railed at a bound
-  as NaN so the dashboard histogram reveals real distributions, not
-  boundary spikes.
+  as NaN. The dashboard histogram will then show the real interior
+  distribution; boundary pile-ups indicate fit failures or features
+  outside the measurement window — both honestly reported as NaN.
 
 ## interpretation
 
