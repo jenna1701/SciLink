@@ -18,6 +18,24 @@ class RunFinalInterpretationController:
         self._parse_llm_response = parse_fn  # Pass in the agent's parser
 
     def execute(self, state: dict) -> dict:
+        # In skip-decomposition mode the iteration-stage interpretation
+        # has nothing to interpret — no NMF/PCA/ICA results, no dynamic
+        # analysis output yet — so it would generate a pre-emptive
+        # narrative that misleads the human-feedback step and downstream
+        # readers. The synthesis stage runs its own interpretation after
+        # dynamic analysis completes, so skipping here loses nothing.
+        # Detect the iteration-stage skip by the presence of
+        # state["skip_decomposition"]; the synthesis stage builds its
+        # state dict without that key, so the synthesis interpretation
+        # runs normally.
+        if state.get("skip_decomposition"):
+            self.logger.info(
+                "Skip-decomposition gate active — bypassing iteration-stage "
+                "interpretation. The synthesis stage will interpret after "
+                "dynamic analysis completes."
+            )
+            return state
+
         self.logger.info("🧠 LLM Step: Generating scientific interpretation...")
         prompt = state.get("final_prompt_parts")
 
