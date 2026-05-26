@@ -90,12 +90,17 @@ either-alone:
   chemistry form to get separate candidate lists per phase:
   `chemistry=[["Si"], ["Ge"]]` — NOT `chemistry=["Si", "Ge"]` which would
   ask the DB for Si-Ge *binary compounds* instead of Si and Ge
-  separately. For step 2 use **`algorithm='mip'` from the start** (not
-  Hanawalt) so the assignment problem can match peaks across both
-  phases simultaneously, and report identification per phase. The
-  R-factor in this case is dominated by whichever phase the LLM picks
-  first as "best"; per-phase FOMs are more informative than a single
-  overall verdict.
+  separately. For step 2 use **`score_xrd_match_multiphase` from the
+  start** (not the per-candidate `score_xrd_match_robust` with
+  `algorithm='mip'`). The multi-phase tool accepts the full list of
+  candidate phase patterns and solves one joint MILP across them, with
+  per-phase activation binaries that let the solver leave a phase out
+  entirely. Output includes per-phase coverage and matched-peak lists
+  — strictly more informative than running per-candidate MIPs and
+  comparing them, which loses the cross-phase assignment constraints.
+  The per-candidate `score_xrd_match_robust(algorithm='mip')` remains
+  available as a fallback when only one phase's identity matters and
+  the per-phase decomposition isn't needed.
 
 - **Post-fit pattern (no chemistry hypothesis)** — no hint at all. Run
   `extract_peaks` first to estimate the dominant peak positions, infer
@@ -109,13 +114,15 @@ either-alone:
   handle multiple hypotheses in one invocation.
 
 **Recognizing the multi-phase trigger.** Any of these phrasings in
-`system_info` / notes mean "use the multi-phase mode": "mixture",
-"multi-phase", "two-phase", "binary mixture" (as opposed to "binary
-compound"), "co-existing phases", or `chemistry_hint` containing two
-elements with NO compound name (e.g. `["Si", "Ge"]` with note
-"suspected mixture" — the elements are distinct phases, not a
-compound). When in doubt, run multi-phase MIP — it's strictly more
-informative than Hanawalt for single-phase data too (just slower).
+`system_info` / notes mean "use `score_xrd_match_multiphase`":
+"mixture", "multi-phase", "two-phase", "binary mixture" (as opposed to
+"binary compound"), "co-existing phases", or `chemistry_hint`
+containing two elements with NO compound name (e.g. `["Si", "Ge"]`
+with note "suspected mixture" — the elements are distinct phases, not
+a compound). When in doubt, run `score_xrd_match_multiphase` with a
+single-candidate list — it gracefully reduces to the single-phase MIP
+under that input (with one phase always active) and the joint solver's
+output format is the same.
 
 **Bounding the candidate count.** Always set `search_structures(query={
 "top_n": N, ...})` with N in [3, 10]. More than 10 candidates per
@@ -128,6 +135,50 @@ says otherwise. MoKa is common for high-2θ work. A wavelength mismatch
 gives uniformly bad correlations / FOMs for all candidates with a
 characteristic shift in peak positions — suspect that first when every
 candidate scores reject.
+
+Call `resolve_wavelength(system_info)` once near the top of the
+analysis script and pass its return value to every
+`simulate_xrd_pattern` call instead of hard-coding `wavelength='CuKa'`.
+The resolver reads structured `experiment.wavelength` / `source` /
+`x_ray_source` fields first, then falls back to a free-text scan for
+canonical source names. When metadata is silent it returns the default
+`'CuKa'`, so the call is safe even on patterns with no metadata at all.
+
+**Narrowing the candidate list.** The `search_structures` `query` dict
+accepts three optional filters that often pay for themselves:
+
+- `z_range: (int, int)` — number of sites per unit cell. Useful when
+  the user has a rough atom-count expectation (`(1, 8)` for simple
+  binaries; `(8, 50)` for typical oxides).
+- `density_range: (float, float)` — g/cm³. Narrows by physical density
+  when the sample's bulk density is known from independent measurement.
+- `anonymous_formula: str` — stoichiometry template, e.g. `'AB2'` for
+  rutile/anatase-type, `'ABC3'` for perovskites. Pymatgen's
+  `Composition.anonymized_formula` is the matching convention.
+
+All three are optional and respected by Materials Project and the
+local CIF backend; COD ignores them.
+
+**Pairing with `curve_fitting/xrd_profile`.** When both skills are
+active in the same run (`skill=["xrd", "xrd_profile"]`), the
+recommended flow is:
+
+1. `extract_peaks` seeds candidate peak centers on the experimental
+   pattern.
+2. `fit_profile` (from `xrd_profile`) fits each peak with a
+   pseudo-Voigt and returns refined center, FWHM, amplitude, and per-
+   peak R².
+3. The refined values are passed to `score_xrd_match_robust` as
+   `exp_peaks={'positions': [...], 'amplitudes': [...], 'fwhms': [...]}`
+   — the existing peak-list input format. No API change needed.
+4. The scorer then ranks candidates against peaks with calibrated
+   widths instead of the default uniform broadening, which matters
+   most for nanocrystalline samples where peaks are 5-10× broader
+   than the 0.15° default.
+
+For data without significant line broadening (well-crystallized,
+sharp peaks), the bridge is unnecessary — `extract_peaks` alone gives
+fine positions and the scorers' defaults work.
 
 ## analysis
 
@@ -231,9 +282,13 @@ print("FIT_RESULTS_JSON: " + json.dumps({
 
 **Background handling.** Both scorers default to subtracting the
 experimental minimum as a flat offset. For patterns with significant
-continuous background (amorphous halo, fluorescence), fit and subtract a
-low-order polynomial background BEFORE calling the scorers and pass
-`background="none"`.
+continuous background (amorphous halo, fluorescence), call
+`fit_background(two_theta, intensity, method='snip')` from
+`scilink.skills.curve_fitting.xrd_profile.background` to estimate the
+continuous background, subtract it, and pass `background="none"` to
+the scorers. SNIP handles smooth amorphous floors without imposing a
+polynomial shape; use `method='polynomial'` only when a polynomial is
+genuinely the right model.
 
 **Wavelength consistency.** Pass the same `wavelength` to every
 `simulate_xrd_pattern` call. Pull from experiment metadata when present;
@@ -290,11 +345,14 @@ preparation correctness, or absence of minor phases. Mention this
 caveat when reporting identifications.
 
 **Multi-phase samples.** Hanawalt is single-phase by construction. For
-suspected multi-phase mixtures, switch to MIP and increase
-`max_exp_peaks` so the assignment problem has enough peaks to allocate
-across phases. v1 of this skill does not include quantitative phase
-fraction analysis (Rietveld refinement is the next step) — note this in
-the report.
+suspected multi-phase mixtures, switch to `score_xrd_match_multiphase`
+and feed it the full candidate phase list — the joint MILP allocates
+peaks across phases with per-phase activation binaries and reports
+per-phase coverage. Increase `max_exp_peaks` (default 30) when the
+mixture has many resolved peaks per phase. The tool does NOT compute
+quantitative phase fractions (peak-area weighted Rietveld refinement
+is the standard for that); the `coverage` field is a peak-count
+proxy, not a phase fraction. Note this caveat in the report.
 
 ## validation
 

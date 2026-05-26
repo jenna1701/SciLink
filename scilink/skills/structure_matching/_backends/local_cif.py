@@ -120,6 +120,23 @@ class LocalCIFBackend:
         ):
             return None
 
+        if spec.z_range is not None:
+            n_sites = struct.num_sites
+            if not (spec.z_range[0] <= n_sites <= spec.z_range[1]):
+                return None
+
+        density = None
+        if spec.density_range is not None:
+            density = float(struct.density)
+            if not (spec.density_range[0] <= density <= spec.density_range[1]):
+                return None
+
+        anon = None
+        if spec.anonymous_formula is not None:
+            anon = str(struct.composition.anonymized_formula)
+            if anon != spec.anonymous_formula:
+                return None
+
         return StructureCandidate(
             id=cif_path.stem,
             source=self.name,
@@ -131,6 +148,10 @@ class LocalCIFBackend:
                 "lattice_a": lattice.a,
                 "lattice_b": lattice.b,
                 "lattice_c": lattice.c,
+                "nsites": struct.num_sites,
+                "density": density if density is not None else float(struct.density),
+                "formula_anonymous": anon if anon is not None
+                    else str(struct.composition.anonymized_formula),
             },
             rank_score=1.0,
         )

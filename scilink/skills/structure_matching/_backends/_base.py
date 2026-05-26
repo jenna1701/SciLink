@@ -13,6 +13,16 @@ class QuerySpec:
     Fields are interpreted independently by each backend; a backend may
     ignore any field it does not support (e.g. ``LocalCIFBackend`` ignores
     ``max_e_above_hull`` since CIFs on disk carry no thermodynamic data).
+
+    Additional filter fields (all optional):
+
+    - ``z_range``: number of sites per unit cell (Materials Project's
+      ``nsites``; pymatgen's ``Structure.num_sites`` for local). NOT
+      strictly Z = formula-units-per-cell — MP does not expose Z directly
+      as a filterable field, so ``nsites`` is the conventional proxy.
+    - ``density_range``: bulk density in g/cm³.
+    - ``anonymous_formula``: anonymized composition string ("AB2", "ABC3").
+      Matches pymatgen's ``Composition.anonymized_formula``.
     """
 
     chemistry: list[str]
@@ -20,12 +30,25 @@ class QuerySpec:
     lattice_param_ranges: Optional[dict[str, tuple[float, float]]] = None
     max_e_above_hull: Optional[float] = None
     top_n: int = 10
+    z_range: Optional[tuple[int, int]] = None
+    density_range: Optional[tuple[float, float]] = None
+    anonymous_formula: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.chemistry:
             raise ValueError("QuerySpec.chemistry must be non-empty")
         if self.top_n <= 0:
             raise ValueError("QuerySpec.top_n must be positive")
+        if self.z_range is not None:
+            lo, hi = self.z_range
+            if lo < 1 or hi < lo:
+                raise ValueError(f"z_range must satisfy 1 ≤ lo ≤ hi; got {self.z_range}")
+        if self.density_range is not None:
+            lo, hi = self.density_range
+            if lo < 0 or hi < lo:
+                raise ValueError(
+                    f"density_range must satisfy 0 ≤ lo ≤ hi; got {self.density_range}"
+                )
 
 
 @dataclass

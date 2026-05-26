@@ -53,6 +53,13 @@ _HANAWALT_MARGINAL_MIN = 0.40
 _MIP_ACCEPT_MAX = 0.25
 _MIP_MARGINAL_MAX = 0.55
 
+# Multi-phase MIP: per-phase activation penalty in the MILP objective. Each
+# active phase costs this many "implicit unmatched peaks" — so a phase is
+# only kept when it accounts for more matches than that. Tuned to ~3 peaks:
+# a phase that explains fewer than 3 peaks above noise probably isn't a
+# real component.
+_MULTIPHASE_ACTIVATION_PENALTY = 3.0
+
 
 TOOL_SPEC = ToolSpec(
     name="score_xrd_match_robust",
@@ -571,6 +578,359 @@ def _solve_mip_for_scale(
     return {
         "cost": float(cost),
         "matched_peaks": matched_peaks,
+        "unmatched_exp": unmatched_exp,
+        "fitted_shift": fitted_shift,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Joint multi-phase MIP — assigns experimental peaks across N candidate phases
+# ---------------------------------------------------------------------------
+
+TOOL_SPEC_MULTIPHASE = ToolSpec(
+    name="score_xrd_match_multiphase",
+    description=(
+        "Joint multi-phase scoring: given an experimental peak list and "
+        "N candidate phase patterns, solves one MILP that assigns each "
+        "experimental peak to at most one (phase, simulated peak) pair, "
+        "with per-phase activation binaries that let the solver leave "
+        "phases out entirely. Returns per-phase coverage and an overall "
+        "joint cost. Use for suspected mixtures; for single-phase "
+        "identification, score_xrd_match_robust with algorithm='hanawalt' "
+        "or 'mip' remains the right tool."
+    ),
+    import_line="from scilink.skills.structure_matching.xrd.score_match_robust import score_xrd_match_multiphase",
+    signature=(
+        "score_xrd_match_multiphase(exp_peaks, candidates, tol_deg=0.3, "
+        "scale_search=(0.99, 1.01, 0.005), shift_search=(-0.4, 0.4), "
+        "max_exp_peaks=30) -> dict"
+    ),
+    parameters={
+        "exp_peaks": {
+            "type": "dict",
+            "description": "Pre-extracted experimental peak list from extract_peaks (positions + intensities).",
+        },
+        "candidates": {
+            "type": "list[dict]",
+            "description": (
+                "List of candidate phases. Each entry: {'id': str, "
+                "'formula': str, 'sim_two_theta': list[float], "
+                "'sim_intensity': list[float]}. The same shape "
+                "simulate_xrd_pattern returns, plus an id and formula."
+            ),
+        },
+        "tol_deg": {
+            "type": "float",
+            "description": "Position tolerance for matching peaks (degrees). Default 0.3.",
+        },
+        "scale_search": {
+            "type": "tuple",
+            "description": "(min, max, step) shared lattice-scale grid. Default (0.99, 1.01, 0.005) — coarser than single-phase MIP to keep multi-phase MILP runtime bounded.",
+        },
+        "shift_search": {
+            "type": "tuple",
+            "description": "(min, max) zero-shift bounds (degrees). Shared across phases (one instrument, one zero-shift). Default (-0.4, 0.4).",
+        },
+        "max_exp_peaks": {
+            "type": "int",
+            "description": "Cap on experimental peaks considered (strongest kept). Default 30 (higher than single-phase since the assignment problem allocates across phases).",
+        },
+    },
+    required=["exp_peaks", "candidates"],
+    returns=(
+        "dict with 'algorithm' ('mip_multiphase'), 'cost' (overall joint "
+        "cost in [0, 1]), 'verdict', 'active_phases' (list of {id, "
+        "formula, coverage, matched_peaks, mean_residual_deg}), "
+        "'unmatched_exp' (peak indices not explained by any phase), "
+        "'fitted_shift', 'fitted_scale', 'n_exp_peaks', 'n_phases_considered'."
+    ),
+    when_to_use=(
+        "Suspected mixtures (system_info / notes mention 'mixture', "
+        "'multi-phase', 'two-phase', or chemistry_hint contains two "
+        "non-compound elements). For confirmed single-phase, "
+        "score_xrd_match_robust per candidate is faster and sufficient."
+    ),
+)
+TOOL_SPECS = [TOOL_SPEC_MULTIPHASE]
+
+
+def score_xrd_match_multiphase(
+    exp_peaks: dict,
+    candidates: list[dict],
+    *,
+    tol_deg: float = 0.3,
+    scale_search: tuple = (0.99, 1.01, 0.005),
+    shift_search: tuple = (-0.4, 0.4),
+    max_exp_peaks: int = 30,
+) -> dict[str, Any]:
+    """Joint multi-phase MIP. See ``TOOL_SPEC_MULTIPHASE`` for full contract."""
+    if not PULP_AVAILABLE:
+        raise RuntimeError(
+            "score_xrd_match_multiphase requires pulp; install via "
+            "'pip install scilink[structure-matching]'"
+        )
+    if not candidates:
+        raise ValueError("candidates must contain at least one phase")
+
+    exp_pl = _to_peak_list(
+        list(exp_peaks.get("positions", [])),
+        list(exp_peaks.get("intensities", [])),
+        max_exp_peaks,
+    )
+    if exp_pl.n == 0:
+        return _empty_multiphase_result(candidates, "no experimental peaks")
+
+    sim_pls: list[_PeakList] = []
+    for cand in candidates:
+        sim_pls.append(_to_peak_list(
+            list(cand.get("sim_two_theta", [])),
+            list(cand.get("sim_intensity", [])),
+            30,
+        ))
+    if all(pl.n == 0 for pl in sim_pls):
+        return _empty_multiphase_result(candidates, "no simulated peaks")
+
+    scales = _scale_grid(scale_search)
+    shift_lo, shift_hi = float(shift_search[0]), float(shift_search[1])
+
+    best = None
+    for scale in scales:
+        result = _solve_multiphase_mip(
+            exp_pl, sim_pls,
+            scale=scale,
+            tol_deg=tol_deg,
+            shift_lo=shift_lo,
+            shift_hi=shift_hi,
+        )
+        if result is None:
+            continue
+        if best is None or result["cost"] < best["cost"]:
+            best = result
+            best["fitted_scale"] = scale
+
+    if best is None:
+        return _empty_multiphase_result(candidates, "no feasible joint assignment")
+
+    cost = best["cost"]
+    if cost <= _MIP_ACCEPT_MAX:
+        verdict = "accept"
+    elif cost <= _MIP_MARGINAL_MAX:
+        verdict = "marginal"
+    else:
+        verdict = "reject"
+
+    active_phases = []
+    for p_idx, cand in enumerate(candidates):
+        per_phase = best["per_phase"][p_idx]
+        if not per_phase["active"]:
+            continue
+        active_phases.append({
+            "id": cand.get("id", str(p_idx)),
+            "formula": cand.get("formula", ""),
+            "coverage": per_phase["coverage"],
+            "matched_peaks": per_phase["matched_peaks"],
+            "mean_residual_deg": per_phase["mean_residual_deg"],
+        })
+
+    return {
+        "algorithm": "mip_multiphase",
+        "cost": float(cost),
+        "verdict": verdict,
+        "active_phases": active_phases,
+        "unmatched_exp": best["unmatched_exp"],
+        "fitted_shift": float(best["fitted_shift"]),
+        "fitted_scale": float(best["fitted_scale"]),
+        "n_exp_peaks": exp_pl.n,
+        "n_phases_considered": len(candidates),
+    }
+
+
+def _empty_multiphase_result(candidates: list[dict], why: str) -> dict[str, Any]:
+    return {
+        "algorithm": "mip_multiphase",
+        "cost": float("inf"),
+        "verdict": "reject",
+        "active_phases": [],
+        "unmatched_exp": [],
+        "fitted_shift": 0.0,
+        "fitted_scale": 1.0,
+        "n_exp_peaks": 0,
+        "n_phases_considered": len(candidates),
+        "note": why,
+    }
+
+
+def _solve_multiphase_mip(
+    exp_pl: _PeakList,
+    sim_pls: list[_PeakList],
+    *,
+    scale: float,
+    tol_deg: float,
+    shift_lo: float,
+    shift_hi: float,
+) -> Optional[dict[str, Any]]:
+    """One MILP across N phases at a fixed shared scale.
+
+    Variables:
+        x[i, j, p] in {0, 1} — exp peak i matched to sim peak j of phase p.
+        y[p]      in {0, 1} — phase p activated.
+        shift     in [shift_lo, shift_hi] — shared zero-shift (one
+                                              diffractometer, one zero).
+
+    Constraints:
+        Σ_{j, p} x[i, j, p] ≤ 1                    (exp i matched at most once)
+        Σ_i x[i, j, p] ≤ 1   ∀ p, j                (each sim peak used once)
+        x[i, j, p] ≤ y[p]                          (phase active when used)
+        |exp_i - scale·sim_{j,p} - shift| ≤ tol + M(1 − x[i, j, p])
+
+    Objective:
+        maximize  Σ x[i, j, p] − activation_penalty · Σ y[p]
+    """
+    nE = exp_pl.n
+    nP = len(sim_pls)
+    if nE == 0 or nP == 0:
+        return None
+
+    candidate_triples: list[tuple[int, int, int]] = []
+    raw_lookup: dict[tuple[int, int, int], float] = {}
+    for p_idx, sim_pl in enumerate(sim_pls):
+        for i in range(nE):
+            for j in range(sim_pl.n):
+                raw = exp_pl.positions[i] - scale * sim_pl.positions[j]
+                if shift_lo - tol_deg <= raw <= shift_hi + tol_deg:
+                    candidate_triples.append((i, j, p_idx))
+                    raw_lookup[(i, j, p_idx)] = raw
+    if not candidate_triples:
+        return {
+            "cost": 1.0,
+            "per_phase": [
+                {"active": False, "coverage": 0.0, "matched_peaks": [], "mean_residual_deg": 0.0}
+                for _ in sim_pls
+            ],
+            "unmatched_exp": list(range(nE)),
+            "fitted_shift": 0.0,
+        }
+
+    M = max(
+        (max(exp_pl.positions) - min(exp_pl.positions)) if nE > 1 else 0.0,
+        max(
+            (max(pl.positions) - min(pl.positions)) if pl.n > 1 else 0.0
+            for pl in sim_pls
+        ),
+        1.0,
+    ) + max(abs(shift_lo), abs(shift_hi)) + tol_deg + 1.0
+
+    prob = pulp.LpProblem("xrd_multiphase", pulp.LpMaximize)
+    x = {
+        t: pulp.LpVariable(f"x_{t[0]}_{t[1]}_{t[2]}", cat=pulp.LpBinary)
+        for t in candidate_triples
+    }
+    y = {
+        p_idx: pulp.LpVariable(f"y_{p_idx}", cat=pulp.LpBinary)
+        for p_idx in range(nP)
+    }
+    shift = pulp.LpVariable("shift", lowBound=shift_lo, upBound=shift_hi)
+
+    # Objective: maximize matches, minus per-phase activation cost
+    prob += (
+        pulp.lpSum(x.values())
+        - _MULTIPHASE_ACTIVATION_PENALTY * pulp.lpSum(y.values())
+    )
+
+    # Constraint groupings
+    by_i: dict[int, list[tuple[int, int, int]]] = {i: [] for i in range(nE)}
+    by_jp: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
+    by_p: dict[int, list[tuple[int, int, int]]] = {p_idx: [] for p_idx in range(nP)}
+    for t in candidate_triples:
+        i, j, p_idx = t
+        by_i[i].append(t)
+        by_jp.setdefault((j, p_idx), []).append(t)
+        by_p[p_idx].append(t)
+
+    for i, triples in by_i.items():
+        if triples:
+            prob += pulp.lpSum(x[t] for t in triples) <= 1, f"once_per_exp_{i}"
+    for (j, p_idx), triples in by_jp.items():
+        if triples:
+            prob += pulp.lpSum(x[t] for t in triples) <= 1, f"once_per_sim_{p_idx}_{j}"
+    for p_idx, triples in by_p.items():
+        for t in triples:
+            prob += x[t] <= y[p_idx], f"requires_active_{t[0]}_{t[1]}_{t[2]}"
+
+    # Tolerance cone
+    for t in candidate_triples:
+        raw = raw_lookup[t]
+        prob += raw - shift <= tol_deg + M * (1 - x[t]), f"tol_pos_{t[0]}_{t[1]}_{t[2]}"
+        prob += -(raw - shift) <= tol_deg + M * (1 - x[t]), f"tol_neg_{t[0]}_{t[1]}_{t[2]}"
+
+    solver = pulp.PULP_CBC_CMD(msg=False)
+    status = prob.solve(solver)
+    if pulp.LpStatus[status] != "Optimal":
+        _logger.debug("Multiphase MILP non-optimal at scale=%.5f: %s", scale, pulp.LpStatus[status])
+        return None
+
+    # Median-shift refinement over the matched triples (same rationale as
+    # single-phase MIP — CBC may pick a corner-of-the-cone shift).
+    matched_raws = [
+        raw_lookup[t] for t in candidate_triples
+        if pulp.value(x[t]) is not None and pulp.value(x[t]) >= 0.5
+    ]
+    if matched_raws:
+        median_shift = float(np.median(matched_raws))
+        fitted_shift = float(np.clip(median_shift, shift_lo, shift_hi))
+    else:
+        fitted_shift = float(pulp.value(shift)) if pulp.value(shift) is not None else 0.0
+
+    per_phase: list[dict[str, Any]] = []
+    matched_exp_set: set[int] = set()
+    total_residual = 0.0
+    total_matched = 0
+    for p_idx, sim_pl in enumerate(sim_pls):
+        active = pulp.value(y[p_idx]) is not None and pulp.value(y[p_idx]) >= 0.5
+        matched_for_phase: list[dict[str, Any]] = []
+        phase_matched_exp: set[int] = set()
+        phase_residuals: list[float] = []
+        for t in by_p[p_idx]:
+            val = pulp.value(x[t])
+            if val is None or val < 0.5:
+                continue
+            i, j, _ = t
+            residual = abs(raw_lookup[t] - fitted_shift)
+            if residual > tol_deg + 1e-9:
+                continue
+            matched_for_phase.append({
+                "exp_idx": i,
+                "sim_idx": j,
+                "exp_pos": exp_pl.positions[i],
+                "sim_pos": float(scale * sim_pl.positions[j] + fitted_shift),
+                "residual_deg": float(residual),
+            })
+            phase_matched_exp.add(i)
+            phase_residuals.append(residual)
+            matched_exp_set.add(i)
+            total_residual += residual
+            total_matched += 1
+        coverage = (
+            sum(exp_pl.intensities[i] for i in phase_matched_exp) / sum(exp_pl.intensities)
+            if sum(exp_pl.intensities) > 0 else 0.0
+        )
+        per_phase.append({
+            "active": bool(active and matched_for_phase),
+            "coverage": float(coverage),
+            "matched_peaks": matched_for_phase,
+            "mean_residual_deg": float(np.mean(phase_residuals)) if phase_residuals else 0.0,
+        })
+
+    unmatched_exp = [i for i in range(nE) if i not in matched_exp_set]
+    # Normalized joint cost: same shape as single-phase MIP — every
+    # unmatched peak costs a tolerance unit, every matched pair costs its
+    # residual.
+    raw_cost = total_residual + tol_deg * len(unmatched_exp)
+    cost = raw_cost / (tol_deg * max(nE, 1))
+
+    return {
+        "cost": float(cost),
+        "per_phase": per_phase,
         "unmatched_exp": unmatched_exp,
         "fitted_shift": fitted_shift,
     }

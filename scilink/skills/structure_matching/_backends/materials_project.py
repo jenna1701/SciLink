@@ -71,17 +71,28 @@ class MaterialsProjectBackend:
             tuple(spec.space_group_hints) if spec.space_group_hints else None,
             spec.max_e_above_hull,
             spec.top_n,
+            spec.z_range,
+            spec.density_range,
+            spec.anonymous_formula,
         )
         if cache_key in self._cache:
             return list(self._cache[cache_key])
 
         fields = [
             "material_id", "formula_pretty", "symmetry",
-            "energy_above_hull", "structure",
+            "energy_above_hull", "structure", "nsites", "density",
+            "formula_anonymous",
         ]
         kwargs: dict[str, Any] = {"chemsys": chemsys, "fields": fields}
         if spec.max_e_above_hull is not None:
             kwargs["energy_above_hull"] = (0.0, float(spec.max_e_above_hull))
+        if spec.z_range is not None:
+            kwargs["num_sites"] = (int(spec.z_range[0]), int(spec.z_range[1]))
+        if spec.density_range is not None:
+            kwargs["density"] = (float(spec.density_range[0]), float(spec.density_range[1]))
+        # anonymous_formula is post-filtered client-side because the mp-api
+        # kwarg name has varied across versions ('formula' template vs
+        # 'formula_anonymous'); client-side is robust to either.
 
         try:
             with MPRester(self.api_key) as mpr:
@@ -103,6 +114,11 @@ class MaterialsProjectBackend:
             if spec.space_group_hints and sg_number not in spec.space_group_hints:
                 continue
 
+            anon = getattr(r, "formula_anonymous", None)
+            if spec.anonymous_formula is not None:
+                if anon is None or str(anon) != spec.anonymous_formula:
+                    continue
+
             e_hull = getattr(r, "energy_above_hull", None)
             candidates.append(StructureCandidate(
                 id=str(getattr(r, "material_id", "")),
@@ -112,6 +128,9 @@ class MaterialsProjectBackend:
                 metadata={
                     "energy_above_hull": e_hull,
                     "spacegroup_number": sg_number,
+                    "nsites": getattr(r, "nsites", None),
+                    "density": getattr(r, "density", None),
+                    "formula_anonymous": anon,
                     "_structure": getattr(r, "structure", None),
                 },
                 rank_score=_rank_score_from_e_hull(e_hull),
