@@ -175,10 +175,16 @@ class IterativeFeedbackController:
 
         for i, t in enumerate(targets, 1):
             t_type = t.get('type', 'N/A')
-            t_value = t.get('value', 'N/A')
+            t_value = t.get('value', None)
             t_desc = t.get('description', 'No description provided.')
 
-            print(f"\n  [{i}] {t_type}  (value: {t_value})")
+            # custom_code targets carry value=None by schema design —
+            # the description is the payload. Skip the value annotation
+            # in that case to avoid the meaningless "(value: None)" noise.
+            header = f"  [{i}] {t_type}"
+            if t_value is not None:
+                header += f"  (value: {t_value})"
+            print(f"\n{header}")
             for line in textwrap.wrap(t_desc, width=70):
                 print(f"      {line}")
 
