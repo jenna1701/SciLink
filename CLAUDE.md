@@ -423,3 +423,21 @@ Non-trivial features start on a dedicated branch off `main`
 (`git checkout -b <feature-name>`), never on `main` directly. UI / CLI
 exposure for a backend feature can land in the same branch as the
 backend, or split into a follow-up PR — depends on review surface area.
+
+## API key handling
+
+`SCILINK_API_KEY` is the **proxy** key. It pairs with `base_url=<proxy-url>`
+to authenticate against an OpenAI-compatible internal proxy (AI-incubator-
+style deployments). It is *not* a vendor-neutral credential and must never
+be handed to vendor endpoints (`api.anthropic.com`, `api.openai.com`,
+`generativelanguage.googleapis.com`, …) — vendors reject proxy keys.
+
+On the direct LiteLLM path (no `base_url`), the api_key comes from one of
+two sources: the caller passes it explicitly, or LiteLLM auto-discovers it
+from the conventional vendor env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`GOOGLE_API_KEY`, …). SciLink agent constructors must NOT fall back to
+`SCILINK_API_KEY` on this path — when no vendor key is available, raise
+`APIKeyNotFoundError` with a message naming both fixes (pass `base_url` to
+use the proxy, or set the conventional vendor env var for direct API
+access). `BaseAnalysisAgent`'s internal-proxy vs public-LiteLLM branching
+is the reference shape; new agents mirror it.
