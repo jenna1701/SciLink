@@ -364,7 +364,12 @@ if not st.session_state.agent_initialized:
         _modes = [m for m in APP_MODES
                   if m["key"] != "simulate" or simulate_enabled()]
         st.markdown('<div class="mode-selector-anchor"></div>', unsafe_allow_html=True)
-        _cols = st.columns([1.5] + [1.0] * len(_modes) + [1.5])
+        # Side padding shrinks when [sim] extras add a 4th button so each
+        # button keeps the same fraction of the center column; the fixed 1.5
+        # padding squeezed 4 buttons tight enough that their styled borders
+        # visually collided.
+        _pad = 1.5 if len(_modes) <= 3 else 0.75
+        _cols = st.columns([_pad] + [1.0] * len(_modes) + [_pad])
         for _m, _col in zip(_modes, _cols[1:-1]):
             with _col:
                 _btype = ("primary" if st.session_state.app_mode == _m["key"]
