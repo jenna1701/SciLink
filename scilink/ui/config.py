@@ -39,7 +39,7 @@ SUPPORTED_DATA_EXTENSIONS = (
 # whitelist only when an MCP server exposing a compatible reader is
 # connected (see ``extra_data_extensions_for``).
 VENDOR_DATA_EXTENSIONS = (
-    ".dm3", ".dm4", ".emd", ".ndata",
+    ".dm3", ".dm4", ".emd", ".ndata", ".ndata1", ".ndata2",
     ".ibw", ".ardf",
     ".gwy", ".gsf",
     ".spe", ".spc", ".spx",
