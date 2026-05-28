@@ -136,3 +136,27 @@ class TestFitRoundtrip:
         assert abs(p["g_perp"] - truth["g_perp"])   < 0.01
         assert abs(p["A_par_G"] - truth["A_par_G"]) < 5.0
         assert abs(p["lw_G"]   - truth["lw_G"])     < 5.0
+
+
+class TestToolDiscovery:
+    """The skill's tools must be discoverable by the registry, otherwise the
+    agent loads the skill markdown but can never *call* fit_axial_powder and
+    falls back to mis-specified codegen. The registry only recognizes the
+    ``TOOL_SPEC`` / ``TOOL_SPECS`` attribute names — a module declaring specs
+    under other names (e.g. ``TOOL_SPEC_FIT``) is silently skipped.
+    """
+
+    def test_epr_tools_registered(self):
+        from scilink.skills._shared._registry import _per_skill_specs
+
+        specs = _per_skill_specs().get(("curve_fitting", "epr"))
+        assert specs, "EPR skill declares no discoverable ToolSpecs"
+        names = {s.name for s in specs}
+        assert {"simulate_axial_powder", "fit_axial_powder"} <= names
+
+    def test_epr_tools_visible_when_skill_active(self):
+        from scilink.skills._shared._registry import get_tools_for
+
+        names = {t.name for t in get_tools_for(
+            "curve_fitting", active_skills=["epr"])}
+        assert {"simulate_axial_powder", "fit_axial_powder"} <= names

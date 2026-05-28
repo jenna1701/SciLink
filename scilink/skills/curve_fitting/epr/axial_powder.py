@@ -381,3 +381,8 @@ TOOL_SPEC_FIT = ToolSpec(
         "shoulder, set ``include_isotropic=True``."
     ),
 )
+
+
+# The registry discovers ``TOOL_SPEC`` (single) or ``TOOL_SPECS`` (list); this
+# module declares two tools, so expose them via the list form.
+TOOL_SPECS = [TOOL_SPEC_SIMULATE, TOOL_SPEC_FIT]
