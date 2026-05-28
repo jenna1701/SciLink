@@ -1890,6 +1890,9 @@ Your guidance: '''
             return None
 
     def _adapt_script_for_spectrum(self, base_script: str, data_path: str, output_prefix: str) -> str:
+        # Forward slashes so Windows paths like 'C:\Users\...' don't trigger
+        # re.sub's backslash-escape interpretation in the replacement string.
+        data_path = data_path.replace('\\', '/')
         adapted = base_script
         adapted = adapted.replace('fit_visualization.png', f'{output_prefix}_fit.png')
         adapted = re.sub(r'spectrum_\d{4}_fit\.png', f'{output_prefix}_fit.png', adapted)

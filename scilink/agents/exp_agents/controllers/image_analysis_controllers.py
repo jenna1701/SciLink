@@ -2217,6 +2217,9 @@ Your guidance: '''
 
     def _adapt_script_for_image(self, base_script: str, data_path: str, output_prefix: str) -> str:
         """Adapt a base analysis script for a different image in the series."""
+        # Forward slashes so Windows paths like 'C:\Users\...' don't trigger
+        # re.sub's backslash-escape interpretation in the replacement string.
+        data_path = data_path.replace('\\', '/')
         adapted = base_script
         # Replace visualization output filenames
         adapted = adapted.replace('analysis_visualization.png', f'{output_prefix}_analysis.png')
