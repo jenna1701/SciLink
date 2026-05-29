@@ -2278,6 +2278,27 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
         "explain the deviation.\n\n",
     )
 
+    def _plot_raw_vs_processed(self, raw: np.ndarray, processed: np.ndarray, name: str = "") -> bytes:
+        """Overlay raw vs preprocessed curve as PNG bytes.
+
+        Given to the verifier so it can catch preprocessing-induced distortion
+        (e.g. over-smoothing broadening a peak / linewidth, a baseline removing
+        real signal) — the failure mode that is otherwise invisible because the
+        fit is plotted only against the already-processed data.
+        """
+        import io
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.plot(raw[:, 0], raw[:, 1], color="0.6", lw=0.8, label="raw")
+        ax.plot(processed[:, 0], processed[:, 1], color="#c0392b", lw=1.0, label="preprocessed")
+        ax.set_title(f"Raw vs preprocessed{(': ' + name) if name else ''}")
+        ax.set_xlabel("x"); ax.set_ylabel("y"); ax.legend(fontsize=8)
+        fig.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=110)
+        plt.close(fig)
+        return buf.getvalue()
+
     def _verify_fit_with_llm(self, state: dict, fit_result: dict, history: List[dict] = None, verification_iter: int = 0, annealing_level: int | None = None, best_result: dict | None = None, best_verification: dict | None = None) -> Optional[dict]:
         """
         Use LLM to verify fit quality by examining the visualization.
@@ -2450,8 +2471,24 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
             "data": fit_result["visualization_bytes"]
         })
         
+        # Raw-vs-preprocessed overlay (only present when preprocessing changed
+        # the data). Lets the verifier see — and flag — preprocessing-induced
+        # distortion, which is otherwise invisible because the fit is plotted
+        # against the already-processed curve.
+        if state.get("preprocess_overlay_bytes"):
+            prompt_parts.append(
+                "\n\n**RAW vs PREPROCESSED DATA:** Preprocessing was applied "
+                "before fitting. Verify it did not distort the feature being "
+                "measured (e.g. over-smoothing broadening a peak/linewidth, or a "
+                "baseline removing real signal). If it did, add an entry to "
+                "issues_found with location 'preprocessing' describing the "
+                "distortion, but set recommended_action to 'none' — the model fit "
+                "cannot compensate for preprocessing, so this is recorded for the "
+                "analysis caveats rather than triggering a refit."
+            )
+            prompt_parts.append({"mime_type": "image/png", "data": state["preprocess_overlay_bytes"]})
         # Also include original data if available for comparison
-        if state.get("original_plot_bytes"):
+        elif state.get("original_plot_bytes"):
             prompt_parts.append("\n\n**ORIGINAL DATA (for reference):**")
             prompt_parts.append({"mime_type": "image/png", "data": state["original_plot_bytes"]})
 
@@ -3665,6 +3702,10 @@ Return JSON with:
                 spectrum_name = Path(data_path).stem
                 curve_data = self._load_curve_data(data_path)
 
+            # Keep the raw curve so we can show the verifier a raw-vs-processed
+            # overlay (preprocessing distortion is otherwise invisible).
+            raw_curve_data = curve_data.copy() if isinstance(curve_data, np.ndarray) else None
+
             # Apply preprocessing with locking support for series consistency
             if self.preprocessor is not None:
                 try:
@@ -3702,6 +3743,25 @@ Return JSON with:
                     self.logger.info(f"Preprocessed: {spectrum_name}")
                 except Exception as e:
                     self.logger.warning(f"Preprocessing failed for {spectrum_name}: {e}, using raw data")
+
+            # Raw-vs-preprocessed overlay for the verifier — only when
+            # preprocessing actually changed the data (same length, different
+            # values). Cleared otherwise so a stale overlay never carries over.
+            state.pop("preprocess_overlay_bytes", None)
+            try:
+                if (raw_curve_data is not None
+                        and isinstance(curve_data, np.ndarray)
+                        and curve_data.shape == raw_curve_data.shape
+                        and not np.array_equal(curve_data, raw_curve_data)):
+                    state["preprocess_overlay_bytes"] = self._plot_raw_vs_processed(
+                        raw_curve_data, curve_data, spectrum_name
+                    )
+                    self.logger.info(
+                        "   🔬 Raw-vs-preprocessed overlay attached for verification "
+                        "(preprocessing changed the data)."
+                    )
+            except Exception as e:
+                self.logger.debug(f"raw-vs-processed overlay skipped: {e}")
 
             # Determine regime and set appropriate config
             regime_name = self._get_regime_for_spectrum(state, idx) or "default"
