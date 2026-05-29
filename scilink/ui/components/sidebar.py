@@ -39,21 +39,37 @@ def _seed_credentials_from_env(model: str) -> dict:
     ``setdefault`` is used so a value the user has already typed is never
     clobbered (the widget keys don't exist yet on the first render).
     """
-    from ..config import resolve_prefill
+    from ..config import resolve_prefill, reconcile_autofill
 
     resolved = resolve_prefill(model, st.session_state.get("cfg_base_url", ""))
-
-    field_to_state_key = {
-        "api_key": "cfg_api_key",
-        "base_url": "cfg_base_url",
-        "fh": "cfg_fh_api_key",
-        "mp": "cfg_mp_api_key",
-    }
     sources: dict = {}
-    for field, state_key in field_to_state_key.items():
+
+    # Main API key: its resolved value depends on the selected model's provider,
+    # so re-resolve on every render and refresh the field when the model changes
+    # vendors — but never overwrite a key the user typed. reconcile_autofill
+    # decides; `_cfg_api_key_autofill` records what we last auto-filled so a
+    # hand-edited value is recognised and preserved.
+    api_val, api_src = resolved["api_key"]
+    new_val, new_auto = reconcile_autofill(
+        st.session_state.get("cfg_api_key"),
+        st.session_state.get("_cfg_api_key_autofill"),
+        api_val,
+    )
+    st.session_state["cfg_api_key"] = new_val          # set before the widget renders
+    st.session_state["_cfg_api_key_autofill"] = new_auto
+    if api_src and new_val == api_val:
+        sources["api_key"] = api_src
+
+    # base_url / FutureHouse / Materials Project keys are model-independent —
+    # seed once (setdefault never clobbers a typed value).
+    for field, state_key in (
+        ("base_url", "cfg_base_url"),
+        ("fh", "cfg_fh_api_key"),
+        ("mp", "cfg_mp_api_key"),
+    ):
         value, src = resolved[field]
         st.session_state.setdefault(state_key, value)
-        if src:
+        if src and st.session_state.get(state_key) == value:
             sources[field] = src
     return sources
 

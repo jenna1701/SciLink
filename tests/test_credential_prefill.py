@@ -17,7 +17,7 @@ and tests opt back in with monkeypatch.setenv.
 import pytest
 
 from scilink import auth
-from scilink.ui.config import resolve_prefill
+from scilink.ui.config import resolve_prefill, reconcile_autofill
 
 
 _RELEVANT_VARS = [
@@ -84,15 +84,6 @@ def test_get_internal_proxy_base_url(clean_env):
     assert auth.INTERNAL_PROXY_BASE_URL == "SCILINK_BASE_URL"
 
 
-def test_find_first_vendor_env(clean_env):
-    assert auth.find_first_vendor_env() is None
-    clean_env.setenv("GOOGLE_API_KEY", "g-key")
-    assert auth.find_first_vendor_env() == ("GOOGLE_API_KEY", "g-key")
-    # VENDOR_PROVIDERS order (openai, anthropic, google) decides the winner.
-    clean_env.setenv("OPENAI_API_KEY", "o-key")
-    assert auth.find_first_vendor_env() == ("OPENAI_API_KEY", "o-key")
-
-
 # ─── Tier 2: resolve_prefill field resolution ──────────────────────
 
 
@@ -147,12 +138,15 @@ def test_proxy_key_surfaced_without_base_url_when_no_vendor(clean_env):
     assert out["api_key"] == ("proxy-key", "SCILINK_API_KEY")
 
 
-def test_vendor_fallback_when_no_provider_match(clean_env):
-    """A single exported vendor key surfaces even when it does not match the
-    selected model's provider (default model is claude; only GOOGLE is set)."""
+def test_no_prefill_when_provider_key_missing(clean_env):
+    """A vendor key that does NOT match the selected model's provider must not
+    be borrowed: default model is claude, only GOOGLE is set → field stays
+    empty rather than prefilling the wrong key."""
     clean_env.setenv("GOOGLE_API_KEY", "g-key")
     out = resolve_prefill("claude-opus-4-6")
-    assert out["api_key"] == ("g-key", "GOOGLE_API_KEY")
+    assert out["api_key"] == ("", None)
+    # The matching model DOES prefill it.
+    assert resolve_prefill("gemini-3.1-pro-preview")["api_key"] == ("g-key", "GOOGLE_API_KEY")
 
 
 def test_service_keys_resolve_independently_of_model(clean_env):
@@ -181,3 +175,37 @@ def test_base_url_prefilled_independently_of_proxy_key(clean_env):
     out = resolve_prefill("gpt-5.4")
     assert out["base_url"] == ("https://proxy/v1", "SCILINK_BASE_URL")
     assert out["api_key"] == ("sk-oai", "OPENAI_API_KEY")
+
+
+# ─── reconcile_autofill: dynamic refresh on model/vendor change ────
+
+
+def test_reconcile_first_seed():
+    """Field never existed (None) → adopt the resolved value."""
+    assert reconcile_autofill(None, None, "k-anthropic") == ("k-anthropic", "k-anthropic")
+
+
+def test_reconcile_refreshes_when_unedited():
+    """Field still holds the last auto-filled value → switching vendors
+    refreshes it to the newly-resolved key. This is the reported bug."""
+    assert reconcile_autofill("k-anthropic", "k-anthropic", "k-openai") == ("k-openai", "k-openai")
+
+
+def test_reconcile_preserves_user_typed_value():
+    """A hand-typed value differs from the last auto-fill → never overwritten."""
+    assert reconcile_autofill("my-typed-key", "k-anthropic", "k-openai") == ("my-typed-key", "k-anthropic")
+
+
+def test_reconcile_preserves_cleared_field():
+    """A deliberately cleared field (was auto-filled, now empty) stays empty."""
+    assert reconcile_autofill("", "k-anthropic", "k-openai") == ("", "k-anthropic")
+
+
+def test_reconcile_populates_when_provider_gains_key():
+    """Field auto-filled empty (no key for prior model) → switching to a model
+    whose provider key IS set populates it."""
+    assert reconcile_autofill("", "", "k-openai") == ("k-openai", "k-openai")
+
+
+def test_reconcile_idempotent_when_value_unchanged():
+    assert reconcile_autofill("k-anthropic", "k-anthropic", "k-anthropic") == ("k-anthropic", "k-anthropic")

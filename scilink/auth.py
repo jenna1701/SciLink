@@ -117,28 +117,6 @@ def find_env_var_for_model(model_name: str) -> Optional[tuple]:
     return find_env_var(provider) if provider else None
 
 
-# LLM vendor providers, in the order to fall back through when no provider was
-# matched to the selected model (used for credential prefill).
-VENDOR_PROVIDERS = ('openai', 'anthropic', 'google')
-
-
-def find_first_vendor_env() -> Optional[tuple]:
-    """
-    Find the first set vendor LLM env var, regardless of model.
-
-    Lets the UI surface a single exported key even when it does not match the
-    currently-selected model's provider (the user then picks a matching model).
-
-    Returns:
-        ``(env_var_name, value)`` or None if no vendor key is set.
-    """
-    for provider in VENDOR_PROVIDERS:
-        found = find_env_var(provider)
-        if found:
-            return found
-    return None
-
-
 class APIKeyManager:
     """Simple API key management with environment variable auto-discovery."""
     
