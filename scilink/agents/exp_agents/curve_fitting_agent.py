@@ -231,15 +231,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         # Optional preprocessor
         self.run_preprocessing = run_preprocessing
+        # Preprocessing is now performed INSIDE the generated fit script — the
+        # model writes appropriate, length-preserving preprocessing as part of
+        # its own fitting code, verified in the same loop. The separate upstream
+        # 1D CurvePreprocessingAgent is retired, so self.preprocessor stays None
+        # and every site (analyze first-spectrum, series loop, adaptive refit)
+        # feeds RAW data to the fit script. See docs/preprocessing_in_fit_loop.md.
         self.preprocessor = None
-        if run_preprocessing:
-            self.preprocessor = CurvePreprocessingAgent(
-                api_key=self.api_key,
-                model_name=model_name,
-                base_url=self.base_url,
-                output_dir=os.path.join(self.output_dir, "preprocessing"),
-                executor_timeout=executor_timeout,
-            )
 
         # Optional literature agent
         self.literature_agent = None

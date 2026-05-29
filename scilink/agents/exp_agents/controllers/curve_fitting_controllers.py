@@ -2493,25 +2493,23 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
             "data": fit_result["visualization_bytes"]
         })
         
-        # Raw-vs-preprocessed overlay (only present when preprocessing changed
-        # the data). Lets the verifier see — and flag — preprocessing-induced
-        # distortion, which is otherwise invisible because the fit is plotted
-        # against the already-processed curve.
-        if state.get("preprocess_overlay_bytes"):
-            prompt_parts.append(
-                "\n\n**RAW vs PREPROCESSED DATA:** Preprocessing was applied "
-                "before fitting. Verify it did not distort the feature being "
-                "measured (e.g. over-smoothing broadening a peak/linewidth, or a "
-                "baseline removing real signal). If it did, add an entry to "
-                "issues_found with location 'preprocessing' describing the "
-                "distortion, but set recommended_action to 'none' — the model fit "
-                "cannot compensate for preprocessing, so this is recorded for the "
-                "analysis caveats rather than triggering a refit."
-            )
-            prompt_parts.append({"mime_type": "image/png", "data": state["preprocess_overlay_bytes"]})
-        # Also include original data if available for comparison
-        elif state.get("original_plot_bytes"):
-            prompt_parts.append("\n\n**ORIGINAL DATA (for reference):**")
+        # Preprocessing is now done INSIDE the fit script; when it preprocesses,
+        # its visualization shows the raw data faintly behind the fitted data.
+        # Always remind the verifier to check for preprocessing-induced
+        # distortion (otherwise invisible because the fit is plotted against the
+        # processed curve).
+        prompt_parts.append(
+            "\n\n**PREPROCESSING CHECK:** Any preprocessing is done inside the "
+            "fit script. If the visualization shows a faint raw trace behind the "
+            "fitted data, verify the preprocessing did not distort the fitted "
+            "features (e.g. over-smoothing broadening a peak/linewidth, or a "
+            "baseline removing real signal). If it did, add an issues_found entry "
+            "with location 'preprocessing' and set recommended_action to 'none' — "
+            "recorded as a caveat, not a refit trigger."
+        )
+        # Original (raw) data for reference.
+        if state.get("original_plot_bytes"):
+            prompt_parts.append("\n\n**ORIGINAL (RAW) DATA for reference:**")
             prompt_parts.append({"mime_type": "image/png", "data": state["original_plot_bytes"]})
 
         
