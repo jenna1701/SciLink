@@ -100,38 +100,54 @@ def resolve_prefill(
 ) -> Dict[str, Tuple[str, Optional[str]]]:
     """Resolve which environment variables prefill the credential form fields.
 
-    Pure function — no Streamlit / session_state — so the resolution rules
-    (especially the proxy-vs-vendor safety guard) are unit-testable in
-    isolation. The sidebar wraps this to seed widget state and render captions.
+    Pure function — no Streamlit / session_state — so the precedence rules are
+    unit-testable in isolation. The sidebar wraps this to seed widget state and
+    render captions.
 
     Returns ``{field: (value, env_var_name_or_None)}`` for fields
     ``api_key``, ``base_url``, ``fh``, ``mp``. ``env_var_name`` is the variable
     a value came from (for a "✓ from X" caption), or ``None`` when nothing was
     detected for that field.
 
-    Resolution mirrors the backend's API-key handling:
-      - Proxy path: ``SCILINK_API_KEY`` fills the main key ONLY when a base URL
-        is available (``SCILINK_BASE_URL`` env, or one the user already entered),
-        because the proxy key is rejected by vendor endpoints without a base
-        URL. It is never routed to a vendor on its own.
-      - Otherwise the main key is the vendor key matching the model's provider
-        (``ANTHROPIC_API_KEY`` / ``OPENAI_API_KEY`` / ``GEMINI_API_KEY`` …).
-      - ``base_url`` prefills from ``SCILINK_BASE_URL`` when set.
-      - FutureHouse / Materials Project keys come from their own env vars,
-        independent of the model.
+    Goal: whenever *any* credential exists in the environment, the main key
+    field is populated, so the user sees it and the session can start (the
+    backend short-circuits on a non-empty key). Proxy-vs-vendor *correctness*
+    is enforced by the backend (``require_vendor_credentials``), not by hiding
+    keys here. Main-key precedence:
+
+      1. Proxy pair — ``SCILINK_API_KEY`` when a base URL is available
+         (``SCILINK_BASE_URL`` env or one already entered): a fully-configured
+         proxy deployment.
+      2. The vendor key matching the selected model's provider
+         (``ANTHROPIC_API_KEY`` / ``OPENAI_API_KEY`` / ``GEMINI_API_KEY`` …).
+      3. ``SCILINK_API_KEY`` on its own — a proxy deployment whose base URL will
+         be supplied separately (the sidebar warns that one is still needed).
+      4. The first available vendor key, even if it does not match the selected
+         model (the user then picks a matching model).
+
+    ``base_url`` prefills from ``SCILINK_BASE_URL`` when set; FutureHouse /
+    Materials Project keys come from their own env vars, independent of the
+    model.
     """
     proxy_key = auth.get_internal_proxy_key()
     proxy_url = auth.get_internal_proxy_base_url()
-
-    if proxy_key and (proxy_url or existing_base_url):
-        api: Tuple[str, Optional[str]] = (proxy_key, auth.INTERNAL_PROXY_KEY)
-    else:
-        found = auth.find_env_var_for_model(model)
-        api = (found[1], found[0]) if found else ("", None)
+    base_available = bool(proxy_url or existing_base_url)
 
     base: Tuple[str, Optional[str]] = (
         (proxy_url, auth.INTERNAL_PROXY_BASE_URL) if proxy_url else ("", None)
     )
+
+    provider_kv = auth.find_env_var_for_model(model)
+
+    if proxy_key and base_available:
+        api: Tuple[str, Optional[str]] = (proxy_key, auth.INTERNAL_PROXY_KEY)
+    elif provider_kv:
+        api = (provider_kv[1], provider_kv[0])
+    elif proxy_key:
+        api = (proxy_key, auth.INTERNAL_PROXY_KEY)
+    else:
+        vendor_kv = auth.find_first_vendor_env()
+        api = (vendor_kv[1], vendor_kv[0]) if vendor_kv else ("", None)
 
     fh = auth.find_env_var("futurehouse")
     mp = auth.find_env_var("materials_project")

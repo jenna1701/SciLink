@@ -276,6 +276,10 @@ def render_sidebar() -> None:
         base_url = st.text_input("Base URL (optional)", key="cfg_base_url", disabled=_locked)
         if _env_src.get("base_url"):
             st.caption(f"✓ loaded from `{_env_src['base_url']}`")
+        elif _env_src.get("api_key") == "SCILINK_API_KEY" and not base_url:
+            # Proxy key was prefilled but no base URL is set — the proxy path
+            # needs one, and vendors reject the proxy key without it.
+            st.caption("⚠️ Proxy key detected — set a Base URL (or export `SCILINK_BASE_URL`) to use it.")
         fh_api_key = st.text_input("FutureHouse API key (optional)", type="password", key="cfg_fh_api_key", disabled=_locked)
         if _env_src.get("fh"):
             st.caption(f"✓ loaded from `{_env_src['fh']}`")

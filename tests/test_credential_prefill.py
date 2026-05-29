@@ -84,6 +84,15 @@ def test_get_internal_proxy_base_url(clean_env):
     assert auth.INTERNAL_PROXY_BASE_URL == "SCILINK_BASE_URL"
 
 
+def test_find_first_vendor_env(clean_env):
+    assert auth.find_first_vendor_env() is None
+    clean_env.setenv("GOOGLE_API_KEY", "g-key")
+    assert auth.find_first_vendor_env() == ("GOOGLE_API_KEY", "g-key")
+    # VENDOR_PROVIDERS order (openai, anthropic, google) decides the winner.
+    clean_env.setenv("OPENAI_API_KEY", "o-key")
+    assert auth.find_first_vendor_env() == ("OPENAI_API_KEY", "o-key")
+
+
 # ─── Tier 2: resolve_prefill field resolution ──────────────────────
 
 
@@ -120,22 +129,30 @@ def test_proxy_key_used_when_base_url_already_entered(clean_env):
     assert out["base_url"] == ("", None)
 
 
-def test_proxy_key_NOT_used_without_base_url_falls_back_to_vendor(clean_env):
-    """SAFETY GUARD: a proxy key with no base URL anywhere must NOT fill the
-    main field (vendors reject it). The vendor key is used instead."""
+def test_provider_match_wins_over_proxy_without_base_url(clean_env):
+    """With no base URL, a vendor key matching the model's provider is preferred
+    over the proxy key (correct pairing without a manual base URL)."""
     clean_env.setenv("SCILINK_API_KEY", "proxy-key")
     clean_env.setenv("ANTHROPIC_API_KEY", "sk-ant")
     out = resolve_prefill("claude-opus-4-6")  # no base url anywhere
     assert out["api_key"] == ("sk-ant", "ANTHROPIC_API_KEY")
-    assert out["api_key"][0] != "proxy-key"
 
 
-def test_proxy_key_without_base_url_and_no_vendor_is_empty(clean_env):
-    """Proxy key, no base URL, no vendor key → main field left empty (never the
-    proxy key on a vendor path)."""
+def test_proxy_key_surfaced_without_base_url_when_no_vendor(clean_env):
+    """Proxy key set, no base URL, no vendor key → the proxy key IS surfaced so
+    the field is populated and the session can start. (The sidebar warns that a
+    base URL is still needed; the backend enforces proxy-vs-vendor safety.)"""
     clean_env.setenv("SCILINK_API_KEY", "proxy-key")
     out = resolve_prefill("claude-opus-4-6")
-    assert out["api_key"] == ("", None)
+    assert out["api_key"] == ("proxy-key", "SCILINK_API_KEY")
+
+
+def test_vendor_fallback_when_no_provider_match(clean_env):
+    """A single exported vendor key surfaces even when it does not match the
+    selected model's provider (default model is claude; only GOOGLE is set)."""
+    clean_env.setenv("GOOGLE_API_KEY", "g-key")
+    out = resolve_prefill("claude-opus-4-6")
+    assert out["api_key"] == ("g-key", "GOOGLE_API_KEY")
 
 
 def test_service_keys_resolve_independently_of_model(clean_env):
