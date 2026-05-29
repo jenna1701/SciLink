@@ -27,6 +27,19 @@ from ...executors import ScriptExecutor, require_sandbox_approval
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 
+class FitDomainInstruction(Exception):
+    """Raised when a custom preprocessing instruction changes the point count
+    (e.g. "fit only the decay region", "exclude the dark counts").
+
+    Such an instruction is a *fit-domain* / region-of-interest decision, not a
+    length-preserving data transform — it belongs to the planner and the fit
+    script, not to the preprocessing step (whose output must align point-for-
+    point with the input). The 1D preprocessor raises this so ``run_preprocessing``
+    can defer the instruction to the fit stage instead of failing silently and
+    returning unprocessed data. See docs/preprocessing_in_fit_loop.md.
+    """
+
+
 class HyperspectralPreprocessingAgent(BaseUtilityAgent):
     """
     An agent that uses an LLM to determine the optimal pre-processing strategy
@@ -541,7 +554,13 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         # Check for a custom, overriding instruction
         custom_instruction = system_info.get("custom_processing_instruction")
         
-        # Check if we have a locked custom script strategy from a previous spectrum
+        # A custom instruction (or locked custom script) that changes the point
+        # count is a region-of-interest / fit-domain decision, not a length-
+        # preserving transform. The planner and fit script already receive the
+        # instruction via metadata, so we defer it there and apply standard
+        # preprocessing here instead of failing. See docs/preprocessing_in_fit_loop.md.
+
+        # Locked custom script from a previous spectrum (series consistency)
         if (locked_strategy is not None
                 and locked_strategy.get("type") == "custom_script"):
             self.logger.info("Replaying locked custom preprocessing script for series consistency.")
@@ -551,16 +570,19 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                 )
                 data_quality["strategy"] = locked_strategy
                 data_quality["reasoning"] = "Locked custom script replayed for series consistency."
+                return processed_data, data_quality
+            except FitDomainInstruction as e:
+                self.logger.info(f"   ↪ Locked custom script implies a fit-domain change; deferring to the fit stage. ({e})")
+                data_quality["deferred_to_fit_domain"] = True
+                # fall through to standard preprocessing
             except Exception as e:
                 self.logger.error(f"Locked custom script replay failed: {e}. Returning original data.")
-                processed_data = curve_data
                 data_quality["reasoning"] = f"LOCKED CUSTOM SCRIPT REPLAY FAILED: {e}"
-            return processed_data, data_quality
+                return curve_data, data_quality
 
-        if custom_instruction:  # Custom script path
-            self.logger.info(f"Detected custom 1D processing instruction. Diverting to script executor.")
+        elif custom_instruction:  # Custom script path
+            self.logger.info("Detected custom 1D processing instruction.")
             self.logger.info(f"Instruction: {custom_instruction}")
-
             try:
                 processed_data, script_path, script_content = (
                     self._run_custom_script_processing_1d(
@@ -577,32 +599,50 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                         "script_content": script_content,
                         "reasoning": f"Custom preprocessing: {custom_instruction[:100]}",
                     }
+                return processed_data, data_quality
+            except FitDomainInstruction as e:
+                self.logger.info(
+                    "   ↪ Custom instruction implies a region-of-interest / "
+                    "fit-domain change. The planner and fit script own this "
+                    "(the instruction is already passed to them via metadata); "
+                    "applying standard length-preserving preprocessing instead."
+                )
+                self.logger.info(f"      ({e})")
+                data_quality["deferred_to_fit_domain"] = True
+                # fall through to standard preprocessing
             except Exception as e:
                 self.logger.error(f"Custom 1D script processing failed: {e}. Returning original data.")
-                processed_data = curve_data
                 data_quality["reasoning"] = f"CUSTOM 1D SCRIPT FAILED: {e}"
+                return curve_data, data_quality
 
-        else:  # Standard LLM-guided path
-            self.logger.info("Running LLM-guided standard 1D processing.")
+        # Standard (length-preserving) path — also the deferral target above.
+        return self._run_standard_1d(curve_data, system_info, locked_strategy, data_quality)
 
-            # 1. Calculate stats (needed for the LLM if no locked strategy)
-            stats = self._calculate_statistics_1d(curve_data)
+    def _run_standard_1d(
+        self,
+        curve_data: np.ndarray,
+        system_info: dict,
+        locked_strategy: Dict[str, Any] | None,
+        data_quality: dict,
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Standard, length-preserving 1D preprocessing (clip/smooth).
 
-            # 2. Use locked strategy if provided, otherwise ask LLM
-            if locked_strategy is not None:
-                self.logger.info("Using locked preprocessing strategy for series consistency.")
-                strategy = locked_strategy
-            else:
-                self.logger.info("No locked strategy - asking LLM for preprocessing strategy.")
-                strategy = self._llm_select_1d_strategy(stats, system_info)
-
-            # 3. Apply the strategy
-            processed_data = self._apply_1d_strategy(curve_data, strategy)
-
-            # 4. Return strategy in data_quality so it can be locked for series
-            data_quality["reasoning"] = strategy.get('reasoning', 'LLM-guided standard processing applied.')
-            data_quality["strategy"] = strategy
-
+        Used both as the default path and as the deferral target when a custom
+        instruction turns out to be a fit-domain change. A locked *custom_script*
+        strategy is ignored here (it is not a standard strategy); only a standard
+        locked strategy is reused for series consistency.
+        """
+        self.logger.info("Running LLM-guided standard 1D processing.")
+        stats = self._calculate_statistics_1d(curve_data)
+        if locked_strategy is not None and locked_strategy.get("type") != "custom_script":
+            self.logger.info("Using locked preprocessing strategy for series consistency.")
+            strategy = locked_strategy
+        else:
+            self.logger.info("No locked strategy - asking LLM for preprocessing strategy.")
+            strategy = self._llm_select_1d_strategy(stats, system_info)
+        processed_data = self._apply_1d_strategy(curve_data, strategy)
+        data_quality["reasoning"] = strategy.get('reasoning', 'LLM-guided standard processing applied.')
+        data_quality["strategy"] = strategy
         return processed_data, data_quality
 
     def _llm_select_1d_strategy(self, stats: Dict[str, Any], system_info: dict) -> dict:
@@ -844,9 +884,12 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                     f"a valid (N, 2) curve"
                 )
             if processed_data.shape[0] != curve_data.shape[0]:
-                raise RuntimeError(
+                raise FitDomainInstruction(
                     f"Custom script output has {processed_data.shape[0]} points, "
-                    f"expected {curve_data.shape[0]} to match input"
+                    f"expected {curve_data.shape[0]} to match input — the "
+                    f"instruction implies a region-of-interest / fit-domain "
+                    f"change, which is handled by the planner and fit script, "
+                    f"not by length-preserving preprocessing."
                 )
 
             # 3. Validation step (LLM quality check)
@@ -944,9 +987,10 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                     f"a valid (N, 2) curve"
                 )
             if processed_data.shape[0] != curve_data.shape[0]:
-                raise RuntimeError(
+                raise FitDomainInstruction(
                     f"Locked script output has {processed_data.shape[0]} points, "
-                    f"expected {curve_data.shape[0]} to match input"
+                    f"expected {curve_data.shape[0]} to match input — region-of-"
+                    f"interest / fit-domain change, deferred to the fit stage."
                 )
 
             return processed_data

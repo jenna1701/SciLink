@@ -2191,10 +2191,33 @@ plan as specified and let the retry pipeline handle actual runtime failures.
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
 
 **Requirements:**
-1. Load data (handle .npy, .csv, .txt)
-2. Implement your fitting approach
-3. Compute R² and RMSE
-4. Save `fit_visualization.png`: data + fit + residuals (show individual components if multiple peaks).
+1. Load data (handle .npy, .csv, .txt). The data you load is RAW — no preprocessing
+   has been applied upstream.
+2. Preprocess in-script as appropriate — YOU own this; there is no separate
+   preprocessing step. Apply only what is clearly warranted for this data (or
+   nothing). HARD CONSTRAINTS:
+   - **Length-preserving:** do NOT crop, trim, bin, or select a sub-range. The
+     region to analyze is your FIT DOMAIN (restrict the fit's x-range per the
+     plan); never delete points from the array.
+   - **Non-distorting:** do not blur peak positions/widths, decay rates, or — for
+     first-derivative spectra (e.g. CW-EPR) — line shapes. For derivative spectra
+     do NOT smooth (it broadens lines and biases linewidths).
+   - **Background:** prefer fitting a background/baseline as a model parameter
+     over subtracting it.
+   WHEN preprocessing IS appropriate:
+   - **Clipping:** setting negative values to zero is appropriate ONLY for
+     intensity-type spectra (Raman, PL, fluorescence) where negatives are noise;
+     NEVER for differential/derivative/absorption data, where negatives are real.
+   - **Denoising:** modest smoothing is acceptable ONLY when the data is genuinely
+     noisy (noise large relative to signal); prefer none for clean data, and never
+     on derivative spectra (see above).
+   If you preprocess, keep both the raw and processed arrays so you can plot them.
+3. Implement your fitting approach (fit over the plan's fit domain).
+4. Compute R² and RMSE
+5. Save `fit_visualization.png`: data + fit + residuals (show individual components if multiple peaks).
+   If you applied any preprocessing, ALSO plot the raw data faintly (light grey,
+   low alpha) so the reviewer can confirm preprocessing did not distort the
+   fitted features.
    **Plot labels must be neutral** — this plot is passed to the interpretation stage, \
 so any text in it becomes part of that stage's input:
    - Title: use "Data and Fit" or "Fit" (NOT "Lorentzian fit at 1580 cm⁻¹", \
@@ -2204,7 +2227,7 @@ NOT any material/phase name, NOT any model name)
    - Annotations: parameter values are OK (e.g. "FWHM=12"); physical assignments are NOT \
 (e.g. "sp² carbon" — do not add)
    - Axis labels: use xlabel/ylabel from sample metadata if provided; else generic "X" / "Y"
-5. Print results as JSON:
+6. Print results as JSON:
 ```python
 results = {{
     "model_type": "description",

@@ -247,6 +247,26 @@ def _append_auxiliary_context(prompt: list, state: dict) -> None:
     })
 
 
+def _append_fit_domain_guidance(prompt: list, state: dict) -> None:
+    """Surface a custom processing instruction to the planner as fit-domain
+    guidance.
+
+    A "fit only the decay / this range" or "ignore the background" request is a
+    fit-domain decision (a fit window + a background parameter), not data
+    preprocessing — preprocessing stays length-preserving so the raw data is
+    fit. The instruction is otherwise only buried in the metadata JSON dump.
+    """
+    instruction = (state.get("system_info") or {}).get("custom_processing_instruction")
+    if not instruction:
+        return
+    prompt.append(
+        "\n## Fit-domain & background guidance\n"
+        f"User processing note: {instruction}\n"
+        "Express any region-of-interest as the FIT DOMAIN and any "
+        "background/baseline as a FIT PARAMETER — not as preprocessing."
+    )
+
+
 def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     """Append domain skill knowledge to an LLM prompt for the given stage.
 
@@ -1193,6 +1213,7 @@ class HumanFeedbackRefinementController:
         ]
 
         _append_objective_context(prompt, state)
+        _append_fit_domain_guidance(prompt, state)
 
         if state.get("analysis_hints"):
             prompt.append(f"\n## User Guidance\n{state['analysis_hints']}")
@@ -1448,6 +1469,7 @@ class HumanFeedbackRefinementController:
         ]
 
         _append_objective_context(prompt, state)
+        _append_fit_domain_guidance(prompt, state)
 
         if state.get("analysis_hints"):
             prompt.append(f"\n## Original Guidance\n{state['analysis_hints']}")
@@ -1692,7 +1714,6 @@ Your guidance: '''
         enable_human_feedback: bool = False,
         outlier_sigma: float = None,
         max_verification_iterations: int = None,
-        preprocessor: Any = None,
         conformance_instructions: str = "",
         parallel_workers: Optional[int] = None,
     ):
@@ -1716,7 +1737,6 @@ Your guidance: '''
         self.enable_human_feedback = enable_human_feedback
         self.outlier_sigma = outlier_sigma if outlier_sigma is not None else self.DEFAULT_OUTLIER_SIGMA
         self.max_verification_iterations = max_verification_iterations if max_verification_iterations is not None else self.DEFAULT_MAX_VERIFICATION_ITERATIONS
-        self.preprocessor = preprocessor
         # Non-anchor parallel fan-out. Defaults to 1 (serial, byte-identical
         # to pre-feature behavior). Anchor processing always runs serially.
         self.parallel_workers = _resolve_parallel_workers(parallel_workers)
@@ -2462,9 +2482,23 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
             "data": fit_result["visualization_bytes"]
         })
         
-        # Also include original data if available for comparison
+        # Preprocessing is now done INSIDE the fit script; when it preprocesses,
+        # its visualization shows the raw data faintly behind the fitted data.
+        # Always remind the verifier to check for preprocessing-induced
+        # distortion (otherwise invisible because the fit is plotted against the
+        # processed curve).
+        prompt_parts.append(
+            "\n\n**PREPROCESSING CHECK:** Any preprocessing is done inside the "
+            "fit script. If the visualization shows a faint raw trace behind the "
+            "fitted data, verify the preprocessing did not distort the fitted "
+            "features (e.g. over-smoothing broadening a peak/linewidth, or a "
+            "baseline removing real signal). If it did, add an issues_found entry "
+            "with location 'preprocessing' and set recommended_action to 'none' — "
+            "recorded as a caveat, not a refit trigger."
+        )
+        # Original (raw) data for reference.
         if state.get("original_plot_bytes"):
-            prompt_parts.append("\n\n**ORIGINAL DATA (for reference):**")
+            prompt_parts.append("\n\n**ORIGINAL (RAW) DATA for reference:**")
             prompt_parts.append({"mime_type": "image/png", "data": state["original_plot_bytes"]})
 
         
@@ -3677,43 +3711,9 @@ Return JSON with:
                 spectrum_name = Path(data_path).stem
                 curve_data = self._load_curve_data(data_path)
 
-            # Apply preprocessing with locking support for series consistency
-            if self.preprocessor is not None:
-                try:
-                    if idx == 0 and state.get("first_spectrum_preprocessed"):
-                        # Reuse preprocessing from analyze() — avoid redundant LLM call
-                        curve_data = state.get("curve_data", curve_data)
-                        preprocess_quality = state.get(
-                            "first_spectrum_preprocess_quality", {}
-                        ) or {}
-                        locked_preprocessing_strategy = preprocess_quality.get("strategy")
-                        if locked_preprocessing_strategy:
-                            state["locked_preprocessing_strategy"] = locked_preprocessing_strategy
-                            self.logger.info(
-                                "📝 Preprocessing strategy locked (from planning stage): "
-                                f"{locked_preprocessing_strategy.get('reasoning', 'N/A')[:60]}"
-                            )
-                        else:
-                            self.logger.info("Preprocessed (reused from planning stage)")
-                    elif idx == 0:
-                        curve_data, preprocess_quality = self.preprocessor.run_preprocessing(
-                            curve_data, state.get("system_info", {})
-                        )
-                        locked_preprocessing_strategy = preprocess_quality.get("strategy")
-                        if locked_preprocessing_strategy:
-                            state["locked_preprocessing_strategy"] = locked_preprocessing_strategy
-                            self.logger.info(f"📝 Preprocessing strategy locked: {locked_preprocessing_strategy.get('reasoning', 'N/A')[:60]}")
-                        else:
-                            self.logger.info(f"Preprocessed (no lockable strategy returned)")
-                    else:
-                        curve_data, _ = self.preprocessor.run_preprocessing(
-                            curve_data,
-                            state.get("system_info", {}),
-                            locked_strategy=locked_preprocessing_strategy
-                        )
-                    self.logger.info(f"Preprocessed: {spectrum_name}")
-                except Exception as e:
-                    self.logger.warning(f"Preprocessing failed for {spectrum_name}: {e}, using raw data")
+            # Raw data is fed straight to the fit script, which owns preprocessing
+            # (see docs/preprocessing_in_fit_loop.md). No separate preprocessing
+            # step here.
 
             # Determine regime and set appropriate config
             regime_name = self._get_regime_for_spectrum(state, idx) or "default"
@@ -4218,7 +4218,6 @@ class AdaptiveRefitController:
         r2_threshold: float = 0.95,
         max_model_retries: int = 1,
         max_verification_iterations: int = 7,
-        preprocessor: Any = None,
         enable_human_feedback: bool = False,
         conformance_instructions: str = "",
     ):
@@ -4245,7 +4244,6 @@ class AdaptiveRefitController:
             max_model_retries=max_model_retries,
             enable_human_feedback=False,
             max_verification_iterations=max_verification_iterations,
-            preprocessor=preprocessor,
             conformance_instructions=conformance_instructions,
         )
 
@@ -4260,20 +4258,6 @@ class AdaptiveRefitController:
                 self.logger.error(f"Failed to load {spectrum_paths[idx]}: {e}")
                 return None
         return None
-
-    def _preprocess_spectrum(self, curve_data, state):
-        """Apply locked preprocessing strategy if available."""
-        if self._fitting_helper.preprocessor is None:
-            return curve_data
-        locked_strategy = state.get("locked_preprocessing_strategy")
-        try:
-            curve_data, _ = self._fitting_helper.preprocessor.run_preprocessing(
-                curve_data, state.get("system_info", {}),
-                locked_strategy=locked_strategy,
-            )
-        except Exception as e:
-            self.logger.warning(f"Preprocessing failed during refit: {e}")
-        return curve_data
 
     def _build_refit_state(self, state, curve_data, idx, name):
         """Build a temporary state dict for independent re-analysis."""
@@ -4453,7 +4437,6 @@ class AdaptiveRefitController:
             curve_data = self._load_spectrum(idx, spectrum_paths, spectrum_stack)
             if curve_data is None:
                 continue
-            curve_data = self._preprocess_spectrum(curve_data, state)
 
             refit_state = self._build_refit_state(state, curve_data, idx, name)
             if peer_r2:
@@ -4572,7 +4555,6 @@ class AdaptiveRefitController:
                 self.logger.warning(f"  Could not load spectrum data for {name}, skipping")
                 continue
 
-            curve_data = self._preprocess_spectrum(curve_data, state)
 
             refit_state = self._build_refit_state(state, curve_data, idx, name)
             spectrum_paths_list = state.get("spectrum_paths", [])
