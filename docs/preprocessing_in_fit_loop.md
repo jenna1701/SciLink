@@ -92,19 +92,43 @@ reference.
 
 ## Target architecture
 
-1. **The fit script owns the full chain.** Generate one artifact that does
-   `load raw → preprocess → fit → output`. The verifier then sees the *entire*
+1. **The fit script owns the full chain, as free-form generated code.** Generate
+   one artifact that does `load raw → preprocess → fit → output`, where the
+   *preprocess* part is **code the model writes itself** — whatever is
+   appropriate for the data — not a call to a fixed menu of operations or any
+   prescribed preprocessing tool/helper. The verifier then sees the *entire*
    transform and can reject preprocessing damage, not just model misfit.
 
-2. **Planning emits the preprocessing recipe jointly with the model.** One
-   locked plan covers both, so they are chosen coherently
-   (e.g. "do not smooth — it broadens the EPR line; fit the intrinsic
-   linewidth instead"; "fit domain is t ≥ t₀, not a crop").
+   This is a deliberate move away from the current prescriptive approach: today
+   `_llm_select_1d_strategy` returns a fixed schema
+   (`{apply_clip, apply_smoothing, smoothing_window}`) and `_apply_1d_strategy`
+   applies exactly those two operations. That menu is **removed**. Preprocessing
+   becomes generated code on the same footing as the fit code the agent already
+   writes — consistent with CLAUDE.md (skill code blocks are LLM-facing
+   reference, not executable surfaces; runnable specialization is generated, not
+   prescribed).
 
-3. **The anneal loop can revise preprocessing** the same way it revises the
-   model. If distortion is detected, regenerate with gentler/no preprocessing.
-   "Preprocessing aggressiveness" becomes an annealing knob alongside the model
-   constraint schedule.
+   A direct consequence: the **length-preserving vs length-changing distinction
+   dissolves.** It only existed because preprocessing was a separate step handing
+   a same-length array to a downstream fitter (the `output length == input
+   length` contract). Once preprocessing is code inside the fit script, a crop, a
+   bin, a smooth, and a baseline are all just lines the model writes; there is no
+   hand-off and no length contract. (Steps 1 & 3 — rerouting crop/ROI to the
+   planner — are the *interim* fix while preprocessing is still a separate step;
+   once it is in-script, ROI is simply part of the generated preprocessing/fit
+   domain.)
+
+2. **Planning decides the preprocessing *approach* jointly with the model**, and
+   the skill supplies the *knowledge* (not tools): e.g. "for EPR derivative
+   spectra do not smooth — it broadens the line; fit the intrinsic linewidth";
+   "TRPL: estimate t₀ at the peak, fit from there, background as a parameter."
+   The model reads that guidance and writes appropriate preprocessing code. One
+   locked plan covers preprocessing + model so they are coherent.
+
+3. **The anneal loop can revise the preprocessing code** the same way it revises
+   the model. If the verifier flags distortion, regenerate with a different
+   preprocessing choice (gentler/none). "Preprocessing aggressiveness" becomes an
+   annealing knob alongside the model constraint schedule.
 
 ## The one detail that makes or breaks it
 
@@ -136,7 +160,8 @@ Once preprocessing is part of planning + the generated fit script, it inherits
 the skill mechanism for free. The skill's existing fixed sections carry it:
 
 - `planning` → how to approach preprocessing for this technique;
-- `implementation` → the preprocessing recipe inside the generated script;
+- `implementation` → guidance the model uses to *write its own* preprocessing
+  code in the generated fit script (not a prescribed recipe or tool to call);
 - `validation` → "check the raw-vs-processed overlay did not distort the line."
 
 **Recommendation:** reuse the existing sections (`planning` + `implementation`)
@@ -185,25 +210,35 @@ path, owns the field.
 
 ## Migration (incremental, low-risk first)
 
-1. **Reject-and-reroute, not fail:** make the preprocessor refuse
-   length-changing `custom_processing_instruction`s and surface them to the
-   planner as a fit-domain hint. (Kills the live crop dead-end; smallest change.)
-2. **Give the verifier the raw data + raw-vs-processed overlay.** Safety
-   mechanism; valuable even before full relocation.
-3. **Move ROI/fit-domain and background into the model/plan** (background as a
-   fit parameter, not a subtraction; domain as a fit window, not a crop).
-4. **Fold the remaining length-preserving transforms into the generated fit
-   script**, locked jointly with the model, and add a preprocessing-aggressiveness
-   knob to the anneal schedule.
+1. **[DONE — PR #215] Reject-and-reroute, not fail:** the preprocessor refuses
+   length-changing `custom_processing_instruction`s (`FitDomainInstruction`) and
+   defers them to the planner. (Killed the live crop dead-end.)
+2. **[DONE — PR #215] Give the verifier the raw data + raw-vs-processed overlay.**
+   The safety mechanism; valuable even before full relocation.
+3. **[DONE — PR #215] Surface ROI/background to the planner**
+   (`_append_fit_domain_guidance`): domain as a fit window, background as a fit
+   parameter — not preprocessing.
+4. **[Step 4 — pending] Make preprocessing free-form generated code in the fit
+   script.** Remove the prescriptive `_llm_select_1d_strategy` /
+   `_apply_1d_strategy` menu. The model writes whatever preprocessing is
+   appropriate (guided by the active skill's knowledge), inside the same
+   generated artifact as the fit; lock it jointly with the model for series
+   consistency; add a preprocessing-aggressiveness knob to the anneal schedule
+   so the loop can revise it. The length-preserving/changing distinction goes
+   away (no separate-step contract), so steps 1 & 3's reroute becomes a no-op
+   that can be retired once this lands.
 
-Steps 1–2 are independently shippable and remove the worst silent-failure modes;
-3–4 complete the relocation.
+Steps 1–3 (PR #215) are independently shippable and remove the worst
+silent-failure modes; Step 4 completes the relocation.
 
 ## Non-goals
 
-- Not proposing to delete the preprocessing helper code — its transforms remain,
-  they just move inside the verified loop and lose independent ROI/crop
-  authority.
 - Not a wholesale "one LLM call for everything" merge; the planner and fitter
-  stay distinct stages. Only the *responsibility boundaries* and *what the
-  verifier sees* change.
+  stay distinct stages. Only the *responsibility boundaries*, *what the verifier
+  sees*, and *who writes the preprocessing code* change.
+- Not prescribing preprocessing operations or tools. The point of Step 4 is the
+  opposite: the model writes its own preprocessing code from skill guidance. The
+  `_llm_select_1d_strategy` / `_apply_1d_strategy` fixed menu is removed, not
+  preserved. (A thin deterministic *loader*-level step may remain for genuinely
+  model-irrelevant, non-distorting hygiene — format/unit parsing, NaN handling,
+  ascending-x sorting — but that is data loading, not preprocessing choices.)
