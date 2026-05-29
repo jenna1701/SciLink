@@ -260,7 +260,11 @@ Write a function `analyze_feature(data, axis)` that:
 
 ### ADDITIONAL NOTES
 The variable `hspy_data` passed to your function contains: **{processing_note}**.
-If performing derivative-based operations (like `find_peaks` or `curve_fit`) on noisy data, consider applying appropriate smoothing to ensure convergence.
+This is the RAW cube — no smoothing/clipping/despiking has been applied for you
+(any cleaning done for decomposition is NOT in this array). Apply whatever
+noise/spike/negative handling you judge necessary for a stable per-pixel fit —
+the goal is fittable spectra — but do NOT erase the feature you are measuring.
+If performing derivative-based operations (like `find_peaks` or `curve_fit`) on noisy data, apply appropriate smoothing to ensure convergence.
 {hints_section}
 ### REQUIRED RETURN FORMAT
 {{
@@ -1620,7 +1624,11 @@ class RunDynamicAnalysisController:
         all_valid_maps = []
         all_valid_meta = []
 
-        optimal_data, processing_note = tools.get_optimal_analysis_data(state["hspy_data"])
+        # Feed the per-pixel codegen the RAW cube, not the cube cleaned for
+        # decomposition (despike/clip/mask is tuned for NMF and can distort the
+        # features being fit — e.g. clipping real low-loss negatives). The codegen
+        # owns its own fittability denoising. See docs/hyperspectral_codegen_relocation.md.
+        optimal_data, processing_note = tools.get_optimal_analysis_data(state["original_hspy_data"])
         self.logger.info(f"📊 Dynamic Analysis Prep: {processing_note}")
         
         # --- MAIN LOOP: Process each target description separately ---
