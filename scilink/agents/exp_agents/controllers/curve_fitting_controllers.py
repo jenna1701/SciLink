@@ -247,6 +247,26 @@ def _append_auxiliary_context(prompt: list, state: dict) -> None:
     })
 
 
+def _append_fit_domain_guidance(prompt: list, state: dict) -> None:
+    """Surface a custom processing instruction to the planner as fit-domain
+    guidance.
+
+    A "fit only the decay / this range" or "ignore the background" request is a
+    fit-domain decision (a fit window + a background parameter), not data
+    preprocessing — preprocessing stays length-preserving so the raw data is
+    fit. The instruction is otherwise only buried in the metadata JSON dump.
+    """
+    instruction = (state.get("system_info") or {}).get("custom_processing_instruction")
+    if not instruction:
+        return
+    prompt.append(
+        "\n## Fit-domain & background guidance\n"
+        f"User processing note: {instruction}\n"
+        "Express any region-of-interest as the FIT DOMAIN and any "
+        "background/baseline as a FIT PARAMETER — not as preprocessing."
+    )
+
+
 def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     """Append domain skill knowledge to an LLM prompt for the given stage.
 
@@ -1193,6 +1213,7 @@ class HumanFeedbackRefinementController:
         ]
 
         _append_objective_context(prompt, state)
+        _append_fit_domain_guidance(prompt, state)
 
         if state.get("analysis_hints"):
             prompt.append(f"\n## User Guidance\n{state['analysis_hints']}")
@@ -1448,6 +1469,7 @@ class HumanFeedbackRefinementController:
         ]
 
         _append_objective_context(prompt, state)
+        _append_fit_domain_guidance(prompt, state)
 
         if state.get("analysis_hints"):
             prompt.append(f"\n## Original Guidance\n{state['analysis_hints']}")
