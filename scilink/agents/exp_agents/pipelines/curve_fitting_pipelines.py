@@ -55,7 +55,6 @@ def create_unified_curve_fitting_pipeline(
     plot_fn: Callable,
     executor: Any,
     output_dir: str,
-    preprocessor: Any | None = None,
     literature_agent: Any | None = None,
     enable_human_feedback: bool = False,
     r2_threshold: float = 0.95,
@@ -120,7 +119,6 @@ def create_unified_curve_fitting_pipeline(
         plot_fn: Function to plot curve data
         executor: Script executor instance
         output_dir: Output directory path
-        preprocessor: Optional preprocessor agent
         literature_agent: Optional literature search agent
         enable_human_feedback: Enable human-in-the-loop refinement
         r2_threshold: Minimum acceptable R² value (default: 0.95)
@@ -189,7 +187,6 @@ def create_unified_curve_fitting_pipeline(
             enable_human_feedback=enable_human_feedback,
             outlier_sigma=outlier_sigma,
             max_verification_iterations=max_verification_iterations,
-            preprocessor=preprocessor,
             conformance_instructions=PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
             parallel_workers=parallel_workers,
         )
@@ -212,7 +209,6 @@ def create_unified_curve_fitting_pipeline(
             r2_threshold=r2_threshold,
             max_model_retries=max_model_retries,
             max_verification_iterations=max_verification_iterations,
-            preprocessor=preprocessor,
             enable_human_feedback=enable_human_feedback,
             conformance_instructions=PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
         )
@@ -281,7 +277,6 @@ def create_curve_fitting_pipeline(
     plot_fn: Callable,
     executor: Any,
     output_dir: str,
-    preprocessor: Any | None = None,
     literature_agent: Any | None = None,
     enable_human_feedback: bool = False,
     settings: dict | None = None,  # Deprecated
@@ -315,7 +310,6 @@ def create_curve_fitting_pipeline(
         plot_fn=plot_fn,
         executor=executor,
         output_dir=output_dir,
-        preprocessor=preprocessor,
         literature_agent=literature_agent,
         enable_human_feedback=enable_human_feedback,
         r2_threshold=r2_threshold,

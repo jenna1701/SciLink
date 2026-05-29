@@ -513,25 +513,18 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "output_directory": str(self.output_dir)
                 }
         
-        # Optional preprocessing of first spectrum
+        # No separate preprocessing: the fit script owns preprocessing (see
+        # docs/preprocessing_in_fit_loop.md). The planner sees the raw first
+        # spectrum, consistent with what the fit script receives.
         processed_first_spectrum = first_spectrum
         first_spectrum_preprocess_quality = None
-        if self.preprocessor is not None:
-            try:
-                processed_first_spectrum, first_spectrum_preprocess_quality = (
-                    self.preprocessor.run_preprocessing(
-                        first_spectrum, self._handle_system_info(system_info)
-                    )
-                )
-            except Exception as e:
-                self.logger.warning(f"Preprocessing failed: {e}, using raw data")
-        
+
         # Generate initial plot
         original_plot_bytes = plot_curve_to_bytes(
-            processed_first_spectrum, 
+            processed_first_spectrum,
             self._handle_system_info(system_info)
         )
-        
+
         # Compute statistics for first spectrum
         data_statistics = self._compute_statistics(processed_first_spectrum)
         
@@ -675,7 +668,6 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             plot_fn=plot_curve_to_bytes,
             executor=self.executor,
             output_dir=str(self.output_dir),
-            preprocessor=self.preprocessor,
             literature_agent=self.literature_agent,
             enable_human_feedback=self.enable_human_feedback,
             r2_threshold=effective_r2_threshold,

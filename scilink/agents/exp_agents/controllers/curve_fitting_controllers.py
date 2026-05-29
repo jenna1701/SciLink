@@ -1714,7 +1714,6 @@ Your guidance: '''
         enable_human_feedback: bool = False,
         outlier_sigma: float = None,
         max_verification_iterations: int = None,
-        preprocessor: Any = None,
         conformance_instructions: str = "",
         parallel_workers: Optional[int] = None,
     ):
@@ -1738,7 +1737,6 @@ Your guidance: '''
         self.enable_human_feedback = enable_human_feedback
         self.outlier_sigma = outlier_sigma if outlier_sigma is not None else self.DEFAULT_OUTLIER_SIGMA
         self.max_verification_iterations = max_verification_iterations if max_verification_iterations is not None else self.DEFAULT_MAX_VERIFICATION_ITERATIONS
-        self.preprocessor = preprocessor
         # Non-anchor parallel fan-out. Defaults to 1 (serial, byte-identical
         # to pre-feature behavior). Anchor processing always runs serially.
         self.parallel_workers = _resolve_parallel_workers(parallel_workers)
@@ -2311,27 +2309,6 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
         "Use as context. Override any rule if the data warrants it — "
         "explain the deviation.\n\n",
     )
-
-    def _plot_raw_vs_processed(self, raw: np.ndarray, processed: np.ndarray, name: str = "") -> bytes:
-        """Overlay raw vs preprocessed curve as PNG bytes.
-
-        Given to the verifier so it can catch preprocessing-induced distortion
-        (e.g. over-smoothing broadening a peak / linewidth, a baseline removing
-        real signal) — the failure mode that is otherwise invisible because the
-        fit is plotted only against the already-processed data.
-        """
-        import io
-        import matplotlib.pyplot as plt
-        fig, ax = plt.subplots(figsize=(7, 4))
-        ax.plot(raw[:, 0], raw[:, 1], color="0.6", lw=0.8, label="raw")
-        ax.plot(processed[:, 0], processed[:, 1], color="#c0392b", lw=1.0, label="preprocessed")
-        ax.set_title(f"Raw vs preprocessed{(': ' + name) if name else ''}")
-        ax.set_xlabel("x"); ax.set_ylabel("y"); ax.legend(fontsize=8)
-        fig.tight_layout()
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=110)
-        plt.close(fig)
-        return buf.getvalue()
 
     def _verify_fit_with_llm(self, state: dict, fit_result: dict, history: List[dict] = None, verification_iter: int = 0, annealing_level: int | None = None, best_result: dict | None = None, best_verification: dict | None = None) -> Optional[dict]:
         """
@@ -3734,66 +3711,9 @@ Return JSON with:
                 spectrum_name = Path(data_path).stem
                 curve_data = self._load_curve_data(data_path)
 
-            # Keep the raw curve so we can show the verifier a raw-vs-processed
-            # overlay (preprocessing distortion is otherwise invisible).
-            raw_curve_data = curve_data.copy() if isinstance(curve_data, np.ndarray) else None
-
-            # Apply preprocessing with locking support for series consistency
-            if self.preprocessor is not None:
-                try:
-                    if idx == 0 and state.get("first_spectrum_preprocessed"):
-                        # Reuse preprocessing from analyze() — avoid redundant LLM call
-                        curve_data = state.get("curve_data", curve_data)
-                        preprocess_quality = state.get(
-                            "first_spectrum_preprocess_quality", {}
-                        ) or {}
-                        locked_preprocessing_strategy = preprocess_quality.get("strategy")
-                        if locked_preprocessing_strategy:
-                            state["locked_preprocessing_strategy"] = locked_preprocessing_strategy
-                            self.logger.info(
-                                "📝 Preprocessing strategy locked (from planning stage): "
-                                f"{locked_preprocessing_strategy.get('reasoning', 'N/A')[:60]}"
-                            )
-                        else:
-                            self.logger.info("Preprocessed (reused from planning stage)")
-                    elif idx == 0:
-                        curve_data, preprocess_quality = self.preprocessor.run_preprocessing(
-                            curve_data, state.get("system_info", {})
-                        )
-                        locked_preprocessing_strategy = preprocess_quality.get("strategy")
-                        if locked_preprocessing_strategy:
-                            state["locked_preprocessing_strategy"] = locked_preprocessing_strategy
-                            self.logger.info(f"📝 Preprocessing strategy locked: {locked_preprocessing_strategy.get('reasoning', 'N/A')[:60]}")
-                        else:
-                            self.logger.info(f"Preprocessed (no lockable strategy returned)")
-                    else:
-                        curve_data, _ = self.preprocessor.run_preprocessing(
-                            curve_data,
-                            state.get("system_info", {}),
-                            locked_strategy=locked_preprocessing_strategy
-                        )
-                    self.logger.info(f"Preprocessed: {spectrum_name}")
-                except Exception as e:
-                    self.logger.warning(f"Preprocessing failed for {spectrum_name}: {e}, using raw data")
-
-            # Raw-vs-preprocessed overlay for the verifier — only when
-            # preprocessing actually changed the data (same length, different
-            # values). Cleared otherwise so a stale overlay never carries over.
-            state.pop("preprocess_overlay_bytes", None)
-            try:
-                if (raw_curve_data is not None
-                        and isinstance(curve_data, np.ndarray)
-                        and curve_data.shape == raw_curve_data.shape
-                        and not np.array_equal(curve_data, raw_curve_data)):
-                    state["preprocess_overlay_bytes"] = self._plot_raw_vs_processed(
-                        raw_curve_data, curve_data, spectrum_name
-                    )
-                    self.logger.info(
-                        "   🔬 Raw-vs-preprocessed overlay attached for verification "
-                        "(preprocessing changed the data)."
-                    )
-            except Exception as e:
-                self.logger.debug(f"raw-vs-processed overlay skipped: {e}")
+            # Raw data is fed straight to the fit script, which owns preprocessing
+            # (see docs/preprocessing_in_fit_loop.md). No separate preprocessing
+            # step here.
 
             # Determine regime and set appropriate config
             regime_name = self._get_regime_for_spectrum(state, idx) or "default"
@@ -4298,7 +4218,6 @@ class AdaptiveRefitController:
         r2_threshold: float = 0.95,
         max_model_retries: int = 1,
         max_verification_iterations: int = 7,
-        preprocessor: Any = None,
         enable_human_feedback: bool = False,
         conformance_instructions: str = "",
     ):
@@ -4325,7 +4244,6 @@ class AdaptiveRefitController:
             max_model_retries=max_model_retries,
             enable_human_feedback=False,
             max_verification_iterations=max_verification_iterations,
-            preprocessor=preprocessor,
             conformance_instructions=conformance_instructions,
         )
 
@@ -4340,20 +4258,6 @@ class AdaptiveRefitController:
                 self.logger.error(f"Failed to load {spectrum_paths[idx]}: {e}")
                 return None
         return None
-
-    def _preprocess_spectrum(self, curve_data, state):
-        """Apply locked preprocessing strategy if available."""
-        if self._fitting_helper.preprocessor is None:
-            return curve_data
-        locked_strategy = state.get("locked_preprocessing_strategy")
-        try:
-            curve_data, _ = self._fitting_helper.preprocessor.run_preprocessing(
-                curve_data, state.get("system_info", {}),
-                locked_strategy=locked_strategy,
-            )
-        except Exception as e:
-            self.logger.warning(f"Preprocessing failed during refit: {e}")
-        return curve_data
 
     def _build_refit_state(self, state, curve_data, idx, name):
         """Build a temporary state dict for independent re-analysis."""
@@ -4533,7 +4437,6 @@ class AdaptiveRefitController:
             curve_data = self._load_spectrum(idx, spectrum_paths, spectrum_stack)
             if curve_data is None:
                 continue
-            curve_data = self._preprocess_spectrum(curve_data, state)
 
             refit_state = self._build_refit_state(state, curve_data, idx, name)
             if peer_r2:
@@ -4652,7 +4555,6 @@ class AdaptiveRefitController:
                 self.logger.warning(f"  Could not load spectrum data for {name}, skipping")
                 continue
 
-            curve_data = self._preprocess_spectrum(curve_data, state)
 
             refit_state = self._build_refit_state(state, curve_data, idx, name)
             spectrum_paths_list = state.get("spectrum_paths", [])
