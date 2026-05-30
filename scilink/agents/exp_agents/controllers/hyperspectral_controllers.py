@@ -169,6 +169,7 @@ def build_code_generation_prompt(
     required_outputs: list[str] | None = None,
     skill_implementation: str | None = None,
     reconstruction_available: bool = False,
+    auxiliary_operands: dict | None = None,
 ) -> str:
     skill_section = ""
     if skill_implementation:
@@ -219,11 +220,35 @@ Frame your feature extraction around answering this objective. Prioritize extrac
 The user has indicated interest in: {hints}
 Prioritize this guidance in your analysis, but also capture any other significant features present in the data.
 """
-    signature = (
-        "analyze_feature(data, axis, reconstruction=None)"
-        if reconstruction_available
-        else "analyze_feature(data, axis)"
-    )
+    _sig_extra = []
+    if reconstruction_available:
+        _sig_extra.append("reconstruction=None")
+    if auxiliary_operands:
+        _sig_extra.append("auxiliary=None")
+    signature = "analyze_feature(data, axis" + "".join(f", {p}" for p in _sig_extra) + ")"
+
+    auxiliary_section = ""
+    if auxiliary_operands:
+        operand_lines = "\n".join(
+            f'  - `auxiliary["{name}"]`: array of shape {shape}'
+            for name, shape in auxiliary_operands.items()
+        )
+        auxiliary_section = f"""
+
+### OPTIONAL COMPANION OPERAND(S) — `auxiliary`
+Your function is also handed `auxiliary`, a dict of user-supplied companion
+dataset(s) that are shape-aligned with the primary data and so may be used
+*numerically*:
+{operand_lines}
+
+Use these ONLY if your method needs them — e.g. divide the primary by a
+reference/baseline spectrum, normalize against an I₀ reference, or use one
+map to mask/weight another. The RAW `data` remains the base input; `auxiliary`
+is an option, never required. Do NOT report findings about an auxiliary as if
+it were a measurement — it is an operand for transforming the primary. Always
+guard with `if auxiliary and "<name>" in auxiliary:` before use; `auxiliary`
+may be `None` or empty.
+"""
 
     reconstruction_section = ""
     if reconstruction_available:
@@ -291,7 +316,7 @@ This is the RAW cube — no smoothing/clipping/despiking has been applied for yo
 noise/spike/negative handling you judge necessary for a stable per-pixel fit —
 the goal is fittable spectra — but do NOT erase the feature you are measuring.
 If performing derivative-based operations (like `find_peaks` or `curve_fit`) on noisy data, apply appropriate smoothing to ensure convergence.
-{reconstruction_section}{hints_section}
+{reconstruction_section}{auxiliary_section}{hints_section}
 ### REQUIRED RETURN FORMAT
 {{
     "maps": {{
@@ -325,17 +350,27 @@ def _sanitize_filename(text: str) -> str:
     return safe_text
 
 
-def _invoke_analyze_feature(func, data, axis, reconstruction):
-    """Call the generated ``analyze_feature``, passing the optional rank-k
-    ``reconstruction`` only when the function actually declares it.
+def _invoke_analyze_feature(func, data, axis, reconstruction=None, *, auxiliary=None):
+    """Call the generated ``analyze_feature``, passing the optional operands
+    (``reconstruction``, ``auxiliary``) only when the function declares them.
 
-    The reconstruction is an *option*, not a contract (issue #219): a function
-    that keeps the legacy two-argument signature is valid and simply fits the
-    raw ``data``. We never force the third argument on such a function — doing
-    so would raise ``TypeError`` and break a perfectly good 2-arg fit.
+    Both are *options*, not a contract: a function that keeps the legacy
+    two-argument signature is valid and simply fits the raw ``data`` (issue
+    #219 for ``reconstruction``; #226 for ``auxiliary``). We never force an
+    extra argument on a function that doesn't accept it — that would raise
+    ``TypeError`` and break a perfectly good fit.
+
+    ``auxiliary`` is a ``{label: array}`` dict of shape-aligned companion
+    operands (e.g. a reference spectrum to divide by); passed by keyword only.
     """
-    if reconstruction is None:
+    optional = {}
+    if reconstruction is not None:
+        optional["reconstruction"] = reconstruction
+    if auxiliary:  # non-empty dict
+        optional["auxiliary"] = auxiliary
+    if not optional:
         return func(data, axis)
+
     try:
         params = inspect.signature(func).parameters
     except (TypeError, ValueError):
@@ -343,17 +378,27 @@ def _invoke_analyze_feature(func, data, axis, reconstruction):
     accepts_var_kw = any(
         p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
     )
-    if "reconstruction" in params or accepts_var_kw:
-        return func(data, axis, reconstruction=reconstruction)
-    positional = [
-        p for p in params.values()
-        if p.kind in (inspect.Parameter.POSITIONAL_ONLY,
-                      inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ]
-    if len(positional) >= 3 or any(
-        p.kind == inspect.Parameter.VAR_POSITIONAL for p in params.values()
-    ):
-        return func(data, axis, reconstruction)
+
+    kwargs = {
+        name: val for name, val in optional.items()
+        if name in params or accepts_var_kw
+    }
+    if kwargs:
+        return func(data, axis, **kwargs)
+
+    # Back-compat: a legacy 3-positional ``def f(d, a, r)`` whose 3rd param is
+    # named something other than ``reconstruction`` — honored only when
+    # reconstruction is the sole operand (the #219 shape).
+    if list(optional) == ["reconstruction"]:
+        positional = [
+            p for p in params.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                          inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        if len(positional) >= 3 or any(
+            p.kind == inspect.Parameter.VAR_POSITIONAL for p in params.values()
+        ):
+            return func(data, axis, reconstruction)
     return func(data, axis)
 
 class RunPreprocessingController:
@@ -1812,6 +1857,35 @@ class RunDynamicAnalysisController:
                 self.logger.warning(f"Could not build reconstruction cube: {e}")
                 reconstruction = None
 
+        # Offer a shape-aligned auxiliary dataset as an OPTIONAL numerical
+        # operand (issue #226): the user-supplied companion (reference/baseline/
+        # other channel) the generated code MAY divide by / mask with. Kept as
+        # context-only (NOT an operand) when it can't be aligned to the primary
+        # — v1 does no resampling. Raw `data` stays the base input.
+        auxiliary_operands = {}
+        aux_arr = state.get("auxiliary_array")
+        if aux_arr is not None:
+            aux_arr = np.asarray(aux_arr)
+            h_, w_, e_ = optimal_data.shape
+            label = state.get("auxiliary_label") or "auxiliary"
+            aligned = (
+                (aux_arr.ndim == 1 and aux_arr.shape[0] == e_)   # reference spectrum (per channel)
+                or (aux_arr.ndim == 2 and aux_arr.shape == (h_, w_))  # per-pixel map (mask/normalize)
+                or (aux_arr.shape == optimal_data.shape)         # full companion cube
+            )
+            if aligned:
+                auxiliary_operands[label] = aux_arr
+                self.logger.info(
+                    f"🧩 Offering auxiliary '{label}' {aux_arr.shape} as an "
+                    f"optional codegen operand."
+                )
+            else:
+                self.logger.info(
+                    f"Auxiliary '{label}' shape {aux_arr.shape} not aligned with "
+                    f"primary {optimal_data.shape}; kept as context only "
+                    f"(not a codegen operand)."
+                )
+
         # --- MAIN LOOP: Process each target description separately ---
         for i, target in enumerate(custom_targets, 1):
             target_desc = target.get("description", "Analyze feature")
@@ -1844,6 +1918,7 @@ class RunDynamicAnalysisController:
                 # active or no implementation section is defined.
                 skill_implementation=_render_skill_block(state, "implementation"),
                 reconstruction_available=reconstruction is not None,
+                auxiliary_operands={k: v.shape for k, v in auxiliary_operands.items()},
             )
 
             # Append a preprocessing-mask hint when one exists and identifies
@@ -1908,7 +1983,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         self.logger.info(f"    Executing generated code (timeout: {self.executor_timeout}s)...")
                         func = local_scope["analyze_feature"]
                         result_dict = _invoke_analyze_feature(
-                            func, optimal_data, state["energy_axis"], reconstruction
+                            func, optimal_data, state["energy_axis"], reconstruction,
+                            auxiliary=auxiliary_operands,
                         )
                     
                     # Validation
