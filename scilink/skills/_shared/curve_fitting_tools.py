@@ -129,8 +129,75 @@ def select_xy_columns(data, system_info=None, logger_=None, column_names=None) -
     return _try_orient_xy(np.column_stack([arr[:, xi], arr[:, yi]]))
 
 
+def describe_columns(data, names=None):
+    """Describe a >2-column table for the planning LLM, or None for <=2 columns.
+
+    Oriented to (n_points, n_cols) to match :func:`select_xy_columns`, so the
+    column indices the LLM returns line up with selection. Names are used when
+    provided (DataFrame/CSV header), else positional ``col_i``.
+    """
+    arr = np.asarray(data)
+    if arr.ndim != 2:
+        return None
+    if arr.shape[0] < arr.shape[1]:   # orient: many more points than columns
+        arr = arr.T
+    n_cols = arr.shape[1]
+    if n_cols <= 2:
+        return None
+    names_known = bool(names) and len(names) >= n_cols
+    names = ([str(c) for c in names[:n_cols]] if names_known
+             else [f"col_{i}" for i in range(n_cols)])
+    per_column = []
+    for i in range(n_cols):
+        col = arr[:, i]
+        is_num = np.issubdtype(col.dtype, np.number)
+        finite = col[np.isfinite(col)] if is_num else col
+        mono = (is_num and col.size >= 2
+                and (np.all(np.diff(col) > 0) or np.all(np.diff(col) < 0)))
+        per_column.append({
+            "index": i, "name": names[i],
+            "min": float(np.min(finite)) if is_num and finite.size else None,
+            "max": float(np.max(finite)) if is_num and finite.size else None,
+            "monotonic": bool(mono),
+        })
+    return {"n_columns": n_cols, "names": names, "names_known": names_known,
+            "per_column": per_column, "preview_rows": arr[:5].tolist()}
+
+
+def sniff_column_names(data_path):
+    """Best-effort header sniff for a delimited text file → column names or None.
+
+    None for headerless files (every header token parses as a number) and for
+    formats without a textual header (.npy / binary)."""
+    ext = os.path.splitext(str(data_path))[1].lower()
+    if ext not in (".csv", ".tsv", ".dat", ".txt"):
+        return None
+    try:
+        import pandas as pd
+        sep = "\t" if ext == ".tsv" else ("," if ext == ".csv" else r"\s+")
+        df = pd.read_csv(data_path, sep=sep, comment="#", nrows=5, engine="python")
+        cols = [str(c) for c in df.columns]
+
+        def _isnum(s):
+            cands = [s]
+            if s.count(".") > 1:           # drop pandas '.N' duplicate-name suffix
+                cands.append(s.rsplit(".", 1)[0])
+            for c in cands:
+                try:
+                    float(c); return True
+                except ValueError:
+                    pass
+            return False
+        # If most "names" parse as numbers, there was no header row (the data row
+        # was misread as the header) → positional names are the safe choice.
+        numeric = sum(_isnum(c) for c in cols)
+        return None if numeric * 2 >= len(cols) else cols
+    except Exception:
+        return None
+
+
 def load_curve_data(data_path: str, auto_orient: bool = True,
-                    system_info: dict = None) -> np.ndarray:
+                    system_info: dict = None, column_names: list = None) -> np.ndarray:
     """
     Robustly loads curve data (X, Y) from various file formats.
     Handles .npy, .h5/.hdf5/.nxs (NeXus), CSV, TSV, and whitespace separation
@@ -141,14 +208,16 @@ def load_curve_data(data_path: str, auto_orient: bool = True,
     oriented so the monotonic (X) column comes first, and a >2-column table (an
     extra error/weight column, multiple channels) is reduced to the chosen X/Y
     pair — guided by ``system_info`` (``x_column``/``y_column`` or ``columns``)
-    when given, else by an axis-name / monotonicity heuristic. Pass
-    ``auto_orient=False`` for legacy raw-layout behavior (no reduction).
+    and ``column_names`` when given, else by an axis-name / monotonicity
+    heuristic. Pass ``auto_orient=False`` for legacy raw-layout behavior.
     """
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"File not found: {data_path}")
 
     def _finish(arr):
-        return select_xy_columns(arr, system_info=system_info) if auto_orient else arr
+        return (select_xy_columns(arr, system_info=system_info,
+                                  column_names=column_names)
+                if auto_orient else arr)
 
     # Native numpy format
     if data_path.endswith('.npy'):
