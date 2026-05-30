@@ -58,7 +58,8 @@ decide):
 - A MATLAB `.mat` (or `.npz`/HDF5) where some keys are arrays (data) and others
   are scalars/strings (metadata).
 - An HDF5/NeXus dataset carrying metadata in attributes alongside the array.
-- A vendor container interleaving an acquisition-parameter block with the signal.
+- A `.tif`/`.tiff` carrying acquisition metadata in TIFF tags / ImageDescription
+  (ImageJ `key=value` block or OME-XML) alongside the pixel array.
 Identify which bytes/keys/lines are data vs metadata from the probe, then:
 
 Write a Python script that:
@@ -88,9 +89,10 @@ HARD CONSTRAINTS (a violation fails verification):
   analyze the data. The data you write MUST be the original values, unchanged.
 - The reconstruction MUST reproduce the original file's data and metadata.
 - Allowed libraries ONLY: numpy, pandas, json, csv, struct, io, re, h5py,
-  scipy.io (for MATLAB .mat read/write ONLY), os, pathlib. Do NOT import
-  analysis libraries — sklearn, lmfit, torch, cv2, skimage, matplotlib, or any
-  other scipy submodule (optimize, signal, ndimage, interpolate, stats, fft, ...).
+  scipy.io (for MATLAB .mat read/write ONLY), PIL/Pillow (for TIFF tags /
+  ImageDescription), os, pathlib. Do NOT import analysis libraries — sklearn,
+  lmfit, torch, cv2, skimage, matplotlib, or any other scipy submodule
+  (optimize, signal, ndimage, interpolate, stats, fft, ...).
 - No network, no plotting.
 
 Respond with a JSON object: {{"script": "<the full python script>"}}
@@ -258,6 +260,39 @@ def _mat_equal(original: Path, recon: Path) -> bool:
     return all(_members_equal(a[k], b[k]) for k in ka)
 
 
+def _tif_equal(original: Path, recon: Path) -> bool:
+    """Content-aware TIFF comparison: pixel array(s) numeric-tolerant, tags exact.
+
+    A faithful TIFF rewrite is rarely byte-identical (encoder, strip/tile layout,
+    tag order), so compare decoded pixels per page plus the tag dict. ``PIL`` is
+    an allowed prep library; if unavailable we cannot verify → reject.
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return False
+    try:
+        with Image.open(original) as ia, Image.open(recon) as ib:
+            na, nb = getattr(ia, "n_frames", 1), getattr(ib, "n_frames", 1)
+            if na != nb:
+                return False
+            for i in range(na):
+                ia.seek(i)
+                ib.seek(i)
+                if not _members_equal(np.asarray(ia), np.asarray(ib)):
+                    return False
+                ta = dict(getattr(ia, "tag_v2", {}) or {})
+                tb = dict(getattr(ib, "tag_v2", {}) or {})
+                if set(ta) != set(tb):
+                    return False
+                # Tags must be reproduced exactly (metadata losslessness).
+                if any(str(ta[k]) != str(tb.get(k)) for k in ta):
+                    return False
+            return True
+    except Exception:
+        return False
+
+
 def _roundtrip_ok(original: Path, recon: Path) -> bool:
     """Tolerant lossless check: does ``recon`` reproduce ``original``?"""
     try:
@@ -281,6 +316,8 @@ def _roundtrip_ok(original: Path, recon: Path) -> bool:
             return _h5_equal(original, recon)
         if ext == ".mat":
             return _mat_equal(original, recon)
+        if ext in (".tif", ".tiff"):
+            return _tif_equal(original, recon)
         if ext in (".csv", ".tsv", ".txt", ".dat"):
             return _text_equal_tolerant(original.read_text(errors="replace"),
                                         recon.read_text(errors="replace"))
