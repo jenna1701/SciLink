@@ -29,6 +29,20 @@ _PROBE_MAX_FILES = 60
 _PROBE_TEXT_HEAD = 400
 
 
+def _has_comment_header(path: Path) -> bool:
+    """True if the file's first non-blank line is a ``#`` comment — a quick signal
+    that a CSV/text carries a leading metadata header block worth splitting out."""
+    try:
+        with open(path, "r", errors="replace") as fh:
+            for line in fh:
+                s = line.strip()
+                if s:
+                    return s.startswith("#")
+    except OSError:
+        return False
+    return False
+
+
 def _probe_file(path: Path) -> Dict[str, Any]:
     """Content-probe a single file for routing. Never raises — any failure
     is reported in the returned dict's ``note`` field."""
@@ -43,6 +57,38 @@ def _probe_file(path: Path) -> Dict[str, Any]:
             import numpy as np
             arr = np.load(path, mmap_mode="r", allow_pickle=False)
             info.update(kind="array", shape=list(arr.shape), dtype=str(arr.dtype))
+        elif ext == ".npz":
+            import numpy as np
+            with np.load(path, allow_pickle=False) as z:
+                files = list(z.files)
+                info.update(kind="npz", keys=sorted(files))
+                try:
+                    info["shapes"] = {k: list(z[k].shape) for k in files[:40]}
+                except Exception:  # noqa: BLE001 - shapes are a best-effort extra
+                    pass
+        elif ext in (".h5", ".hdf5", ".nxs", ".nx"):
+            import h5py
+            names: list = []
+            with h5py.File(path, "r") as f:
+                f.visititems(lambda n, o: names.append(n))
+                root_attrs = sorted(f.attrs.keys())
+            info.update(kind="hdf5", datasets=sorted(names)[:80],
+                        root_attrs=root_attrs[:40])
+        elif ext == ".mat":
+            # whosmat reads the directory without loading arrays (cheap); v7.3
+            # .mat are HDF5 and raise NotImplementedError → probe via h5py.
+            try:
+                from scipy.io import whosmat
+                info.update(kind="mat",
+                            keys=sorted(n for n, _, _ in whosmat(path)),
+                            mat_version="<=v7")
+            except NotImplementedError:
+                import h5py
+                names = []
+                with h5py.File(path, "r") as f:
+                    f.visititems(lambda n, o: names.append(n))
+                info.update(kind="hdf5", datasets=sorted(names)[:80],
+                            mat_version="v7.3")
         elif ext in (".tif", ".tiff", ".png", ".jpg", ".jpeg"):
             from PIL import Image
             with Image.open(path) as im:
@@ -50,12 +96,19 @@ def _probe_file(path: Path) -> Dict[str, Any]:
                             mode=im.mode, n_frames=getattr(im, "n_frames", 1))
         elif ext in (".csv", ".tsv"):
             import pandas as pd
-            df = pd.read_csv(path, sep="\t" if ext == ".tsv" else ",", nrows=200)
+            sep = "\t" if ext == ".tsv" else ","
+            # comment="#" skips a leading metadata/comment header block — the
+            # canonical "combined" CSV (instrument/ImageJ exports) — so the probed
+            # columns reflect the real table, not the first comment line. Without
+            # it, combined CSVs get garbage column signatures and fail to cluster.
+            df = pd.read_csv(path, sep=sep, nrows=200, comment="#",
+                             skip_blank_lines=True)
             info.update(kind="table", n_columns=int(df.shape[1]),
                         sampled_rows=int(df.shape[0]),
                         columns=[str(c) for c in df.columns[:40]],
                         dtypes={str(c): str(t)
-                                for c, t in list(df.dtypes.items())[:40]})
+                                for c, t in list(df.dtypes.items())[:40]},
+                        has_comment_header=_has_comment_header(path))
         elif ext == ".xlsx":
             import pandas as pd
             df = pd.read_excel(path, nrows=200)
@@ -408,63 +461,82 @@ class MetaOrchestratorTools:
         # repackaging before delegation: split a single combined data+metadata
         # file into a data file + a metadata JSON. Round-trip verified; NEVER
         # used for analysis/computation — that is always delegated.
-        def prepare_inputs(path: str) -> str:
-            from ...utils.file_prep import prepare_inputs as _split_file
+        def prepare_inputs(path) -> str:
+            from ...utils.file_prep import (prepare_inputs as _split_file,
+                                            prepare_inputs_batch as _split_batch)
             from ...executors import ScriptExecutor, require_sandbox_approval
-            p = Path(path)
-            if not p.exists() or not p.is_file():
+            paths = [path] if isinstance(path, str) else list(path or [])
+            if not paths:
                 return json.dumps({"status": "error",
-                                   "message": f"File not found: {p}"})
+                                   "message": "No file path provided."})
+            pths = [Path(p) for p in paths]
+            missing = [str(p) for p in pths if not (p.exists() and p.is_file())]
+            if missing:
+                return json.dumps({"status": "error",
+                                   "message": "File(s) not found: " + ", ".join(missing)})
             if not require_sandbox_approval(
                 context="Meta agent file preparation (lossless data/metadata split)"
             ):
                 return json.dumps({
                     "status": "error",
-                    "message": "Code execution declined; cannot prepare the file. "
-                               "Delegate it to the specialist as-is.",
+                    "message": "Code execution declined; cannot prepare the file(s). "
+                               "Delegate them to the specialist as-is.",
                 })
-            try:
-                probe = _probe_file(p)
-            except Exception:
-                probe = None
-            result = _split_file(
-                p,
-                model=self.orch.model,
-                executor=ScriptExecutor(timeout=120),
-                output_dir=self.orch.base_dir / "prepared",
-                probe=probe,
-                logger=self.logger,
-                max_retries=2,  # 3 attempts total — binary containers (HDF5/.mat)
-                                # often need a correction pass; the round-trip net
-                                # keeps a bad accept unlikely, so retries are cheap.
-            )
+            probes = []
+            for p in pths:
+                try:
+                    probes.append(_probe_file(p))
+                except Exception:  # noqa: BLE001
+                    probes.append(None)
+            out_dir = self.orch.base_dir / "prepared"
+            executor = ScriptExecutor(timeout=120)
+            # max_retries=2 → 3 attempts: binary containers often need a correction
+            # pass; the round-trip net keeps a bad accept unlikely, so retries cheap.
+            if len(pths) == 1:
+                result = _split_file(pths[0], model=self.orch.model, executor=executor,
+                                     output_dir=out_dir, probe=probes[0],
+                                     logger=self.logger, max_retries=2)
+            else:
+                result = _split_batch(pths, model=self.orch.model, executor=executor,
+                                      output_dir=out_dir, probes=probes,
+                                      logger=self.logger, max_retries=2)
             return json.dumps(result, default=str)
 
         self._register_tool(
             func=prepare_inputs,
             name="prepare_inputs",
             description=(
-                "Split ONE combined file that holds BOTH data and metadata into a "
-                "separate data file + metadata JSON, so the specialist receives a "
-                "clean (data, metadata) pair. Returns data_path + metadata_path; "
-                "thread them into the next delegate_to_* call. Use after "
-                "inspect_uploads when a probe shows data and metadata mixed in one "
-                "file (HDF5/NeXus with attributes, .npz with data+meta keys, a "
-                "CSV/text with a header/comment metadata block, a vendor container). "
-                "This is the META AGENT'S ONLY code-generation tool and it is "
-                "STRICTLY LIMITED to lossless file repackaging: the generated code "
-                "may only separate existing data from metadata and is round-trip "
-                "verified (the reconstruction must match the original) — it NEVER "
-                "transforms, computes, fits, or analyzes. All analysis is delegated. "
-                "On error (no verified lossless split), do NOT silently delegate — "
-                "tell the user and ask how to proceed (analyze as-is, or supply data "
-                "and metadata separately); fall back to as-is only if no user."
+                "Split combined file(s) that hold BOTH data and metadata into a "
+                "separate data file + metadata JSON each, so the specialist receives "
+                "clean (data, metadata) pairs. Single file → returns data_path + "
+                "metadata_path. Pass a LIST of paths to split several SAME-TYPE files "
+                "in ONE call → returns a per-file 'results' list + a 'summary'; thread "
+                "the pairs into ONE batched delegation (never loop one delegation per "
+                "file). In batch mode a single split is generated and reused across "
+                "structurally identical files (each still round-trip verified), so it "
+                "is cheaper and yields a uniform schema; a file that doesn't match "
+                "falls back to its own split. Use after inspect_uploads when a probe "
+                "shows data and metadata mixed in one file (HDF5/NeXus with attributes, "
+                ".npz/.mat with data+meta keys, a CSV/text with a header/comment "
+                "metadata block, a TIFF with tags/ImageDescription). This is the META "
+                "AGENT'S ONLY code-generation tool and it is STRICTLY LIMITED to "
+                "lossless file repackaging: the generated code may only separate "
+                "existing data from metadata and is round-trip verified (the "
+                "reconstruction must match the original) — it NEVER transforms, "
+                "computes, fits, or analyzes. All analysis is delegated. On error (no "
+                "verified lossless split), do NOT silently delegate — tell the user "
+                "and ask how to proceed (analyze as-is, or supply data and metadata "
+                "separately); fall back to as-is only if no user. With a 'partial' "
+                "batch result, surface which files failed and ask how to proceed."
             ),
             parameters={
                 "path": {
-                    "type": "string",
+                    "type": ["string", "array"],
+                    "items": {"type": "string"},
                     "description": (
-                        "Absolute path to the combined data+metadata file to split."
+                        "Absolute path to the combined data+metadata file to split, "
+                        "OR a list of absolute paths to split several same-type files "
+                        "in one batched call."
                     ),
                 },
             },

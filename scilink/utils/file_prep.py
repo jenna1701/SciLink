@@ -1,5 +1,8 @@
 """Codegen-backed file preparation: split a combined data+metadata file into
-separate data + metadata files BEFORE delegation to a specialist.
+separate data + metadata files BEFORE delegation to a specialist. ``prepare_inputs``
+handles one file; ``prepare_inputs_batch`` handles many, generating one verified
+split per structural cluster and reusing it (round-trip verified per file) across
+structurally identical siblings.
 
 STRICT SCOPE — this is the meta agent's ONLY code-generation surface, and it is
 restricted to **lossless file repackaging**. The generated script may separate
@@ -47,9 +50,17 @@ _PROMPT = '''You prepare a scientific data file for downstream analysis by
 SEPARATING its data from its metadata. This is a LOSSLESS REPACKAGING step ONLY —
 you are NOT analyzing anything.
 
-Input file: {path}
+PATHS ARE PROVIDED AT RUNTIME — DO NOT HARDCODE ANY FILE PATH. A dict named
+`_PREP` is already defined ABOVE your code; read every path from it:
+  _PREP["input"]        # the combined file to read
+  _PREP["out_dir"]      # directory to write the data file into
+  _PREP["metadata_out"] # exact path to write the metadata JSON
+  _PREP["recon_out"]    # exact path to write the reconstruction
+Your script MUST reference `_PREP[...]` for ALL paths and MUST NOT contain any
+literal path string. (This lets the SAME script be reused across structurally
+identical files — so write it generically against the probe, not this one file.)
 
-Structural probe (evidence — do not assume beyond it):
+Structural probe of a representative input (evidence — do not assume beyond it):
 {probe}
 
 Common layouts you may encounter (illustrative, not exhaustive — let the probe
@@ -64,13 +75,13 @@ decide):
 Identify which bytes/keys/lines are data vs metadata from the probe, then:
 
 Write a Python script that:
-1. Reads the input file.
+1. Reads the input file at `_PREP["input"]`.
 2. Splits it into (a) the primary numerical DATA (the array / table / signal) and
    (b) the METADATA — everything that is NOT the data values: headers, attributes,
    comments, units, calibration, axes, acquisition parameters, etc.
-3. Writes the DATA to a file whose path you choose under the output directory
-   "{out_dir}" — use `.npy` for an array/cube or `.csv` for a table.
-4. Writes the METADATA to "{metadata_out}" as a single JSON object. Put the
+3. Writes the DATA to a file UNDER `_PREP["out_dir"]` (choose a basename and join
+   it with `_PREP["out_dir"]`) — use `.npy` for an array/cube or `.csv` for a table.
+4. Writes the METADATA to `_PREP["metadata_out"]` as a single JSON object. Put the
    HUMAN-MEANINGFUL scientific metadata at the TOP LEVEL with clean keys
    (technique, instrument, sample, units, axes, wavelength, ...). If you need
    extra bookkeeping to reconstruct the original byte-for-byte (line endings,
@@ -81,14 +92,15 @@ Write a Python script that:
    TOP LEVEL and, if needed, also record its placement under "_reconstruction";
    do not relegate it to "_reconstruction" alone.
 5. RECONSTRUCTS the original file from those two outputs and writes it to
-   "{recon_out}" (same format as the input). We will verify it matches the input.
-6. Prints exactly one line:
-   PREP_RESULT_JSON:{{"data_out": "<abs path>", "metadata_out": "{metadata_out}", "recon_out": "{recon_out}"}}
+   `_PREP["recon_out"]` (same format as the input). We will verify it matches.
+6. Prints exactly one line (the ACTUAL data path you wrote):
+   PREP_RESULT_JSON:{{"data_out": "<abs path to the data file you wrote>"}}
 
 HARD CONSTRAINTS (a violation fails verification):
 - DO NOT transform, scale, normalize, filter, fit, resample, denoise, crop, or
   analyze the data. The data you write MUST be the original values, unchanged.
 - The reconstruction MUST reproduce the original file's data and metadata.
+- Reference paths ONLY via `_PREP[...]`; no literal path strings anywhere.
 - Allowed libraries ONLY: numpy, pandas, json, csv, struct, io, re, h5py,
   scipy.io (for MATLAB .mat read/write ONLY), PIL/Pillow (for TIFF tags /
   ImageDescription), os, pathlib. Do NOT import analysis libraries — sklearn,
@@ -386,110 +398,229 @@ def _verify(input_path: Path, data_out: Path, meta_out: Path,
     return True, "lossless split verified"
 
 
-def prepare_inputs(input_path, model, executor, output_dir, probe=None,
-                   logger=None, max_retries: int = 1) -> dict:
-    """Split a combined data+metadata file into data + metadata files (codegen).
+def _file_paths(input_path: Path, output_dir: Path) -> dict:
+    """Per-file output paths in a collision-safe subdir keyed on the absolute path.
 
-    Args:
-        input_path: the combined file to split.
-        model: LLM with ``.generate_content(prompt).text``.
-        executor: a ``ScriptExecutor`` (runs the generated script in a sandbox).
-        output_dir: directory for the outputs.
-        probe: optional structural probe dict (e.g. from the meta's file probe);
-            a compact fallback is used when omitted.
-        logger: optional logger.
-        max_retries: extra attempts after the first (default 1).
-
-    Returns a dict: on success ``{status:"success", data_path, metadata_path,
-    attempts}``; otherwise ``{status:"error", message, attempts}``. The
-    reconstruction used for the round-trip check is deleted once verified.
-    The caller decides how to handle an error — the meta surfaces it to the user
-    and asks how to proceed rather than silently delegating an unsplit file.
+    Two uploads sharing a basename (runA/scan.tif and runB/scan.tif) get distinct
+    subdirs so they never clobber each other's data/metadata/recon outputs.
     """
-    input_path = Path(input_path)
-    output_dir = Path(output_dir)
     stem = re.sub(r"[^0-9A-Za-z_-]", "_", input_path.stem) or "input"
-    # Per-file subdirectory keyed on the absolute path: two uploads sharing a
-    # basename (e.g. runA/scan.tif and runB/scan.tif) must not clobber each
-    # other's metadata/recon/data outputs in a shared "prepared/" dir.
     key = hashlib.sha1(str(input_path.resolve()).encode()).hexdigest()[:8]
-    file_out = output_dir / f"{stem}_{key}"
+    file_out = Path(output_dir) / f"{stem}_{key}"
     file_out.mkdir(parents=True, exist_ok=True)
-    metadata_out = file_out / f"{stem}_metadata.json"
-    recon_out = file_out / f"{stem}_reconstructed{input_path.suffix}"
+    return {
+        "input": str(input_path),
+        "out_dir": str(file_out),
+        "metadata_out": str(file_out / f"{stem}_metadata.json"),
+        "recon_out": str(file_out / f"{stem}_reconstructed{input_path.suffix}"),
+    }
 
+
+def _build_prompt(probe, input_path: Path) -> str:
     probe_str = json.dumps(probe, indent=2, default=str) if probe else \
         f"(no probe) extension={input_path.suffix}, size={input_path.stat().st_size} bytes"
-    base_prompt = _PROMPT.format(
-        path=str(input_path), probe=probe_str, out_dir=str(file_out),
-        metadata_out=str(metadata_out), recon_out=str(recon_out),
-    )
+    return _PROMPT.format(probe=probe_str)
 
+
+def _prep_header(paths: dict) -> str:
+    """Runtime `_PREP` path bindings prepended to a generated split body, so one
+    generically-written body can be reused verbatim across structurally identical
+    files (only this header changes per file)."""
+    return "_PREP = " + json.dumps({k: str(v) for k, v in paths.items()}) + "\n"
+
+
+def _generate_split_script(prompt: str, model) -> tuple:
+    """One codegen attempt → (script_body, "") or (None, rejection_reason)."""
+    try:
+        script = _extract_script(model.generate_content(prompt).text)
+    except Exception as e:  # noqa: BLE001
+        return None, f"code generation failed: {e}"
+    if not script:
+        return None, "model returned no script"
+    guard = _static_guard(script)
+    if guard:
+        return None, guard
+    if "_PREP" not in script:
+        return None, ("script must read paths from the _PREP dict, not hardcode "
+                      "them — reference _PREP['input'/'out_dir'/'metadata_out'/'recon_out']")
+    return script, ""
+
+
+def _apply_and_verify(body: str, input_path: Path, paths: dict, executor) -> tuple:
+    """Run a (path-parameterized) body for one file and verify losslessness.
+
+    Returns ``(True, {data_path, metadata_path})`` or ``(False, reason)``. No LLM
+    call — this is what lets a verified body be reused across a batch cheaply.
+    """
+    script = _prep_header(paths) + body
+    exec_res = executor.execute_script(script, working_dir=paths["out_dir"])
+    if exec_res.get("status") != "success":
+        return False, f"script execution failed: {exec_res.get('message', '')[:600]}"
+    m = re.search(r"PREP_RESULT_JSON:(\{.*\})", exec_res.get("stdout", ""))
+    if not m:
+        return False, "script did not print PREP_RESULT_JSON with the data path"
+    try:
+        result = json.loads(m.group(1))
+    except json.JSONDecodeError as e:
+        return False, f"PREP_RESULT_JSON not valid JSON: {e}"
+    data_out = Path(result.get("data_out", ""))
+    ok, reason = _verify(input_path, data_out,
+                         Path(paths["metadata_out"]), Path(paths["recon_out"]))
+    if not ok:
+        return False, reason
+    Path(paths["recon_out"]).unlink(missing_ok=True)  # only needed for the check
+    return True, {"data_path": str(data_out), "metadata_path": paths["metadata_out"]}
+
+
+def _prepare_one(input_path: Path, paths: dict, base_prompt: str, model, executor,
+                 logger, max_retries: int) -> tuple:
+    """Generate+verify a split for one file, with retries feeding back failures.
+
+    Returns ``(result_dict, verified_body_or_None)`` — the body is handed back so
+    a batch can reuse it on structurally identical siblings.
+    """
     prompt = base_prompt
     last_reason = ""
     for attempt in range(1, max_retries + 2):
         if logger:
-            logger.info(f"📦 File prep (attempt {attempt}): generating split script for {input_path.name}")
-        try:
-            script = _extract_script(model.generate_content(prompt).text)
-        except Exception as e:
-            last_reason = f"code generation failed: {e}"
-            prompt = base_prompt + f"\n\n### PREVIOUS ATTEMPT FAILED\n{last_reason}\nFix it."
-            continue
-        if not script:
-            last_reason = "model returned no script"
-            prompt = base_prompt + f"\n\n### PREVIOUS ATTEMPT FAILED\n{last_reason}\nFix it."
-            continue
-
-        guard = _static_guard(script)
-        if guard:
-            last_reason = guard
+            logger.info(f"📦 File prep (attempt {attempt}): generating split for {input_path.name}")
+        body, reason = _generate_split_script(prompt, model)
+        if body is None:
+            last_reason = reason
             if logger:
-                logger.warning(f"📦 File prep rejected: {guard}")
-            prompt = base_prompt + f"\n\n### PREVIOUS ATTEMPT FAILED\n{guard}\nUse IO/parsing libraries only."
+                logger.warning(f"📦 File prep rejected: {reason}")
+            prompt = base_prompt + f"\n\n### PREVIOUS ATTEMPT FAILED\n{reason}\nFix it."
             continue
-
-        exec_res = executor.execute_script(script, working_dir=str(file_out))
-        if exec_res.get("status") != "success":
-            last_reason = f"script execution failed: {exec_res.get('message', '')[:600]}"
-            prompt = base_prompt + f"\n\n### PREVIOUS ATTEMPT FAILED\n{last_reason}\nFix the script."
-            continue
-
-        m = re.search(r"PREP_RESULT_JSON:(\{.*\})", exec_res.get("stdout", ""))
-        if not m:
-            last_reason = "script did not print PREP_RESULT_JSON with the output paths"
-            prompt = base_prompt + f"\n\n### PREVIOUS ATTEMPT FAILED\n{last_reason}\nPrint the result line."
-            continue
-        try:
-            result = json.loads(m.group(1))
-        except json.JSONDecodeError as e:
-            last_reason = f"PREP_RESULT_JSON not valid JSON: {e}"
-            prompt = base_prompt + f"\n\n### PREVIOUS ATTEMPT FAILED\n{last_reason}\nFix the output line."
-            continue
-
-        data_out = Path(result.get("data_out", ""))
-        ok, reason = _verify(input_path, data_out, metadata_out, recon_out)
+        ok, res = _apply_and_verify(body, input_path, paths, executor)
         if ok:
-            # The reconstruction was only needed for the round-trip check; it is a
-            # full duplicate of the input, so drop it rather than leave it behind.
-            recon_out.unlink(missing_ok=True)
             if logger:
-                logger.info(f"✅ File prep OK ({reason}): data={data_out}, metadata={metadata_out}")
-            return {
-                "status": "success",
-                "data_path": str(data_out),
-                "metadata_path": str(metadata_out),
-                "attempts": attempt,
-            }
-        last_reason = reason
+                logger.info(f"✅ File prep OK: data={res['data_path']}")
+            return {"status": "success", **res, "attempts": attempt}, body
+        last_reason = res
         if logger:
-            logger.warning(f"📦 File prep verification failed: {reason}")
-        prompt = base_prompt + f"\n\n### PREVIOUS ATTEMPT FAILED\n{reason}\nProduce a lossless split."
+            logger.warning(f"📦 File prep verification failed: {res}")
+        prompt = base_prompt + f"\n\n### PREVIOUS ATTEMPT FAILED\n{res}\nProduce a lossless split."
 
-    recon_out.unlink(missing_ok=True)  # drop any leftover from the last attempt
+    Path(paths["recon_out"]).unlink(missing_ok=True)
     return {
         "status": "error",
         "message": f"Could not produce a verified lossless split after "
                    f"{max_retries + 1} attempt(s): {last_reason}",
         "attempts": max_retries + 1,
+    }, None
+
+
+def prepare_inputs(input_path, model, executor, output_dir, probe=None,
+                   logger=None, max_retries: int = 1) -> dict:
+    """Split ONE combined data+metadata file into data + metadata files (codegen).
+
+    Returns ``{status:"success", data_path, metadata_path, attempts}`` or
+    ``{status:"error", message, attempts}``. The reconstruction used for the
+    round-trip check is deleted once verified. The caller decides how to handle an
+    error — the meta surfaces it to the user rather than delegating an unsplit file.
+    """
+    input_path = Path(input_path)
+    paths = _file_paths(input_path, Path(output_dir))
+    base_prompt = _build_prompt(probe, input_path)
+    result, _ = _prepare_one(input_path, paths, base_prompt, model, executor,
+                             logger, max_retries)
+    return result
+
+
+def _signature(probe):
+    """Structural fingerprint for clustering — same signature ⇒ one split script
+    can serve all. Keyed on STRUCTURE (ndim/dtype, columns, container keys), not
+    exact dimensions, so same-kind/different-size files still cluster. Returns
+    None when there's no structural confidence (→ caller treats the file as solo).
+    """
+    if not probe:
+        return None
+    ext, kind = probe.get("ext"), probe.get("kind")
+    if kind == "array":
+        return (ext, "array", len(probe.get("shape") or []), probe.get("dtype"))
+    if kind == "image":
+        return (ext, "image", probe.get("mode"), probe.get("n_frames"))
+    if kind == "table":
+        return (ext, "table", tuple(probe.get("columns") or []),
+                tuple(sorted((probe.get("dtypes") or {}).items())))
+    if kind == "npz":
+        return (ext, "npz", tuple(sorted(probe.get("keys") or [])))
+    if kind == "mat":
+        return (ext, "mat", tuple(sorted(probe.get("keys") or [])))
+    if kind == "hdf5":
+        return (ext, "hdf5", tuple(sorted(probe.get("datasets") or [])))
+    if kind == "json":
+        return (ext, "json", tuple(sorted(probe.get("top_level_keys") or [])))
+    return None
+
+
+def prepare_inputs_batch(input_paths, model, executor, output_dir, probes=None,
+                         logger=None, max_retries: int = 1) -> dict:
+    """Split MANY combined files, reusing one verified split per structural cluster.
+
+    Files are clustered by :func:`_signature`; the cluster's first file drives a
+    codegen, and the verified body is reused (no LLM) on its siblings — each still
+    round-trip verified. A sibling the shared body can't reproduce falls back to
+    its own codegen, so a heterogeneous "batch" still splits correctly.
+
+    Returns ``{status, results:[{file, status, ...}], summary:{...}}`` where
+    ``status`` is ``success`` (all ok), ``partial`` (some failed), or ``error``
+    (all failed). ``probes`` (parallel to ``input_paths``) sharpen clustering;
+    without them files default to per-file (no reuse).
+    """
+    input_paths = [Path(p) for p in input_paths]
+    if probes is None:
+        probes = [None] * len(input_paths)
+    output_dir = Path(output_dir)
+
+    clusters: dict = {}
+    for i, pr in enumerate(probes):
+        sig = _signature(pr)
+        if sig is None:                       # no structural confidence → solo
+            sig = ("__solo__", i)
+        clusters.setdefault(sig, []).append(i)
+
+    results = [None] * len(input_paths)
+    n_codegens = n_reused = n_fallback = 0
+
+    for idxs in clusters.values():
+        first = idxs[0]
+        base_prompt = _build_prompt(probes[first], input_paths[first])
+        res, body = _prepare_one(input_paths[first], _file_paths(input_paths[first], output_dir),
+                                 base_prompt, model, executor, logger, max_retries)
+        n_codegens += 1
+        results[first] = {"file": str(input_paths[first]), "reused": False, **res}
+
+        for j in idxs[1:]:
+            paths_j = _file_paths(input_paths[j], output_dir)
+            if body is not None:
+                ok, r = _apply_and_verify(body, input_paths[j], paths_j, executor)
+                if ok:
+                    n_reused += 1
+                    results[j] = {"file": str(input_paths[j]), "status": "success",
+                                  "reused": True, "attempts": 0, **r}
+                    if logger:
+                        logger.info(f"♻️  Reused split for {input_paths[j].name}")
+                    continue
+                if logger:
+                    logger.warning(f"📦 Reuse failed for {input_paths[j].name} ({r}); regenerating")
+            # Fallback: this sibling isn't actually the same shape — solo codegen.
+            bp = _build_prompt(probes[j], input_paths[j])
+            res_j, _ = _prepare_one(input_paths[j], paths_j, bp, model, executor,
+                                    logger, max_retries)
+            n_codegens += 1
+            n_fallback += 1
+            results[j] = {"file": str(input_paths[j]), "reused": False, **res_j}
+
+    n_failed = sum(1 for r in results if r.get("status") != "success")
+    status = ("success" if n_failed == 0
+              else "error" if n_failed == len(results) else "partial")
+    return {
+        "status": status,
+        "results": results,
+        "summary": {
+            "n_files": len(input_paths), "n_clusters": len(clusters),
+            "n_codegens": n_codegens, "n_reused": n_reused,
+            "n_fallback": n_fallback, "n_failed": n_failed,
+        },
     }
