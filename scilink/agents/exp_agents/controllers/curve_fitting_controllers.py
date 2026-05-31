@@ -3141,6 +3141,15 @@ Return JSON with:
                     #       hot level by the end of the budget regardless of
                     #       what the rate/patience say.
                     _annealing_level = 0
+                    # Annealing level at which the PREVIOUS refit actually ran.
+                    # Used to detect the escalation INTO the hot level (see the
+                    # fresh-generation trigger below). Must track the prior
+                    # refit's level — not a same-iteration snapshot of
+                    # _annealing_level — because escalation happens at the end of
+                    # an iteration, so a start-of-iteration snapshot already
+                    # equals the (escalated) current level and never registers a
+                    # transition. Mirrors image_analysis's _previous_annealing_level.
+                    _previous_annealing_level = 0
                     _prev_best_r2 = best_r2
                     _n_anneal_levels = len(self._CONSTRAINT_ANNEALING_SCHEDULE)
                     _PATIENCE = 2
@@ -3293,7 +3302,7 @@ Return JSON with:
                         # so the LLM can restructure freely.
                         _just_escalated_to_hot = (
                             _annealing_level >= _n_anneal_levels - 1
-                            and _cur_level < _n_anneal_levels - 1
+                            and _previous_annealing_level < _n_anneal_levels - 1
                         )
                         _refine_from = (
                             None if _just_escalated_to_hot
@@ -3315,6 +3324,11 @@ Return JSON with:
                             refine_from_r2=best_r2,
                             refine_from_issues=verification.get("issues_found", []),
                         )
+                        # Record the level this refit ran at, so the next
+                        # iteration can detect the escalation into hot. Updated
+                        # only on an actual refit (not the no-config-change
+                        # escalate-and-continue branch above).
+                        _previous_annealing_level = _annealing_level
 
                         if verified_result["success"]:
                             verified_r2 = verified_result.get("fit_quality", {}).get("r_squared") or 0
