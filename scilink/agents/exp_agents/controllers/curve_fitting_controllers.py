@@ -3283,8 +3283,16 @@ Return JSON with:
             # --- Verification loop (for anchor spectra: first overall or first in regime) ---
             fit_was_approved = False
             if _is_anchor:
-                if not best_result or not best_result.get("success") or best_r2 < 0.1:
-                    self.logger.warning(f"   Initial fit failed or R² too low ({best_r2:.4f}), skipping verification")
+                # Skip verification ONLY when there is no successful fit to work
+                # with. A fit that executed but is degenerate (low/zero R²) must
+                # still enter the loop: the verifier + adaptive annealing (which
+                # reaches hot/fresh-generation) + residual diagnostics are the
+                # recovery path for a "ran-but-garbage" fit. Previously a
+                # `best_r2 < 0.1` clause skipped these cases, locking a degenerate
+                # script with no recovery (and, in a series, reusing it for every
+                # spectrum). Matches image-analysis, which gates on success only. (#245)
+                if not best_result or not best_result.get("success"):
+                    self.logger.warning(f"   Initial fit failed (no successful result, R²={best_r2:.4f}), skipping verification")
                 else:
                     # Adaptive annealing state: start frozen, escalate via
                     # three complementary mechanisms so hot annealing
