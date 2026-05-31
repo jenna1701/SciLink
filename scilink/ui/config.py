@@ -6,12 +6,12 @@ MODEL_OPTIONS = [
     "claude-opus-4-6",
     "gemini-3.1-pro-preview",
     "gpt-5.4",
-    # Amazon Bedrock (Claude Opus 4.6) via the US geo cross-region inference
-    # profile (exact ID from the AWS model card; Opus 4.6 has no date stamp and
-    # uses a bare ``-v1`` suffix — no ``:0``). Invoke-able only through an
-    # inference profile, hence the ``us.`` prefix. For EU/AU keys swap the
-    # prefix: ``eu.``/``au.``. (Base model ID: anthropic.claude-opus-4-6-v1.)
-    "bedrock/us.anthropic.claude-opus-4-6-v1",
+    # Amazon Bedrock (Claude Opus 4.8) via the US geo cross-region inference
+    # profile (exact ID from the AWS model card; Opus 4.8 has no date stamp and
+    # no version suffix). Invoke-able only through an inference profile, hence
+    # the ``us.`` prefix. For EU/JP/AU keys swap the prefix:
+    # ``eu.``/``jp.``/``au.``. (Base model ID: anthropic.claude-opus-4-8.)
+    "bedrock/us.anthropic.claude-opus-4-8",
 ]
 
 EMBEDDING_MODEL_OPTIONS = [
