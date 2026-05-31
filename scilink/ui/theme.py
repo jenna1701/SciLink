@@ -123,6 +123,18 @@ div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) {
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div {
     margin-top: -2rem !important;
 }
+/* Mode selector — keep the buttons on one row.
+   Streamlit columns are flex items with a built-in min-width and the row
+   wraps by default; at higher OS display scaling / narrower windows the
+   buttons' combined min-width exceeds the centered column and the row wraps
+   (reproduces on some machines, not others). Force no-wrap and let the
+   columns shrink so the buttons stay on a single line. */
+div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] {
+    flex-wrap: nowrap !important;
+}
+div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+    min-width: 0 !important;
+}
 /* Sidebar buttons — original purple */
 section[data-testid="stSidebar"] .stButton > button {
     background-color: #6200EE;
@@ -620,6 +632,18 @@ div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) {
 }
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div {
     margin-top: -2rem !important;
+}
+/* Mode selector — keep the buttons on one row.
+   Streamlit columns are flex items with a built-in min-width and the row
+   wraps by default; at higher OS display scaling / narrower windows the
+   buttons' combined min-width exceeds the centered column and the row wraps
+   (reproduces on some machines, not others). Force no-wrap and let the
+   columns shrink so the buttons stay on a single line. */
+div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] {
+    flex-wrap: nowrap !important;
+}
+div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+    min-width: 0 !important;
 }
 /* Mode selector secondary buttons — outlined purple */
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div .stButton > button[kind="secondary"] {
