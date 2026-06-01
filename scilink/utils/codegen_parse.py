@@ -217,8 +217,10 @@ def parse_codegen_response(response, field: str = "script", logger=None):
         }
 
     result = {field: script}
-    # Best-effort side fields (diagnosis/summary/...) from well-formed JSON.
+    # Best-effort side fields (diagnosis/summary/analysis_approach/...) from
+    # well-formed JSON.
     cleaned = _strip_fences(raw)
+    parsed_ok = False
     for candidate in (raw, cleaned, _escape_newlines_in_strings(cleaned)):
         try:
             obj = json.loads(candidate)
@@ -228,5 +230,25 @@ def parse_codegen_response(response, field: str = "script", logger=None):
             for key, value in obj.items():
                 if key != field and key not in result:
                     result[key] = value
+            parsed_ok = True
             break
+    if not parsed_ok:
+        # The (large, escaped) script value is usually what breaks json.loads,
+        # which would silently drop the side fields. By convention the script is
+        # the LAST key, so the side fields sit in a well-formed prefix — parse
+        # that to recover them (e.g. trend's analysis_approach / key_metrics,
+        # correction's diagnosis) instead of losing them when the script string
+        # is malformed. The prefix contains no script text, so no false matches.
+        m = re.search(r',?\s*"' + re.escape(field) + r'"\s*:', cleaned)
+        if m:
+            prefix = cleaned[:m.start()].rstrip().rstrip(",").rstrip()
+            if prefix.startswith("{"):
+                try:
+                    obj = json.loads(prefix + "}")
+                except (json.JSONDecodeError, ValueError):
+                    obj = None
+                if isinstance(obj, dict):
+                    for key, value in obj.items():
+                        if key != field and key not in result:
+                            result[key] = value
     return result, None
