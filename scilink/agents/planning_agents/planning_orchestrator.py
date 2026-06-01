@@ -1214,7 +1214,7 @@ class PlanningOrchestratorAgent:
                 # Use the same manual tool handling approach for LiteLLM
                 response_text = self._handle_litellm_chat(user_input)
             
-            print(f"🤖 Agent: {response_text}")
+            self._print_agent_answer(response_text)
             self._save_history()
             
             if self.message_count > 80:
@@ -1558,6 +1558,18 @@ class PlanningOrchestratorAgent:
                         if sys.stdout.isatty() else ("", ""))
         body = text.replace("\n", "\n     ")  # indent continuation lines
         print(f"\n  {style}💭 {body}{reset}\n")
+
+    def _print_agent_answer(self, text) -> None:
+        """Print the agent's final answer — a deliverable, emphasized (bold +
+        bright) to stand apart from 💭 reasoning (a dim aside) and structural
+        logs. `_agent_label` (default "Agent") lets the meta name the delegated
+        specialist (e.g. "Planning specialist") so a child's answer is not
+        mistaken for the meta's own user-facing response."""
+        import sys
+        label = getattr(self, "_agent_label", "Agent")
+        bold, reset = ("\033[1;96m", "\033[0m") if sys.stdout.isatty() else ("", "")
+        print(f"\n{bold}🤖 {label}:{reset}")
+        print(text if text is not None else "")
 
     def _handle_litellm_chat(self, user_input: str) -> str:
         """Handle chat with LiteLLM models with manual function calling loop."""
