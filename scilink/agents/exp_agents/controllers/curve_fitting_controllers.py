@@ -5135,6 +5135,24 @@ class AdaptiveRefitController:
                 })
             else:
                 self.logger.info(f"  No improvement: R² {original_r2} → {new_r2:.4f}, keeping original")
+                # The refit ran in the same spectrum directory and overwrote the
+                # kept fit's visualization.png. Restore the kept fit's plot so the
+                # report shows the fit whose metrics it records — not the
+                # discarded refit's. (fit.npy is a transient consumed only at fit
+                # time for residual diagnostics and never read afterwards, so it
+                # is left as-is.)
+                kept = series_results[idx] if idx < len(series_results) else None
+                if isinstance(kept, dict):
+                    vpath = kept.get("visualization_path")
+                    vbytes = kept.get("visualization_bytes")
+                    if vpath and vbytes:
+                        try:
+                            with open(vpath, "wb") as fh:
+                                fh.write(vbytes)
+                        except Exception as e:  # noqa: BLE001
+                            self.logger.warning(
+                                f"  Could not restore original plot for {name}: {e}"
+                            )
                 refit_summary.append({
                     "index": idx, "name": name,
                     "original_r2": original_r2, "new_r2": new_r2,
