@@ -411,6 +411,27 @@ class SimulationOrchestratorAgent:
 
     def chat(self, user_input: str) -> str:
         """Interactive chat — used by the CLI and UI."""
+        # ── Console display features not yet wired here (parity TODO) ──────────
+        # Analysis, meta, and planning distinguish three console output classes;
+        # this orchestrator currently emits only structural logs. To bring it to
+        # parity, mirror AnalysisOrchestratorAgent:
+        #   1. 💭 Reasoning — copy `_print_assistant_reasoning(self, content)` and
+        #      call it after appending each assistant message and BEFORE the tool
+        #      loop in BOTH handlers (the two `for tool_call in …` sites in
+        #      `_handle_openai_chat` / `_handle_litellm_chat`). Shows the interim
+        #      reasoning dim+italic so a deliberate step doesn't read as a silent
+        #      jump to "🔧 Calling tool".
+        #   2. 🤖 Answer — copy `_print_agent_answer(self, text)` and call
+        #      `self._print_agent_answer(response)` just before `return response`
+        #      below. NB: unlike analysis/planning (which print "🤖 Agent:" in
+        #      chat()), this chat() returns the answer un-printed, so this is an
+        #      ADD, not a replace.
+        #   3. Meta attribution — when the deferred `delegate_to_simulation` seam
+        #      creates the sim child, set
+        #      `child._agent_label = "Simulation specialist"` (mirrors the
+        #      analysis/planning children in MetaOrchestratorAgent).
+        #   4. UI — no change needed; `ui/app.py::_log_to_html` already styles 💭
+        #      (dim italic) and the 🤖 header (bold) regardless of source.
         self._last_chat_hit_iter_cap = False
         if self.use_openai:
             response = self._handle_openai_chat(user_input)

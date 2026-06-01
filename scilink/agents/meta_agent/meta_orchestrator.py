@@ -506,6 +506,10 @@ class MetaOrchestratorAgent:
                 restore_checkpoint=restore,
                 analysis_mode=AnalysisMode.CO_PILOT,
             )
+            # Label its answers as the specialist's — in the meta's verbose
+            # stream a child's final answer is a delegated deliverable, not the
+            # meta's own user-facing response.
+            self._children["analysis"]._agent_label = "Analysis specialist"
             # Share skills / custom tools / MCP servers registered on the meta.
             self._propagate_extensions_to_child(self._children["analysis"])
         return self._children["analysis"]
@@ -542,6 +546,10 @@ class MetaOrchestratorAgent:
                 autonomy_level=AutonomyLevel.CO_PILOT,
                 data_dir=None,
             )
+            # Label its answers as the specialist's — a delegated child's final
+            # answer is a deliverable in the meta's verbose stream, not the
+            # meta's own user-facing response.
+            self._children["planning"]._agent_label = "Planning specialist"
             # Share skills / custom tools / MCP servers registered on the meta.
             self._propagate_extensions_to_child(self._children["planning"])
         return self._children["planning"]

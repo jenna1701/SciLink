@@ -29,14 +29,20 @@ def _strip_ansi(text: str) -> str:
 
 
 def _log_to_html(text: str) -> str:
-    """ANSI-strip a captured log and HTML-escape it, rendering the agent's 💭
-    reasoning lines (and their indented continuations) in italic muted cyan so
-    they read as prose — the HTML equivalent of the terminal's dim+italic."""
+    """ANSI-strip a captured log and HTML-escape it. The agent's 💭 reasoning
+    lines render dim+italic (a muted aside); the 🤖 answer header renders
+    bold+bright (the deliverable) — the HTML equivalents of the terminal styling."""
     import html as _html
 
     out, in_thought = [], False
     for line in _strip_ansi(text).split("\n"):
-        if line.lstrip().startswith("💭"):
+        stripped = line.lstrip()
+        if stripped.startswith("🤖"):
+            # Final-answer header — emphasized, and it ends any reasoning block.
+            in_thought = False
+            out.append(f'<span style="color:#7fdfff;font-weight:bold">{_html.escape(line)}</span>')
+            continue
+        if stripped.startswith("💭"):
             in_thought = True
         elif in_thought and not line.startswith("     "):
             in_thought = False
