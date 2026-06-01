@@ -739,7 +739,9 @@ TOOL_SPEC_MULTIPHASE = ToolSpec(
     required=["exp_peaks", "candidates"],
     returns=(
         "dict with 'algorithm' ('mip_multiphase'), 'cost' (overall joint "
-        "cost in [0, 1]), 'verdict', 'active_phases' (list of {id, "
+        "cost in [0, 1], lower better), 'figure_of_merit' (1 - cost, "
+        "higher-better mirror so the same quality gate as the single-phase "
+        "scorer reads a multi-phase result), 'verdict', 'active_phases' (list of {id, "
         "formula, coverage, matched_peaks, mean_residual_deg, lattice_scale "
         "— the per-phase fitted lattice scale, ~1.02 for a DFT-relaxed metal}), "
         "'unmatched_exp' (peak indices not explained by any phase), "
@@ -854,6 +856,12 @@ def score_xrd_match_multiphase(
     return {
         "algorithm": "mip_multiphase",
         "cost": float(cost),
+        # Higher-is-better mirror of `cost`, so the same quality gate the
+        # single-phase scorer feeds (metric='figure_of_merit') can read a
+        # multi-phase result. cost in [0,1] (lower better) -> fom = 1 - cost;
+        # the multi-phase accept (cost <= 0.25) maps to fom >= 0.75, above the
+        # 0.70 gate. The authoritative accept/marginal/reject is `verdict`.
+        "figure_of_merit": float(max(0.0, 1.0 - cost)),
         "verdict": verdict,
         "active_phases": active_phases,
         "unmatched_exp": best["unmatched_exp"],
@@ -868,6 +876,7 @@ def _empty_multiphase_result(candidates: list[dict], why: str) -> dict[str, Any]
     return {
         "algorithm": "mip_multiphase",
         "cost": float("inf"),
+        "figure_of_merit": 0.0,
         "verdict": "reject",
         "active_phases": [],
         "unmatched_exp": [],
