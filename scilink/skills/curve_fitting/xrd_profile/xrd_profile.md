@@ -140,11 +140,11 @@ WAVELENGTH_ANGSTROM = 1.5406  # CuKa1; replace from metadata if available
 INSTRUMENTAL_FWHM_DEG = 0.05  # from LaB6/Si standard; 0.0 if unknown
 
 # ---- Step 2: One global multi-peak fit (background handled inside) ----
+# Let fit_pattern DETECT the peaks (do not hardcode centers): the same call
+# then generalises unchanged to every frame of a series. See "In-situ / series".
 fit = fit_pattern(
     two_theta.tolist(), intensity.tolist(),
     background='snip',          # 'none' if data is already background-subtracted
-    # peak_centers=LOCKED_LIST, # pass a fixed list ONLY within a confirmed
-    #                           # single-phase regime; omit to auto-detect.
 )
 peaks = fit['peaks']            # each: center, fwhm, amplitude, area, eta
 r_squared = fit['r_squared']    # GLOBAL R²
@@ -189,15 +189,23 @@ print("FIT_RESULTS_JSON: " + json.dumps({
 }))
 ```
 
-**In-situ / series use.** `fit_pattern` is one fast call per frame, so it
-drops straight into the agent's per-spectrum series loop. **Auto-detect
-(omit `peak_centers`) is the robust default** — it re-finds peaks on every
-frame, so it survives a phase transition and composes with the agent's
-adaptive-refit path. Pass a fixed `peak_centers` list **only** inside a
-regime you have confirmed is a single stable phase (e.g. tracking thermal
-expansion / line-broadening of one phase), where a locked peak set buys
-frame-to-frame parameter consistency. Do **not** lock one list across a
-reaction or transition — the peaks themselves change.
+**In-situ / series use — lock the method, not the values.** `fit_pattern` is
+one fast call per frame, so it drops straight into the agent's per-spectrum
+series loop. The locked series script **must call `fit_pattern` with
+`peak_centers=None` (auto-detect)** — lock the *recipe* (the `fit_pattern` call
+and its settings), never a hardcoded list of peak centers. Auto-detect re-finds
+the peaks on every frame, so the one script follows peak shifts (thermal
+expansion), intensity changes (phase fraction), and appearance/disappearance,
+and composes with the agent's regime-segmentation and adaptive-refit paths. A
+**value-locked** script — hardcoded `SEED_CENTERS` / an explicit `peak_centers`
+list frozen from frame 1 — does **not** generalise: centers drift out of their
+windows even within one phase, and break entirely across a reaction or
+transition (measured: a list locked from a post-transition frame scored
+R²≈0.5–0.7 on pre-transition frames). Frame-to-frame **consistency comes from
+the identical method plus aligning the detected peaks across frames in
+interpretation, not from frozen centers.** Only pass an explicit `peak_centers`
+for a one-off re-fit of a single known-stable pattern — never as the series
+default.
 
 For speed across a long series: the default `snip_iterations='auto'` sweeps
 a few background widths per frame (~4× the fit cost). Once the establishing
@@ -205,10 +213,19 @@ frame reports its choice (in `background_method`, e.g. `snip(iterations=10)`),
 pass that integer as `snip_iterations` on the remaining frames to skip the
 sweep — back to ~1 s/frame with the same background treatment.
 
-**Drilling into a stubborn cluster.** `fit_pattern` resolves most overlaps,
-but for a tight doublet that the global fit smears, refit just that window
-with `fit_profile(peak_init=[c1, c2])` (joint two-component fit) and splice
-the result back.
+**Unresolved doublet? Tune detection, don't drill.** `fit_pattern` already
+fits all peaks jointly with an asymmetric (split pseudo-Voigt) shape, so it
+resolves overlaps and peak asymmetry in one consistent global model. If a tight
+doublet is smeared because auto-detect merged it, fix it the **method-locked**
+way: lower `min_distance_deg` (so closely-spaced maxima are detected separately)
+and/or lower `prominence_frac` (so the weaker partner is found) — these stay
+generalisable across a series because the recipe still auto-detects per frame.
+Do **not** splice in a separate `fit_profile` window fit: `fit_profile` uses a
+*symmetric* profile, so its result conflicts with the global split-PV fit and
+reintroduces exactly the asymmetric residual the global model removed (this
+drives avoidable verifier iterations). Reserve `fit_profile` only for one-off
+inspection of a single peak
+outside the main fit.
 
 **NumPy compatibility.** Use `np.trapezoid` (not removed `np.trapz`).
 
@@ -260,14 +277,18 @@ refined FWHMs from this skill can be passed in to sharpen the scoring.
 
 ## validation
 
-**Know when the fit is done.** Once the global R² ≥ ~0.99 and every visible
-reflection is modelled (no *unmodelled*-peak spikes in the residual), residual
-that remains concentrated at the apex of the few sharpest, highest-count peaks
-is the expected limit of a single symmetric pseudo-Voigt — accept it rather
-than spending refinement iterations chasing it. Re-fitting an already-resolved
-single peak with a narrower `fit_profile` window typically *worsens* the global
-fit; reserve `fit_profile` drilling for genuinely unresolved overlapping
-doublets, not for sharp peaks the global fit already captures.
+**Know when the fit is done.** `fit_pattern`'s default split (asymmetric)
+pseudo-Voigt already captures sharp-peak asymmetry, so once the global R² ≥ ~0.99
+and every visible reflection is modelled (no *unmodelled*-peak spikes in the
+residual), small residual at the apex of the few sharpest, highest-count peaks
+is the irreducible profile limit — accept it rather than spending refinement
+iterations chasing it. Do **not** re-fit individual peaks with a symmetric
+`fit_profile` window: it conflicts with the global split-PV model and
+reintroduces asymmetric residual, *worsening* the fit and adding iterations. If a
+peak is genuinely missing, lower `prominence_frac` (and/or `min_distance_deg`) so
+auto-detect catches it and re-run the single global `fit_pattern` — keep the
+recipe auto-detecting (so it still generalises frame-to-frame), not spliced
+sub-fits or hardcoded centers.
 
 **Per-peak fit checks:**
 - `r_squared` ≥ 0.95 for each fit accepts; 0.85–0.95 marginal; below

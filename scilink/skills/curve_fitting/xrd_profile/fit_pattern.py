@@ -58,14 +58,15 @@ TOOL_SPEC = ToolSpec(
         "fit_pattern(exp_two_theta, exp_intensity, peak_centers=None, "
         "background='snip', snip_iterations='auto', prominence_frac=0.02, "
         "max_peaks=30, min_distance_deg=0.15, init_fwhm_deg=0.2, "
-        "center_leeway_deg=0.3, max_fwhm_deg=3.0) -> dict"
+        "center_leeway_deg=0.3, max_fwhm_deg=3.0, "
+        "peak_shape='split_pseudo_voigt') -> dict"
     ),
     parameters={
         "exp_two_theta": {"type": "list[float]", "description": "Experimental 2-theta grid (degrees)."},
         "exp_intensity": {"type": "list[float]", "description": "Raw experimental intensity (same length). Background is handled internally."},
         "peak_centers": {
             "type": "list[float] | None",
-            "description": "Fixed peak centers to fit (degrees). None => auto-detect all significant peaks. Pass a locked list to keep the model identical across an in-situ series.",
+            "description": "Fixed peak centers to fit (degrees). None (recommended) => auto-detect all significant peaks. For a series/in-situ run, leave None on EVERY frame: the auto-detect re-finds peaks per frame so the same call follows peak shifts/intensity changes/appearance and generalises across the series. Do NOT hardcode a center list to 'lock the model' — a frozen list drifts out of its windows within a phase and breaks across a transition. Pass an explicit list only for a one-off re-fit of a single known-stable pattern.",
         },
         "background": {"type": "str", "description": "'snip' (default), 'polynomial', or 'none' (data already background-subtracted)."},
         "snip_iterations": {"type": "int | str", "description": "SNIP iteration count. 'auto' (default) sweeps a few counts and keeps the one with the cleanest residual at the best R² — avoids apex over-subtraction on sharp peaks without hand-tuning. Pass an int to fix it (e.g. reuse the value reported in background_method to skip the sweep on locked series frames)."},
@@ -75,17 +76,20 @@ TOOL_SPEC = ToolSpec(
         "init_fwhm_deg": {"type": "float", "description": "Initial FWHM guess per peak (degrees). Default 0.2 (typical CuKa)."},
         "center_leeway_deg": {"type": "float", "description": "Each center may move +/- this much during the fit (degrees). Default 0.3."},
         "max_fwhm_deg": {"type": "float", "description": "Upper bound on fitted FWHM (degrees). Default 3.0."},
+        "peak_shape": {"type": "str", "description": "'split_pseudo_voigt' (default) fits one extra width per peak to capture axial-divergence asymmetry — markedly lower residual on strong sharp lab-CuKa peaks, and it degenerates to symmetric when the data is symmetric (so it generalises safely). 'pseudo_voigt' forces a symmetric profile (fewer parameters; use only if asymmetry is known absent, e.g. synchrotron data)."},
     },
     required=["exp_two_theta", "exp_intensity"],
     returns=(
         "dict with 'r_squared' (GLOBAL, over the whole corrected pattern), "
         "'residual_rms_over_noise' (global residual RMS / estimated point "
         "noise — the verifier's key statistic; < ~3 is clean), 'n_peaks', "
-        "'peaks' (list of dicts: center, fwhm, amplitude (height), area, eta, "
-        "each sorted by 2-theta), 'peak_centers' (the centers actually fit — "
-        "feed back as the locked list for the next series frame), "
-        "'intensity_corrected', 'fit_curve' (model evaluated on the full grid; "
-        "use for the visualization), 'background_method'."
+        "'peaks' (list of dicts: center, fwhm (mean width; for Scherrer/W-H), "
+        "amplitude (height), area, eta, sorted by 2-theta; split mode adds "
+        "fwhm_left, fwhm_right, and asymmetry=(fwhm_right-fwhm_left)/sum), "
+        "'peak_centers' (the centers actually fit — feed back as the locked "
+        "list for the next series frame), 'intensity_corrected', 'fit_curve' "
+        "(model evaluated on the full grid; use for the visualization), "
+        "'background_method', 'peak_shape'."
     ),
     when_to_use=(
         "Default tool for fitting a full XRD pattern and for every frame of an "
@@ -119,6 +123,33 @@ def _pv_area(amp, fwhm, eta):
     return float(eta * l + (1.0 - eta) * g)
 
 
+def _split_pseudo_voigt(x, amp, cen, fwhm_l, fwhm_r, eta):
+    """Asymmetric (split) pseudo-Voigt: left of the centre uses fwhm_l, right
+    uses fwhm_r (height-parameterised, continuous at the apex). Captures the
+    axial-divergence peak asymmetry of lab-CuKa patterns. Degenerates to a
+    symmetric pseudo-Voigt when fwhm_l == fwhm_r, so it does not impose
+    asymmetry on data that has none."""
+    fwhm = np.where(x < cen, fwhm_l, fwhm_r)
+    sigma = fwhm * _FWHM_TO_SIGMA
+    gauss = np.exp(-((x - cen) ** 2) / (2.0 * sigma ** 2))
+    gamma = fwhm / 2.0
+    lorentz = gamma ** 2 / ((x - cen) ** 2 + gamma ** 2)
+    return amp * (eta * lorentz + (1.0 - eta) * gauss)
+
+
+def _multi_split(x, *p):
+    n = (len(p) - 2) // 5
+    out = p[-2] * x + p[-1]
+    for i in range(n):
+        out = out + _split_pseudo_voigt(x, *p[5 * i:5 * i + 5])
+    return out
+
+
+def _split_pv_area(amp, fwhm_l, fwhm_r, eta):
+    # Each side is half of a symmetric pseudo-Voigt of that width.
+    return 0.5 * (_pv_area(amp, fwhm_l, eta) + _pv_area(amp, fwhm_r, eta))
+
+
 def _detect_centers(x, ycorr, step, prominence_frac, max_peaks, min_distance_deg):
     """Auto-detect significant peak centers on a background-corrected pattern."""
     noise = _estimate_noise(ycorr)
@@ -149,7 +180,11 @@ def fit_pattern(
     init_fwhm_deg: float = 0.2,
     center_leeway_deg: float = 0.3,
     max_fwhm_deg: float = 3.0,
+    peak_shape: str = "split_pseudo_voigt",
 ) -> dict[str, Any]:
+    if peak_shape not in ("split_pseudo_voigt", "pseudo_voigt"):
+        raise ValueError(
+            f"peak_shape must be 'split_pseudo_voigt' or 'pseudo_voigt'; got {peak_shape!r}")
     x = np.asarray(exp_two_theta, dtype=float)
     y = np.asarray(exp_intensity, dtype=float)
     if x.shape != y.shape:
@@ -166,6 +201,7 @@ def fit_pattern(
         prominence_frac=prominence_frac, max_peaks=max_peaks,
         min_distance_deg=min_distance_deg, init_fwhm_deg=init_fwhm_deg,
         center_leeway_deg=center_leeway_deg, max_fwhm_deg=max_fwhm_deg,
+        peak_shape=peak_shape,
     )
 
     # --- background + fit ---
@@ -237,8 +273,16 @@ def _fit_corrected(
     init_fwhm_deg: float,
     center_leeway_deg: float,
     max_fwhm_deg: float,
+    peak_shape: str = "split_pseudo_voigt",
 ) -> dict[str, Any]:
-    """Global multi-peak fit of an already background-corrected pattern."""
+    """Global multi-peak fit of an already background-corrected pattern.
+
+    peak_shape: 'split_pseudo_voigt' (default; one extra width per peak for
+    axial-divergence asymmetry) or 'pseudo_voigt' (symmetric). Split degenerates
+    to symmetric when the data is symmetric, so it generalises safely."""
+    split = peak_shape == "split_pseudo_voigt"
+    model = _multi_split if split else _multi
+    fwhm_lo = max(2.0 * step, 0.02)
     noise = _estimate_noise(ycorr)
 
     if centers_locked is not None:
@@ -249,17 +293,23 @@ def _fit_corrected(
     if not centers:
         raise ValueError("no peaks detected; lower prominence_frac or pass peak_centers")
 
+    # Per-parameter scale keeps the TRF optimiser from thrashing (amplitudes
+    # ~1e5 vs centres ~30 vs FWHM ~0.3). One extra width param per peak in split
+    # mode.
     p0, lo, hi, scale = [], [], [], []
     for c in centers:
         j = int(np.argmin(np.abs(x - c)))
         amp0 = max(ycorr[j], noise)
-        p0 += [amp0, c, init_fwhm_deg, 0.5]
-        lo += [0.0, c - center_leeway_deg, max(2.0 * step, 0.02), 0.0]
-        hi += [5.0 * amp0 + 1.0, c + center_leeway_deg, max_fwhm_deg, 1.0]
-        # Per-parameter scale: amplitudes span ~1e5 while centers ~30 and FWHM
-        # ~0.3. Without x_scale the TRF optimiser thrashes (seconds -> minutes
-        # on busy frames). Scale each param by its natural magnitude.
-        scale += [amp0, center_leeway_deg, init_fwhm_deg, 1.0]
+        if split:
+            p0 += [amp0, c, init_fwhm_deg, init_fwhm_deg, 0.5]
+            lo += [0.0, c - center_leeway_deg, fwhm_lo, fwhm_lo, 0.0]
+            hi += [5.0 * amp0 + 1.0, c + center_leeway_deg, max_fwhm_deg, max_fwhm_deg, 1.0]
+            scale += [amp0, center_leeway_deg, init_fwhm_deg, init_fwhm_deg, 1.0]
+        else:
+            p0 += [amp0, c, init_fwhm_deg, 0.5]
+            lo += [0.0, c - center_leeway_deg, fwhm_lo, 0.0]
+            hi += [5.0 * amp0 + 1.0, c + center_leeway_deg, max_fwhm_deg, 1.0]
+            scale += [amp0, center_leeway_deg, init_fwhm_deg, 1.0]
     p0 += [0.0, 0.0]                       # linear baseline slope, intercept
     lo += [-np.inf, -np.inf]
     hi += [np.inf, np.inf]
@@ -267,7 +317,7 @@ def _fit_corrected(
 
     try:
         popt, _ = curve_fit(
-            _multi, x, ycorr, p0=p0, bounds=(lo, hi),
+            model, x, ycorr, p0=p0, bounds=(lo, hi),
             x_scale=scale, ftol=1e-4, xtol=1e-4, maxfev=20000,
         )
     except (RuntimeError, ValueError) as e:
@@ -275,7 +325,7 @@ def _fit_corrected(
         # returns *something* fittable rather than aborting the whole run.
         try:
             popt, _ = curve_fit(
-                _multi, x, ycorr, p0=p0, bounds=(lo, hi),
+                model, x, ycorr, p0=p0, bounds=(lo, hi),
                 x_scale=scale, ftol=1e-2, xtol=1e-2, maxfev=40000,
             )
         except (RuntimeError, ValueError):
@@ -284,20 +334,34 @@ def _fit_corrected(
                 "fewer peaks (raise prominence_frac) or pass explicit peak_centers."
             ) from e
 
-    fit_curve = _multi(x, *popt)
+    fit_curve = model(x, *popt)
     resid = ycorr - fit_curve
     ss_res = float(np.sum(resid ** 2))
     ss_tot = float(np.sum((ycorr - ycorr.mean()) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
     rms_over_noise = float(np.sqrt(np.mean(resid ** 2)) / noise)
 
+    stride = 5 if split else 4
     peaks = []
     for i in range(len(centers)):
-        amp, cen, fwhm, eta = popt[4 * i:4 * i + 4]
-        peaks.append({
-            "center": float(cen), "fwhm": float(fwhm), "amplitude": float(amp),
-            "eta": float(eta), "area": _pv_area(amp, fwhm, eta),
-        })
+        params = popt[stride * i:stride * i + stride]
+        if split:
+            amp, cen, fwhm_l, fwhm_r, eta = params
+            fwhm = 0.5 * (fwhm_l + fwhm_r)
+            denom = fwhm_l + fwhm_r
+            entry = {
+                "center": float(cen), "fwhm": float(fwhm), "amplitude": float(amp),
+                "eta": float(eta), "area": _split_pv_area(amp, fwhm_l, fwhm_r, eta),
+                "fwhm_left": float(fwhm_l), "fwhm_right": float(fwhm_r),
+                "asymmetry": float((fwhm_r - fwhm_l) / denom) if denom else 0.0,
+            }
+        else:
+            amp, cen, fwhm, eta = params
+            entry = {
+                "center": float(cen), "fwhm": float(fwhm), "amplitude": float(amp),
+                "eta": float(eta), "area": _pv_area(amp, fwhm, eta),
+            }
+        peaks.append(entry)
     peaks.sort(key=lambda d: d["center"])
 
     return {
@@ -309,4 +373,5 @@ def _fit_corrected(
         "intensity_corrected": [float(v) for v in ycorr],
         "fit_curve": [float(v) for v in fit_curve],
         "noise_estimate": noise,
+        "peak_shape": peak_shape,
     }
