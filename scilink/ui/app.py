@@ -19,6 +19,34 @@ from scilink.ui.output_capture import AgentStoppedError, OutputCapture
 from scilink.ui.theme import inject_theme
 from scilink.ui.config import AVATAR_USER, AVATAR_AGENT, APP_MODES, SESSION_DIR_PREFIXES
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove terminal ANSI styling. The agent emits it for the console; in the
+    HTML log pane / st.code it would otherwise render as literal escape codes."""
+    return _ANSI_RE.sub("", text or "")
+
+
+def _log_to_html(text: str) -> str:
+    """ANSI-strip a captured log and HTML-escape it, rendering the agent's 💭
+    reasoning lines (and their indented continuations) in italic muted cyan so
+    they read as prose — the HTML equivalent of the terminal's dim+italic."""
+    import html as _html
+
+    out, in_thought = [], False
+    for line in _strip_ansi(text).split("\n"):
+        if line.lstrip().startswith("💭"):
+            in_thought = True
+        elif in_thought and not line.startswith("     "):
+            in_thought = False
+        esc = _html.escape(line)
+        if in_thought:
+            esc = f'<span style="color:#6ec1e4;font-style:italic">{esc}</span>'
+        out.append(esc)
+    return "\n".join(out)
+
+
 def _escape_tildes(text: str) -> str:
     """Escape tildes outside LaTeX ($...$, $$...$$) to prevent Markdown strikethrough."""
     # Split on LaTeX delimiters, preserving them
@@ -531,7 +559,7 @@ else:
                         )
                 if msg.get("verbose"):
                     with st.expander("Verbose output"):
-                        st.code(msg["verbose"], language="text")
+                        st.code(_strip_ansi(msg["verbose"]), language="text")
     
         # ── Agent monitoring fragment ─────────────────────────────────
         # Uses @st.fragment to rerun only this section (not the full page)
@@ -803,10 +831,8 @@ else:
     })();
     </script>""", height=1)
                     if show:
-                        import html as _html
-    
                         tail = "\n".join(live.split("\n")[-200:])
-                        escaped = _html.escape(tail)
+                        escaped = _log_to_html(tail)
                         st.iframe( 
                             f'<pre style="height:280px;overflow-y:auto;margin:0;'
                             f"background:#1e1e1e;padding:8px;border-radius:4px;"
