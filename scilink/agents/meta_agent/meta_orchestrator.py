@@ -1279,8 +1279,17 @@ class MetaOrchestratorAgent:
         if not content:
             return
         text = content.strip() if isinstance(content, str) else str(content).strip()
-        if text:
-            print(f"  💭 {text}")
+        if not text:
+            return
+        import sys
+        # Dim + italic (muted cyan) so the prose is visually distinct from the
+        # structural tool-call log — but only on a real terminal, else the raw
+        # escape codes would litter captured/redirected output. Blank lines
+        # before and after set the thought apart from the tool call it triggers.
+        style, reset = (("\033[2;3;36m", "\033[0m")
+                        if sys.stdout.isatty() else ("", ""))
+        body = text.replace("\n", "\n     ")  # indent continuation lines
+        print(f"\n  {style}💭 {body}{reset}\n")
 
     def _handle_litellm_chat(self, user_input: str) -> str:
         """Handle chat with LiteLLM models — manual tool-calling loop."""
