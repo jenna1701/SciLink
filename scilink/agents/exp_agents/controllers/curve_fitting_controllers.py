@@ -4088,13 +4088,37 @@ Return JSON with:
         series_plan = state.get("series_analysis_plan")
         regime_configs = state.get("regime_configs")
 
+        # Regime-boundary markers, keyed by the regime's first spectrum index.
+        # Emitted as the loop reaches each boundary so transitions are visible
+        # while the fit streams — not only in the upfront plan (the inline
+        # "(regime: …)" tag alone made boundaries hard to spot in the log).
+        regime_markers: Dict[int, list] = {}
         if series_plan and regime_configs:
             first_in_regime: set = set()
-            for regime in series_plan.get("regimes", []):
+            regimes = series_plan.get("regimes", [])
+            series_metadata = state.get("series_metadata", {})
+            _values = series_metadata.get("values", [])
+            _unit = series_metadata.get("unit", "")
+            for rnum, regime in enumerate(regimes, 1):
                 indices = sorted(regime.get("spectrum_indices", []))
-                if indices:
-                    first_in_regime.add(indices[0])
-            self.logger.info(f"   Regimes: {len(series_plan.get('regimes', []))}")
+                if not indices:
+                    continue
+                first_in_regime.add(indices[0])
+                if len(regimes) > 1:
+                    rng = ""
+                    if _values:
+                        vv = [_values[i] for i in indices if i < len(_values)]
+                        if vv:
+                            unit_str = f" {_unit}" if _unit else ""
+                            span = f"{min(vv)}" if min(vv) == max(vv) else f"{min(vv)}-{max(vv)}"
+                            rng = f" ({span}{unit_str})"
+                    bar = "  " + "─" * 56
+                    regime_markers[indices[0]] = [
+                        "", bar,
+                        f"  ▸ Regime {rnum}/{len(regimes)}: {regime.get('name', 'Unnamed')}{rng}",
+                        bar,
+                    ]
+            self.logger.info(f"   Regimes: {len(regimes)}")
             self.logger.info(
                 f"   First-in-regime spectra (full QC): {sorted(first_in_regime)}"
             )
@@ -4153,6 +4177,10 @@ Return JSON with:
 
             # Temporarily set the config for this spectrum
             state["locked_fitting_config"] = spectrum_config
+
+            # Regime-transition marker at each regime boundary.
+            for _line in regime_markers.get(idx, ()):
+                self.logger.info(_line)
 
             if is_single:
                 self.logger.info(f"Fitting: {spectrum_name}")
