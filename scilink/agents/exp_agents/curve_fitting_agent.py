@@ -300,6 +300,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         r2_threshold: Optional[float] = None,
         max_model_retries: Optional[int] = None,
         outlier_sigma: Optional[float] = None,
+        max_verification_iterations: Optional[int] = None,
         quality_gate: "QualityGate | dict | None" = None,
         **kwargs,
     ) -> Dict[str, Any]:
@@ -437,6 +438,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         effective_r2_threshold = r2_threshold if r2_threshold is not None else self.r2_threshold
         effective_max_retries = max_model_retries if max_model_retries is not None else self.max_model_retries
         effective_outlier_sigma = outlier_sigma if outlier_sigma is not None else self.outlier_sigma
+        # Per-call thoroughness override (fast/in-situ vs thorough/post-experiment).
+        # 0 => bypass LLM verification entirely; 1 => single check, no refit loop;
+        # higher => more refinement passes. Falls back to the construction default.
+        effective_max_verification = (
+            max_verification_iterations if max_verification_iterations is not None
+            else self.max_verification_iterations)
+        if effective_max_verification < 0:
+            raise ValueError("max_verification_iterations must be >= 0")
 
         # Resolve task_mode — caller sets this explicitly (standalone user or
         # orchestrator). Defaults to "fitting" when unset.
@@ -732,7 +741,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             r2_threshold=effective_r2_threshold,
             max_model_retries=effective_max_retries,
             outlier_sigma=effective_outlier_sigma,
-            max_verification_iterations=self.max_verification_iterations,
+            max_verification_iterations=effective_max_verification,
             parallel_workers=self.parallel_workers,
         )
         

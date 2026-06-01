@@ -3433,7 +3433,20 @@ Return JSON with:
 
             # --- Verification loop (for anchor spectra: first overall or first in regime) ---
             fit_was_approved = False
-            if _is_anchor:
+            if (_is_anchor and self.max_verification_iterations <= 0
+                    and best_result and best_result.get("success")):
+                # Explicit verification bypass (max_verification_iterations=0):
+                # the caller asked for a fast / in-situ turnaround. Accept the
+                # initial successful fit as-is, with no LLM verification or
+                # refit loop. Only triggers at <= 0, so the default thorough
+                # path (>= 1) is unaffected. A failed/degenerate initial fit
+                # (no success) still falls through to the loop below for the
+                # recovery path rather than locking garbage.
+                self.logger.info(
+                    f"   ⏩ Verification bypassed (max_verification_iterations=0); "
+                    f"accepting initial fit (R² = {best_r2:.4f})")
+                fit_was_approved = True
+            elif _is_anchor:
                 # Skip verification ONLY when there is no successful fit to work
                 # with. A fit that executed but is degenerate (low/zero R²) must
                 # still enter the loop: the verifier + adaptive annealing (which
