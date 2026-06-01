@@ -66,10 +66,13 @@ TOOL_SPEC = ToolSpec(
     description=(
         "Peak-list-based scoring of a simulated XRD pattern against an "
         "experimental one, with selectable algorithm. 'hanawalt' (default) "
-        "is classical figure-of-merit search-match; 'mip' is mixed-integer "
-        "linear programming with joint peak-assignment + zero-shift + "
-        "lattice-scale optimization. Use after the fast tier identifies a "
-        "short list of candidates; this tier is for confident "
+        "is classical figure-of-merit search-match; both algorithms fit a "
+        "single lattice scale so a DFT-relaxed reference cell (Materials "
+        "Project structures sit a few % off the experimental lattice) is "
+        "aligned before matching instead of being falsely rejected. 'mip' is "
+        "mixed-integer linear programming with joint peak-assignment + "
+        "zero-shift + lattice-scale optimization. Use after the fast tier "
+        "identifies a short list of candidates; this tier is for confident "
         "identification on real-lab patterns."
     ),
     import_line="from scilink.skills.structure_matching.xrd.score_match_robust import score_xrd_match_robust",
@@ -77,7 +80,8 @@ TOOL_SPEC = ToolSpec(
         "score_xrd_match_robust(exp_two_theta=None, exp_intensity=None, "
         "exp_peaks=None, sim_two_theta, sim_intensity, algorithm='hanawalt', "
         "tol_deg=0.3, max_exp_peaks=20, max_sim_peaks=30, "
-        "scale_search=(0.99, 1.01, 0.0025), shift_search=(-0.4, 0.4)) -> dict"
+        "scale_search=(0.96, 1.04, 0.002), shift_search=(-0.4, 0.4), "
+        "fit_lattice_scale=True) -> dict"
     ),
     parameters={
         "exp_two_theta": {
@@ -118,11 +122,15 @@ TOOL_SPEC = ToolSpec(
         },
         "scale_search": {
             "type": "tuple",
-            "description": "(min, max, step) lattice-scale grid for MIP. Default (0.98, 1.02, 0.002) — covers ±2% lattice-parameter mismatch (typical between MP DFT-relaxed cells and experimental conditions). Ignored by hanawalt.",
+            "description": "(min, max, step) lattice-scale grid used by BOTH algorithms. Default (0.96, 1.04, 0.002) — covers ±4% lattice-parameter mismatch (DFT-relaxed MP cells are typically 1-3% larger than the experimental cell; thermal expansion adds more). The scale is applied via Bragg's law (sin-theta scaling), not a constant 2-theta shift.",
         },
         "shift_search": {
             "type": "tuple",
             "description": "(min, max) zero-shift bounds for MIP (degrees). Default (-0.4, 0.4). Ignored by hanawalt.",
+        },
+        "fit_lattice_scale": {
+            "type": "bool",
+            "description": "hanawalt only. Default True: fit a single lattice scale (over scale_search) before matching, adopted only if it aligns >=2 reflections so a wrong phase is not force-aligned. Set False to match at the reference lattice as-is (e.g. when the reference is already at experimental conditions).",
         },
     },
     required=["sim_two_theta", "sim_intensity"],
@@ -131,7 +139,10 @@ TOOL_SPEC = ToolSpec(
         "'verdict' ('accept' | 'marginal' | 'reject'), 'matched_peaks' "
         "(list of {exp_idx, sim_idx, exp_pos, sim_pos, residual_deg}), "
         "'unmatched_exp' (list of exp peak indices), 'fitted_shift' "
-        "(degrees; 0 for hanawalt), 'fitted_scale' (1.0 for hanawalt), "
+        "(degrees; 0 for hanawalt), 'fitted_scale' (the fitted lattice scale; "
+        "1.0 = no scaling / reference already at the experimental lattice, "
+        ">1.0 = reference cell larger than experimental, e.g. ~1.02 for a "
+        "DFT-relaxed metal — a value near the search bound warrants review), "
         "'n_exp_peaks', 'n_sim_peaks'."
     ),
     when_to_use=(
@@ -159,8 +170,9 @@ def score_xrd_match_robust(
     tol_deg: float = 0.3,
     max_exp_peaks: int = 20,
     max_sim_peaks: int = 30,
-    scale_search: tuple = (0.98, 1.02, 0.002),
+    scale_search: tuple = (0.96, 1.04, 0.002),
     shift_search: tuple = (-0.4, 0.4),
+    fit_lattice_scale: bool = True,
 ) -> dict[str, Any]:
     """Robust peak-list scoring. See ``TOOL_SPEC`` for full contract."""
     if algorithm not in {"hanawalt", "mip"}:
@@ -177,7 +189,9 @@ def score_xrd_match_robust(
         return _empty_result(algorithm, exp_pl, sim_pl, "no simulated peaks")
 
     if algorithm == "hanawalt":
-        return _score_hanawalt(exp_pl, sim_pl, tol_deg=tol_deg)
+        return _score_hanawalt(
+            exp_pl, sim_pl, tol_deg=tol_deg,
+            scale_search=scale_search if fit_lattice_scale else None)
     return _score_mip(
         exp_pl, sim_pl,
         tol_deg=tol_deg,
@@ -272,14 +286,83 @@ def _empty_result(algorithm: str, exp_pl: _PeakList, sim_pl: _PeakList, why: str
 # Hanawalt search-match
 # ---------------------------------------------------------------------------
 
+def _apply_lattice_scale(positions, scale: float):
+    """Re-position peaks for a lattice-parameter scale `a` via Bragg's law.
+
+    A uniform lattice scaling multiplies every d-spacing, so sin(theta) scales:
+    sin(theta_scaled) = a * sin(theta_orig). This is the physically-correct
+    transform for a DFT-relaxed reference cell (typically a few % larger than
+    the experimental cell) — NOT a constant 2-theta shift, which is wrong away
+    from low angle."""
+    positions = np.asarray(positions, dtype=float)
+    sin_scaled = scale * np.sin(np.radians(positions / 2.0))
+    sin_scaled = np.clip(sin_scaled, -1.0, 1.0)
+    return 2.0 * np.degrees(np.arcsin(sin_scaled))
+
+
+def _fit_lattice_scale(exp_pl, sim_pl, tol_deg, scale_search, min_matches: int = 2) -> float:
+    """Find the single lattice scale that best aligns the simulated peaks to the
+    experimental ones (intensity-weighted matched coverage). Bounded to a few %
+    so a wrong phase can't be force-aligned.
+
+    A non-unity scale is only adopted if it aligns at least ``min_matches`` peaks
+    — a real DFT-relaxed phase snaps *multiple* reflections into place at the
+    right scale, whereas a wrong phase produces at most a lone coincidental
+    alignment that must not be allowed to drive the scale (which would erode
+    discrimination). Falls back to 1.0 (no scaling) otherwise."""
+    lo, hi, step = scale_search
+    scales = np.arange(lo, hi + step / 2.0, step)
+    sim_pos = np.asarray(sim_pl.positions)
+    exp_pos = np.asarray(exp_pl.positions)
+    exp_w = np.sqrt(np.asarray(exp_pl.intensities_norm))
+
+    def _eval(a: float):
+        sp = _apply_lattice_scale(sim_pos, a)
+        used: set[int] = set()
+        score = 0.0
+        n = 0
+        for ep, w in zip(exp_pos, exp_w):
+            res = np.abs(sp - ep)
+            for j in used:
+                res[j] = np.inf
+            j = int(np.argmin(res))
+            if res[j] <= tol_deg:
+                used.add(j)
+                n += 1
+                score += w * (1.0 - res[j] / tol_deg)
+        return score, n
+
+    base_score, _ = _eval(1.0)
+    best_scale, best_score = 1.0, base_score
+    for a in scales:
+        score, n = _eval(float(a))
+        if n < min_matches:
+            continue  # a lone coincidental alignment must not select a scale
+        if score > best_score + 1e-9 or (
+            abs(score - best_score) <= 1e-9 and abs(a - 1.0) < abs(best_scale - 1.0)
+        ):
+            best_score, best_scale = score, float(a)
+    return best_scale
+
+
 def _score_hanawalt(
     exp_pl: _PeakList,
     sim_pl: _PeakList,
     *,
     tol_deg: float,
+    scale_search: tuple | None = None,
 ) -> dict[str, Any]:
-    """Classical Hanawalt-style figure-of-merit with intensity weighting."""
-    sim_positions = np.asarray(sim_pl.positions)
+    """Classical Hanawalt-style figure-of-merit with intensity weighting.
+
+    When ``scale_search`` is given, a single lattice scale is fit first so a
+    DFT-relaxed reference cell (peaks shifted a few % in sin-theta) is aligned
+    to the experimental pattern before matching — otherwise such a reference is
+    falsely rejected even when the phase is clearly present."""
+    fitted_scale = (
+        _fit_lattice_scale(exp_pl, sim_pl, tol_deg, scale_search)
+        if scale_search else 1.0
+    )
+    sim_positions = _apply_lattice_scale(sim_pl.positions, fitted_scale)
     sim_norm = np.asarray(sim_pl.intensities_norm)
     used_sim = set()
     matched_peaks = []
@@ -356,7 +439,7 @@ def _score_hanawalt(
         "matched_peaks": matched_peaks,
         "unmatched_exp": unmatched_exp,
         "fitted_shift": 0.0,
-        "fitted_scale": 1.0,
+        "fitted_scale": float(fitted_scale),
         "n_exp_peaks": exp_pl.n,
         "n_sim_peaks": sim_pl.n,
     }
