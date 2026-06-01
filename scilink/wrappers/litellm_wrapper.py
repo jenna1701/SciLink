@@ -47,6 +47,28 @@ def _is_openai_reasoning_model(model: str) -> bool:
     name = model.split('/', 1)[-1]
     return bool(_REASONING_MODEL_RE.match(name))
 
+
+# Anthropic deprecated the temperature/top_p sampling knobs starting with Claude
+# Opus 4.8; assume every Opus at or beyond 4.8 (4.9, 5.x, …) does the same.
+# Bedrock 400s on these ("`temperature` is deprecated for this model"); other
+# providers may ignore rather than error. Like the OpenAI reasoning models, omit
+# the params for them. Earlier Opus (<=4.7) and other families are untouched.
+# Version parsed from the name so it covers every provider prefix
+# (bedrock/us.anthropic.claude-opus-4-8, anthropic/claude-opus-4-9, …) and a
+# trailing variant tag (…-4-8-1m).
+_OPUS_VERSION_RE = re.compile(r'claude-opus-(\d+)(?:-(\d+))?', re.IGNORECASE)
+
+
+def _model_deprecates_sampling(model: str) -> bool:
+    if not model:
+        return False
+    m = _OPUS_VERSION_RE.search(model)
+    if not m:
+        return False
+    major = int(m.group(1))
+    minor = int(m.group(2)) if m.group(2) else 0
+    return (major, minor) >= (4, 8)
+
 try:
     from PIL import Image
 except ImportError:
@@ -446,9 +468,10 @@ class LiteLLMGenerativeModel:
                 "frequency_penalty": "frequency_penalty",
             }
 
-            reasoning = _is_openai_reasoning_model(self.model)
+            omit_sampling = (_is_openai_reasoning_model(self.model)
+                             or _model_deprecates_sampling(self.model))
             for old, new in mapping.items():
-                if reasoning and old in ("temperature", "top_p"):
+                if omit_sampling and old in ("temperature", "top_p"):
                     continue
                 val = cfg.get(old)
                 if val is not None:
