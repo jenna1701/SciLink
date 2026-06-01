@@ -269,7 +269,11 @@ examine_data returns data_type:
 2. `load_metadata` (can pass directory path) or `convert_metadata`
 3. Decide agent (ask user if disambiguation_needed=true)
 4. `select_agent`
-5. `run_analysis`
+5. `run_analysis`. **Skill selection is technique-gated:** only pass a `skill`
+   whose declared technique matches the data's measurement technique (each
+   skill names its technique in the `skill` parameter's `[technique: …]` tag).
+   If no skill's technique matches the data, pass NO skill — the agent's
+   baseline fits it correctly. Never fall back to the nearest-sounding skill.
 6. Present results
 7. For deeper follow-up analysis on images, call `run_analysis` again with
    `prior_analysis_paths` set to the prior `output_directory`; the agent will
