@@ -300,6 +300,15 @@ def _apply_lattice_scale(positions, scale: float):
     return 2.0 * np.degrees(np.arcsin(sin_scaled))
 
 
+def _scaled_peaklist(pl: "_PeakList", scale: float) -> "_PeakList":
+    """A copy of a peak list with positions re-scaled for a lattice parameter."""
+    return _PeakList(
+        positions=[float(p) for p in _apply_lattice_scale(pl.positions, scale)],
+        intensities=list(pl.intensities),
+        intensities_norm=list(pl.intensities_norm),
+    )
+
+
 def _fit_lattice_scale(exp_pl, sim_pl, tol_deg, scale_search, min_matches: int = 2) -> float:
     """Find the single lattice scale that best aligns the simulated peaks to the
     experimental ones (intensity-weighted matched coverage). Bounded to a few %
@@ -718,14 +727,24 @@ TOOL_SPEC_MULTIPHASE = ToolSpec(
             "type": "int",
             "description": "Cap on experimental peaks considered (strongest kept). Default 30 (higher than single-phase since the assignment problem allocates across phases).",
         },
+        "lattice_scale_search": {
+            "type": "tuple",
+            "description": "(min, max, step) PER-PHASE lattice-scale grid (default (0.96, 1.04, 0.002), ±4%). Each phase is aligned independently before the joint assignment, because lattice mismatch is per-phase — e.g. a DFT-relaxed metal (+2%) and an experimental molecular reference (0%) in the same pattern need different scales. This is separate from scale_search/shift_search, which absorb the SHARED instrument zero-shift.",
+        },
+        "fit_lattice_scale": {
+            "type": "bool",
+            "description": "Default True: fit a per-phase lattice scale before the joint assignment (adopted only if it aligns >=2 reflections). Set False to match each phase at its reference lattice as-is.",
+        },
     },
     required=["exp_peaks", "candidates"],
     returns=(
         "dict with 'algorithm' ('mip_multiphase'), 'cost' (overall joint "
         "cost in [0, 1]), 'verdict', 'active_phases' (list of {id, "
-        "formula, coverage, matched_peaks, mean_residual_deg}), "
+        "formula, coverage, matched_peaks, mean_residual_deg, lattice_scale "
+        "— the per-phase fitted lattice scale, ~1.02 for a DFT-relaxed metal}), "
         "'unmatched_exp' (peak indices not explained by any phase), "
-        "'fitted_shift', 'fitted_scale', 'n_exp_peaks', 'n_phases_considered'."
+        "'fitted_shift', 'fitted_scale' (shared instrument terms), "
+        "'n_exp_peaks', 'n_phases_considered'."
     ),
     when_to_use=(
         "Suspected mixtures (system_info / notes mention 'mixture', "
@@ -745,6 +764,8 @@ def score_xrd_match_multiphase(
     scale_search: tuple = (0.99, 1.01, 0.005),
     shift_search: tuple = (-0.4, 0.4),
     max_exp_peaks: int = 30,
+    lattice_scale_search: tuple = (0.96, 1.04, 0.002),
+    fit_lattice_scale: bool = True,
 ) -> dict[str, Any]:
     """Joint multi-phase MIP. See ``TOOL_SPEC_MULTIPHASE`` for full contract."""
     if not PULP_AVAILABLE:
@@ -772,6 +793,20 @@ def score_xrd_match_multiphase(
         ))
     if all(pl.n == 0 for pl in sim_pls):
         return _empty_multiphase_result(candidates, "no simulated peaks")
+
+    # Lattice mismatch is PER-PHASE (a DFT-relaxed metal and an experimental
+    # molecular reference in the same pattern need different scales), so align
+    # each phase independently before the joint assignment. The MILP's shared
+    # scale/shift below then only absorbs the common instrument zero-shift, which
+    # genuinely IS shared (one detector). Without this, a single shared scale
+    # can align at most one phase of a mixture.
+    per_phase_scale = [1.0] * len(sim_pls)
+    if fit_lattice_scale:
+        for i, pl in enumerate(sim_pls):
+            if pl.n:
+                a = _fit_lattice_scale(exp_pl, pl, tol_deg, lattice_scale_search)
+                per_phase_scale[i] = a
+                sim_pls[i] = _scaled_peaklist(pl, a)
 
     scales = _scale_grid(scale_search)
     shift_lo, shift_hi = float(shift_search[0]), float(shift_search[1])
@@ -813,6 +848,7 @@ def score_xrd_match_multiphase(
             "coverage": per_phase["coverage"],
             "matched_peaks": per_phase["matched_peaks"],
             "mean_residual_deg": per_phase["mean_residual_deg"],
+            "lattice_scale": float(per_phase_scale[p_idx]),
         })
 
     return {
