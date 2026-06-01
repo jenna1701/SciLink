@@ -280,6 +280,27 @@ print("FIT_RESULTS_JSON: " + json.dumps({
 }))
 ```
 
+**Multi-phase emit (REQUIRED when using `score_xrd_match_multiphase`).** The
+multi-phase scorer returns ONE result with `active_phases` (not a ranked
+per-candidate list), plus `figure_of_merit` (= 1 − cost) and `verdict`. The
+quality gate reads `fit_quality.figure_of_merit`, so you MUST surface the
+multi-phase `figure_of_merit` there or the run is hard-rejected as "metric
+missing" regardless of how good the match is:
+
+```python
+mp = score_xrd_match_multiphase(exp_peaks=exp_peaks, candidates=candidates)
+print("FIT_RESULTS_JSON: " + json.dumps({
+    "active_phases": mp["active_phases"],          # each: id, formula, coverage,
+                                                   # matched_peaks, lattice_scale
+    "unmatched_exp": mp["unmatched_exp"],          # peaks no phase explains
+    "fit_quality": {
+        "figure_of_merit": mp["figure_of_merit"],  # gate reads THIS
+        "verdict": mp["verdict"],
+        "cost": mp["cost"],
+    },
+}))
+```
+
 **Background handling.** Both scorers default to subtracting the
 experimental minimum as a flat offset. For patterns with significant
 continuous background (amorphous halo, fluorescence), call
