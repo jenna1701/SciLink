@@ -4710,6 +4710,10 @@ Return JSON with:
                 {
                     "r_squared": entry.get("r_squared"),
                     "annealing_level": entry.get("annealing_level", 0),
+                    # The model in force at this iteration — lets a consumer
+                    # (e.g. the self-evolution figure) show the per-attempt
+                    # model alongside its R² and issues.
+                    "model": (entry.get("config_used") or {}).get("physical_model", ""),
                     "issues": [
                         {
                             "location": iss.get("location", ""),

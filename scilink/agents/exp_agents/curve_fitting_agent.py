@@ -1098,6 +1098,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
                 r2 = (r.get("fit_quality") or {}).get("r_squared") or 0
                 qh = r.get("quality_history") or {}
+                # Only distill fits that actually met the quality bar. A
+                # below-threshold "best available" fit is still returned with
+                # success=True (the script ran), so gate on the verifier's
+                # `approved` verdict to avoid memorializing a mediocre recipe.
+                if not qh.get("approved"):
+                    continue
                 levels = [
                     it.get("annealing_level", 0)
                     for it in qh.get("verification_iterations", [])

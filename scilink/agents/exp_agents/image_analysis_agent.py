@@ -833,8 +833,14 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 if not script:
                     continue
 
-                score = (r.get("quality_history") or {}).get("final_score")
                 qh = r.get("quality_history") or {}
+                # Only distill analyses that actually met the quality bar. A
+                # below-threshold "best available" result is still returned with
+                # success=True (the script ran), so gate on the verifier's
+                # `approved` verdict to avoid memorializing a mediocre recipe.
+                if not qh.get("approved"):
+                    continue
+                score = qh.get("final_score")
                 levels = [
                     it.get("annealing_level", 0)
                     for it in qh.get("verification_iterations", [])

@@ -232,7 +232,7 @@ class TestT2DistillHook:
                 "fit_quality": {"r_squared": 0.991},
                 "deviation_note": "switched model",
                 "script": "import numpy as np\n# VERBATIM_MARKER\nprint('fit')\n",
-                "quality_history": {"verification_iterations": [
+                "quality_history": {"approved": True, "verification_iterations": [
                     {"annealing_level": 0}, {"annealing_level": 2}]},
             }],
         }
@@ -295,6 +295,16 @@ class TestT2DistillHook:
         from scilink.agents.exp_agents.curve_fitting_agent import CurveFittingAgent
         agent = self._fake_agent(str(tmp_path), self._Model())
         assert CurveFittingAgent._maybe_distill_t2_skills(agent, self._hot_state()) == []
+
+    def test_no_distill_when_below_threshold(self, tmp_path, monkeypatch):
+        # A hot success that did NOT meet the quality bar (approved=False) is a
+        # "best available" fit and must not be memorialized as a skill.
+        monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+        from scilink.agents.exp_agents.curve_fitting_agent import CurveFittingAgent
+        agent = self._fake_agent(str(tmp_path), self._Model())
+        state = self._hot_state()
+        state["series_results"][0]["quality_history"]["approved"] = False
+        assert CurveFittingAgent._maybe_distill_t2_skills(agent, state) == []
 
 
 # ──────────────────────────────────────────────────────────────
@@ -445,7 +455,7 @@ class TestImageT2Distill:
                 "analysis_type": "atom segmentation + RDF",
                 "plan_deviation_summary": "switched to watershed after threshold failed",
                 "script": "import numpy as np\n# IMG_VERBATIM_MARKER\nprint('seg')\n",
-                "quality_history": {"final_score": 0.93, "verification_iterations": [
+                "quality_history": {"approved": True, "final_score": 0.93, "verification_iterations": [
                     {"annealing_level": 0}, {"annealing_level": 2}]},
             }],
         }
@@ -485,3 +495,11 @@ class TestImageT2Distill:
 
         agent = self._fake_agent(str(tmp_path), Boom())
         assert ImageAnalysisAgent._maybe_distill_t2_skills(agent, self._hot_state()) == []
+
+    def test_no_distill_when_below_threshold(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+        from scilink.agents.exp_agents.image_analysis_agent import ImageAnalysisAgent
+        agent = self._fake_agent(str(tmp_path), self._Model())
+        state = self._hot_state()
+        state["series_results"][0]["quality_history"]["approved"] = False
+        assert ImageAnalysisAgent._maybe_distill_t2_skills(agent, state) == []
