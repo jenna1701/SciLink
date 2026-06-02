@@ -1,5 +1,5 @@
 ---
-description: p-XRD profile fitting — per-peak pseudo-Voigt fits with FWHM, position, and intensity; Scherrer crystallite size and Williamson-Hall microstrain from the fitted line widths.
+description: 'p-XRD profile fitting — the quantitative follow-up to phase identification: per-peak pseudo-Voigt fits (position, intensity, FWHM), Scherrer crystallite size and Williamson-Hall microstrain, and a Rietveld tier (phase fractions / accurate lattice; engine pending) that refines against the identified-phase CIF.'
 technique: [XRD, "X-ray diffraction", "powder diffraction", pXRD]
 quality_gate:
   metric: r_squared
@@ -11,30 +11,62 @@ quality_gate:
 
 ## overview
 
-Powder X-ray diffraction profile fitting for line-broadening physics.
-Per-peak pseudo-Voigt fits yield calibrated peak positions, intensities,
-and full widths at half maximum (FWHMs). Those widths then feed two
-classical analyses:
+Powder X-ray diffraction profile fitting — **the quantitative follow-up to
+phase identification.** You normally arrive here *after* `structure_matching/
+xrd` has answered "what phase(s) is this?": the identified phase(s) and their
+reference CIF(s) are the prior this skill builds on. (It also runs standalone
+when the phase is already known.)
 
-- **Scherrer equation** for an average crystallite (coherent domain) size
-  from any single peak's broadening:
-  `D = K · λ / (β · cos θ)`.
-- **Williamson-Hall (W-H) plot** for separating size and strain
-  contributions from the 2θ dependence of broadening:
-  `β · cos θ = K · λ / D + 4 · ε · sin θ`.
+The skill is organized as three **depth tiers** — go only as deep as the
+question demands:
 
-This skill is the *profile* half of p-XRD analysis. The *identification*
-half — matching observed peaks to a candidate crystal phase — lives in
-the separate `structure_matching/xrd` skill. The two are designed to be
-co-activated: pass `skill=["xrd", "xrd_profile"]` and the LLM can chain
-profile fitting + phase identification in one analysis script.
+1. **Per-peak profile fit (default).** A global multi-peak (split) pseudo-Voigt
+   fit (`fit_pattern`) yields calibrated peak positions, intensities, and full
+   widths at half maximum (FWHMs). The identified phase's reference peak
+   positions are a strong prior for *which* reflections to expect.
+2. **Microstructure — size & strain.** The fitted FWHMs feed two classical
+   line-broadening analyses:
+   - **Scherrer** — average crystallite (coherent domain) size from a single
+     peak's broadening: `D = K · λ / (β · cos θ)`.
+   - **Williamson-Hall** — separates size and strain from the 2θ dependence of
+     broadening: `β · cos θ = K · λ / D + 4 · ε · sin θ`.
+3. **Rietveld refinement (deepest; engine pending).** Whole-pattern refinement
+   against the matched CIF for quantitative phase fractions (QPA), accurate
+   lattice parameters, and site occupancies. True Rietveld needs a dedicated
+   engine (GSAS-II) — see *planning* for the seam. Tiers 1–2 are always
+   available; tier 3 is a documented escalation, not yet wired.
 
-**Out of scope:** Rietveld refinement (atomic positions / occupancies);
-quantitative phase-fraction analysis (covered in
-`structure_matching/xrd`'s multi-phase MIP path); texture / preferred
-orientation correction; whole-pattern Le Bail fitting.
+Frame the work as: **identify (upstream) → profile-fit (here) → escalate to
+Rietveld only when phase fractions / accurate cell / occupancies are the actual
+deliverable.** Most follow-ups stop at tier 1 or 2.
+
+When both skills are co-activated (`skill=["xrd", "xrd_profile"]`) the LLM can
+chain identification and profile fitting in one script; the sequential
+"identify first, then this" framing above is the same pipeline, just split
+across calls.
+
+**Out of scope:** texture / preferred-orientation correction; whole-pattern
+Le Bail fitting. (Rietveld and quantitative phase fractions are **tier 3
+above**, not out of scope — the structural model comes from the upstream ID
+match; only the refinement *engine* is a pending GSAS-II seam.)
 
 ## planning
+
+**You usually arrive here with an identified phase — use it as a prior.** When
+`structure_matching/xrd` ran first, its result shapes this fit: the matched
+phase's reference peak positions tell you *which* reflections to expect (a
+sanity check on auto-detect, and a seed for a one-off single-pattern refine),
+and the matched CIF is the structural model a tier-3 Rietveld refine needs. Do
+**not** freeze those reference positions into a series script, though — for a
+series keep `fit_pattern` auto-detecting (see "In-situ / series"); the ID tells
+you the *phase*, not frozen centers. If no ID was run and the phase is already
+known, proceed standalone.
+
+**Default mechanism: global full-pattern fit.** Plan for a single
+`fit_pattern` call that detects and fits all significant peaks at once
+(background subtraction included), not a per-peak `fit_profile` loop. The
+points below shape *that* fit — how many peaks matter, when Williamson-Hall
+is admissible, which background — rather than a peak-by-peak procedure.
 
 **How many peaks to fit:**
 - Scherrer alone: 3–5 strongest, well-isolated peaks is enough — report
@@ -93,35 +125,52 @@ broadening per peak instead of the default uniform FWHM, which matters
 for nanocrystalline patterns with peaks several times broader than the
 0.15° default.
 
+**Escalating to Rietveld (tier 3).** Reach for Rietveld only when the
+deliverable is **quantitative phase fractions (QPA), accurate refined lattice
+parameters, or site occupancies** — not for size/strain, which tiers 1–2 cover.
+Rietveld refines the *whole pattern* against a structural model, so it requires
+the matched CIF from the upstream identification as the starting model (another
+reason ID comes first). True Rietveld is **not** in pymatgen; it needs a
+dedicated engine — GSAS-II via `GSASIIscriptable`. That plugs in through the
+same pluggable-engine pattern already established for simulation
+(`structure_matching/xrd/simulate_xrd.py`'s `_ENGINES` registry): a
+`refine_rietveld(cif, exp_data, ...)` tool behind a lazy import + optional
+`gsas` extra, leaving downstream scoring/reporting unaffected. **Until that
+engine is wired, do not attempt a whole-pattern refine with the kinematic
+tools** — report tiers 1–2 and recommend Rietveld as the explicit next step,
+naming the matched CIF as the model to refine.
+
 ## implementation
 
-**CRITICAL: profile fitting workflow.** The per-item analysis script
-must follow this sequence:
+**Default path: one global fit with `fit_pattern`.** Prefer `fit_pattern`
+over a per-peak `fit_profile` loop. It detects *all* significant peaks in
+one pass and fits them **simultaneously** on a shared baseline, so the
+reported R² and residual are **global** (over the whole pattern) — the same
+quantity the verifier judges. A per-peak loop reports per-window R², which
+hides every unmodelled reflection as a global-residual spike and triggers
+avoidable refinement iterations. `fit_pattern` seeds each amplitude from the
+measured apex (sharp peaks are never clipped) and scales parameters
+internally, so a busy pattern fits in ~1 s.
+
+**CRITICAL workflow:**
 
 1. Load experimental 2θ + intensity arrays.
-2. Subtract background via `fit_background`.
-3. Detect candidate peak centers via `extract_peaks` (reused from
-   `structure_matching/xrd`) — this gives a starting list to fit.
-4. For each peak, fit a pseudo-Voigt via `fit_profile` on a window
-   around the center.
-5. Per-peak Scherrer crystallite size via `scherrer`.
-6. If ≥ 5 peaks span a useful 2θ range, run `williamson_hall` for
-   size + strain.
-7. Emit `FIT_RESULTS_JSON: {...}` with per-peak results + aggregated
-   metrics (mean per-peak R², Scherrer mean, W-H size/strain).
+2. `fit_pattern` (handles background + detection + global fit in one call).
+3. Per-peak Scherrer crystallite size via `scherrer` on the returned FWHMs.
+4. If ≥ 5 peaks span a useful 2θ range, run `williamson_hall`.
+5. Emit `FIT_RESULTS_JSON: {...}` carrying the **global** R² from
+   `fit_pattern` (not a mean of per-window R²s) plus per-peak results.
 
-**Complete profile-fitting template:**
+**Complete full-pattern template:**
 
 ```python
 import json
 import numpy as np
 
 from scilink.skills._shared.curve_fitting_tools import load_curve_data
-from scilink.skills.curve_fitting.xrd_profile.background import fit_background
-from scilink.skills.curve_fitting.xrd_profile.fit_profile import fit_profile
+from scilink.skills.curve_fitting.xrd_profile.fit_pattern import fit_pattern
 from scilink.skills.curve_fitting.xrd_profile.scherrer import scherrer
 from scilink.skills.curve_fitting.xrd_profile.williamson_hall import williamson_hall
-from scilink.skills.structure_matching.xrd.extract_peaks import extract_peaks
 
 # ---- Step 1: Load ----
 data = load_curve_data(DATA_PATH)  # ndarray with X in col 0, Y in col 1
@@ -131,83 +180,93 @@ intensity = np.asarray(data[:, 1], dtype=float)
 WAVELENGTH_ANGSTROM = 1.5406  # CuKa1; replace from metadata if available
 INSTRUMENTAL_FWHM_DEG = 0.05  # from LaB6/Si standard; 0.0 if unknown
 
-# ---- Step 2: Background subtraction ----
-bg = fit_background(two_theta.tolist(), intensity.tolist(), method='snip')
-intensity_sub = np.asarray(bg['intensity_corrected'], dtype=float)
-
-# ---- Step 3: Seed peak list ----
-seed = extract_peaks(
-    two_theta.tolist(), intensity_sub.tolist(),
-    prominence_frac=0.02, max_peaks=10,
+# ---- Step 2: One global multi-peak fit (background handled inside) ----
+# Let fit_pattern DETECT the peaks (do not hardcode centers): the same call
+# then generalises unchanged to every frame of a series. See "In-situ / series".
+fit = fit_pattern(
+    two_theta.tolist(), intensity.tolist(),
+    background='snip',          # 'none' if data is already background-subtracted
 )
-peak_centers = seed['positions']
+peaks = fit['peaks']            # each: center, fwhm, amplitude, area, eta
+r_squared = fit['r_squared']    # GLOBAL R²
 
-# ---- Step 4: Per-peak pseudo-Voigt fit ----
-fits = []
-for center in peak_centers:
-    result = fit_profile(
-        exp_two_theta=two_theta.tolist(),
-        exp_intensity=intensity_sub.tolist(),
-        peak_init=center,
-        model='pseudo_voigt',
-        window_deg=1.0,
-        background='linear',  # residual baseline inside the window
-    )
-    fits.append(result)
-
-# ---- Step 5: Per-peak Scherrer size ----
+# ---- Step 3: Per-peak Scherrer size ----
 sizes_nm = []
-for f in fits:
-    if f['r_squared'] < 0.9:
-        continue  # don't trust Scherrer on a bad fit
+for p in peaks:
     s = scherrer(
-        fwhm_deg=f['fwhm'],
-        two_theta_deg=f['center'],
+        fwhm_deg=p['fwhm'],
+        two_theta_deg=p['center'],
         wavelength_angstrom=WAVELENGTH_ANGSTROM,
         instrumental_fwhm_deg=INSTRUMENTAL_FWHM_DEG,
     )
     sizes_nm.append(s['size_nm'])
 mean_size_nm = float(np.mean(sizes_nm)) if sizes_nm else None
 
-# ---- Step 6: Williamson-Hall (optional) ----
-wh_input = [
-    {'two_theta': f['center'], 'fwhm': f['fwhm']}
-    for f in fits if f['r_squared'] >= 0.9
-]
-wh = None
-if len(wh_input) >= 5:
-    wh = williamson_hall(
-        peaks=wh_input,
-        wavelength_angstrom=WAVELENGTH_ANGSTROM,
-        instrumental_fwhm_deg=INSTRUMENTAL_FWHM_DEG,
-    )
+# ---- Step 4: Williamson-Hall (optional) ----
+wh_input = [{'two_theta': p['center'], 'fwhm': p['fwhm']} for p in peaks]
+wh = williamson_hall(
+    peaks=wh_input,
+    wavelength_angstrom=WAVELENGTH_ANGSTROM,
+    instrumental_fwhm_deg=INSTRUMENTAL_FWHM_DEG,
+) if len(wh_input) >= 5 else None
 
-# ---- Step 7: Emit ----
-mean_r2 = float(np.mean([f['r_squared'] for f in fits])) if fits else 0.0
+# ---- Step 5: Emit ----
 print("FIT_RESULTS_JSON: " + json.dumps({
     "peaks": [
-        {k: f[k] for k in ('center', 'fwhm', 'amplitude', 'eta', 'r_squared')}
-        for f in fits
+        {k: p[k] for k in ('center', 'fwhm', 'amplitude', 'area', 'eta')}
+        for p in peaks
     ],
     "scherrer_mean_size_nm": mean_size_nm,
     "scherrer_per_peak_nm": sizes_nm,
     "williamson_hall": wh,
     "fit_quality": {
-        "r_squared": mean_r2,
-        "verdict": "accept" if mean_r2 >= 0.95 else (
-            "marginal" if mean_r2 >= 0.85 else "reject"
+        "r_squared": r_squared,                       # GLOBAL
+        "residual_rms_over_noise": fit['residual_rms_over_noise'],
+        "verdict": "accept" if r_squared >= 0.95 else (
+            "marginal" if r_squared >= 0.85 else "reject"
         ),
-        "n_peaks_fitted": len(fits),
-        "n_peaks_used_for_scherrer": len(sizes_nm),
+        "n_peaks_fitted": fit['n_peaks'],
     },
 }))
 ```
 
-**Joint fitting for overlapping peaks.** When `fit_profile` returns
-`r_squared < 0.9` and the residual shows a shoulder on one side of the
-peak, refit that window with two pseudo-Voigt components by passing
-`peak_init=[center1, center2]` (list of two starting centers). The tool
-constructs a composite model.
+**In-situ / series use — lock the method, not the values.** `fit_pattern` is
+one fast call per frame, so it drops straight into the agent's per-spectrum
+series loop. The locked series script **must call `fit_pattern` with
+`peak_centers=None` (auto-detect)** — lock the *recipe* (the `fit_pattern` call
+and its settings), never a hardcoded list of peak centers. Auto-detect re-finds
+the peaks on every frame, so the one script follows peak shifts (thermal
+expansion), intensity changes (phase fraction), and appearance/disappearance,
+and composes with the agent's regime-segmentation and adaptive-refit paths. A
+**value-locked** script — hardcoded `SEED_CENTERS` / an explicit `peak_centers`
+list frozen from frame 1 — does **not** generalise: centers drift out of their
+windows even within one phase, and break entirely across a reaction or
+transition (measured: a list locked from a post-transition frame scored
+R²≈0.5–0.7 on pre-transition frames). Frame-to-frame **consistency comes from
+the identical method plus aligning the detected peaks across frames in
+interpretation, not from frozen centers.** Only pass an explicit `peak_centers`
+for a one-off re-fit of a single known-stable pattern — never as the series
+default.
+
+For speed across a long series: the default `snip_iterations='auto'` sweeps
+a few background widths per frame (~4× the fit cost). Once the establishing
+frame reports its choice (in `background_method`, e.g. `snip(iterations=10)`),
+pass that integer as `snip_iterations` on the remaining frames to skip the
+sweep — back to ~1 s/frame with the same background treatment.
+
+**Unresolved doublet? Tune detection, don't drill.** `fit_pattern` already
+fits all peaks jointly with an asymmetric (split pseudo-Voigt) shape, so it
+resolves overlaps and peak asymmetry in one consistent global model. If a tight
+doublet is smeared because auto-detect merged it, fix it the **method-locked**
+way: lower `min_distance_deg` (so closely-spaced maxima are detected separately)
+and/or lower `prominence_frac` (so the weaker partner is found) — these stay
+generalisable across a series because the recipe still auto-detects per frame.
+Do **not** splice in a separate `fit_profile` window fit: `fit_profile` uses a
+*symmetric* profile, so its result conflicts with the global split-PV fit and
+reintroduces exactly the asymmetric residual the global model removed (this
+drives avoidable verifier iterations). Reserve `fit_profile` only for one-off
+inspection of a single peak
+outside the main fit.
 
 **NumPy compatibility.** Use `np.trapezoid` (not removed `np.trapz`).
 
@@ -258,6 +317,19 @@ crystal phase has not yet been identified, recommend running
 refined FWHMs from this skill can be passed in to sharpen the scoring.
 
 ## validation
+
+**Know when the fit is done.** `fit_pattern`'s default split (asymmetric)
+pseudo-Voigt already captures sharp-peak asymmetry, so once the global R² ≥ ~0.99
+and every visible reflection is modelled (no *unmodelled*-peak spikes in the
+residual), small residual at the apex of the few sharpest, highest-count peaks
+is the irreducible profile limit — accept it rather than spending refinement
+iterations chasing it. Do **not** re-fit individual peaks with a symmetric
+`fit_profile` window: it conflicts with the global split-PV model and
+reintroduces asymmetric residual, *worsening* the fit and adding iterations. If a
+peak is genuinely missing, lower `prominence_frac` (and/or `min_distance_deg`) so
+auto-detect catches it and re-run the single global `fit_pattern` — keep the
+recipe auto-detecting (so it still generalises frame-to-frame), not spliced
+sub-fits or hardcoded centers.
 
 **Per-peak fit checks:**
 - `r_squared` ≥ 0.95 for each fit accepts; 0.85–0.95 marginal; below

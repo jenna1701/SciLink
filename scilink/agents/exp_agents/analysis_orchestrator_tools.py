@@ -2030,6 +2030,7 @@ class AnalysisOrchestratorTools:
             reuse_locked_script: bool = False,
             literature_file: str = None,
             r2_threshold: float = None,
+            max_verification_iterations: int = None,
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
@@ -2524,6 +2525,19 @@ class AnalysisOrchestratorTools:
                             f"   r2_threshold={r2_threshold} ignored: "
                             f"{self.AGENT_NAMES.get(agent_id, 'agent')} has no R² gate."
                         )
+                if max_verification_iterations is not None:
+                    # Thoroughness / turnaround override. 0 bypasses LLM
+                    # verification (fast/in-situ), higher = more refinement
+                    # (thorough/post-experiment). Only forward to agents whose
+                    # analyze() accepts it (currently CurveFitting).
+                    import inspect as _inspect
+                    if "max_verification_iterations" in _inspect.signature(agent.analyze).parameters:
+                        analyze_kwargs["max_verification_iterations"] = int(max_verification_iterations)
+                    else:
+                        self.logger.info(
+                            f"   max_verification_iterations={max_verification_iterations} ignored: "
+                            f"{self.AGENT_NAMES.get(agent_id, 'agent')} has no verification loop."
+                        )
                 result = agent.analyze(**analyze_kwargs)
                 
                 # === Store result ===
@@ -2810,6 +2824,24 @@ class AnalysisOrchestratorTools:
                         "skill's R² gate (a warning is logged on conflict), but it "
                         "will NOT replace a skill that scores by a non-R² metric. "
                         "Leave unset for standard analyses."
+                    )
+                },
+                "max_verification_iterations": {
+                    "type": "integer",
+                    "description": (
+                        "CurveFitting agent only. Controls how thorough the "
+                        "fit-verification/refinement loop is — the speed-vs-rigor "
+                        "knob. Set it ONLY when the user asks about turnaround or "
+                        "checking depth; leave unset for the standard (thorough) "
+                        "default. Map the user's intent: a fast / quick / in-situ / "
+                        "real-time / 'good enough' turnaround → 1 (a single check, "
+                        "no refinement loop); 'skip/bypass/no verification' → 0 "
+                        "(accept the first good fit with no LLM verification at "
+                        "all); an explicit count (e.g. 'two verification steps') → "
+                        "that integer; thorough / careful / publication / "
+                        "post-experiment analysis → leave unset (defaults to 7). "
+                        "Often paired with r2_threshold (e.g. 'use R²=0.98 and a "
+                        "single verification step')."
                     )
                 }
             },
