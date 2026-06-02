@@ -1,5 +1,5 @@
 ---
-description: XRD phase identification (search-match) — the default first-pass XRD analysis: "what phase(s) is this?". Queries crystal-structure databases (COD, Materials Project, local CIF), simulates kinematic patterns, and scores by cross-correlation (fast) and Hanawalt / MIP peak-matching (robust). Use this for routine phase ID; the xrd_profile skill is the specialized follow-up for line-broadening (crystallite size / strain) once the phase is known.
+description: 'XRD phase identification (search-match) — the default first-pass XRD analysis answering "what phase(s) is this?". Queries crystal-structure databases (COD, Materials Project, local CIF), simulates kinematic patterns, and scores by cross-correlation (fast) and Hanawalt / MIP peak-matching (robust). Use this for routine phase ID; the xrd_profile skill is the specialized follow-up for line-broadening (crystallite size / strain) once the phase is known.'
 quality_gate:
   metric: figure_of_merit
   accept_threshold: 0.70
