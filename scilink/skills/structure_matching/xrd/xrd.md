@@ -351,15 +351,50 @@ genuinely the right model.
 `simulate_xrd_pattern` call. Pull from experiment metadata when present;
 otherwise default CuKa.
 
-**Peak broadening.** Both scorers use a Lorentzian with FWHM=0.15° by
-default. For low-resolution or strongly broadened experimental patterns
-(nanocrystalline samples), bump `fwhm` to 0.3-0.5° so peaks overlap as
-they do in the data.
+**Peak broadening.** The fast tier's `fwhm` defaults to `'auto'`, which
+estimates the experimental peak width and broadens the simulation to match
+(floored at 0.15°) — so nanocrystalline / low-resolution patterns are handled
+without manual tuning. Pass a number only to force an exact width. The robust
+tier matches on peak *positions* within `tol_deg` (default 0.3°); widen
+`tol_deg` to ~0.5° for very broad peaks whose centers are poorly defined.
 
 **When the robust tier disagrees with the fast tier.** Trust the robust
 tier — it factors out background, scale, and intensity-ratio effects
 that the fast tier folds into the correlation. The fast tier is a
 triage step; the robust tier is the identification.
+
+**In-situ / series — lock the phase set, not the search.** For a
+time/temperature series (operando, a ramp), identify ONCE on the establishing
+(anchor) frame, then score every later frame against that LOCKED phase set — do
+**not** re-search the database per frame (slow, and the candidate ranking can
+flicker frame-to-frame). The agent reuses the anchor's script VERBATIM in a
+per-frame working directory, and the anchor always runs first, so make the script
+**self-locking** via a shared file one directory up (the per-frame dirs are
+siblings under a common parent):
+
+1. Read this frame's pattern from the canonical `data.npy` in the working dir.
+2. Resolve a shared lock path: `lock = Path.cwd().parent / "xrd_locked_phases.json"`.
+3. **Anchor frame (lock absent):** run the normal search → simulate → score
+   identification; once the phase(s) are confirmed, SAVE the matched phase
+   references to `lock` — for each phase its simulated `two_theta` + `intensities`
+   (the `sim_*` keys `score_xrd_match_multiphase` expects), plus `formula`, `id`,
+   and any fitted `lattice_scale`. This is the "lock the identified phase" step.
+4. **Later frames (lock present):** SKIP the search entirely; load the locked
+   phase patterns and run `score_xrd_match_multiphase(exp_peaks=<this frame's
+   extracted peaks>, candidates=<locked phases>)` → per-frame per-phase `coverage`
+   and `lattice_scale`.
+5. Emit `FIT_RESULTS_JSON` with `figure_of_merit` plus, for THIS frame, each
+   phase's `coverage` and `lattice_scale`. Aggregated across frames these trace
+   the **phase-fraction evolution** (coverage rising / falling = a phase growing /
+   disappearing) and **thermal expansion** (lattice_scale drift).
+
+The anchor establishes the lock before any later frame reads it (later frames may
+run in parallel and only READ the lock — no race). Locking the phase *set* — not
+a frozen search, not frozen peak positions — is what generalises: each later frame
+re-extracts its own peaks and re-fits per-phase lattice scale, so the method
+follows peak shifts (thermal expansion) and intensity changes (phase fraction)
+while keeping the *identity* decision fixed from the anchor. (Mirrors the
+`xrd_profile` skill's "lock the method, not the values," adapted to identification.)
 
 ## interpretation
 
@@ -410,6 +445,22 @@ mixture has many resolved peaks per phase. The tool does NOT compute
 quantitative phase fractions (peak-area weighted Rietveld refinement
 is the standard for that); the `coverage` field is a peak-count
 proxy, not a phase fraction. Note this caveat in the report.
+
+**`predicted_coverage` — reject over-predicting false matches.** Each active
+phase reports `predicted_coverage`: the intensity-weighted fraction of *that
+phase's own strong reflections* that are actually present in the data
+(bidirectional matching). A real phase shows nearly all its strong peaks
+(`predicted_coverage` ≈ 0.8–1.0). A **peak-rich wrong phase** (e.g. a Magnéli
+suboxide standing in for TiO₂, or a telluride/alloy standing in for a pure
+metal) explains a few experimental peaks by overlap but leaves most of its OWN
+strong peaks unobserved (`predicted_coverage` ≈ 0.1–0.4). **Treat an active
+phase with `predicted_coverage` below ~0.5 as a likely false match: do not
+report or lock it — widen the search (more candidates / the correct polymorph)
+to find a phase that explains those peaks with high predicted_coverage.** Low
+`coverage` AND low `predicted_coverage` together = the scorer latched onto a
+minority of correctly-positioned peaks while the phase is wrong. (A genuinely
+textured sample can suppress some reflections and lower `predicted_coverage`
+legitimately — weigh it against the residuals and the alternatives.)
 
 ## validation
 
