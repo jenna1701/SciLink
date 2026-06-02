@@ -74,6 +74,18 @@ _MULTIPHASE_ACTIVATION_PENALTY = 3.0
 _MULTIPHASE_ABSENT_PENALTY = 3.0
 _STRONG_SIM_FRAC = 0.15
 
+# Single-phase Hanawalt predicted-coverage gate. A phase whose OWN strong
+# reflections are mostly absent from the data is a coincidental few-peak false
+# match (e.g. a wrong-chemistry phase grabbing 2-3 peaks by overlap, or a
+# lattice-scaled near-miss). Down-weight its FoM by predicted_coverage once that
+# drops below _PRED_COV_FULL; at/above it the gate is 1.0 so a real phase (which
+# shows nearly all its strong peaks) is unaffected. This is the single-phase
+# analogue of the multiphase predicted-but-absent penalty. Calibrated to 0.65:
+# real phases (predicted_coverage ~0.89-1.0 even nanocrystalline) keep full FoM,
+# while a wrong-chemistry match (predicted_coverage ~0.46) is cut below the
+# reject threshold instead of scoring a false "marginal".
+_PRED_COV_FULL = 0.65
+
 
 TOOL_SPEC = ToolSpec(
     name="score_xrd_match_robust",
@@ -445,6 +457,26 @@ def _score_hanawalt(
 
     fom = 0.55 * coverage + 0.35 * mean_pos + 0.10 * mean_int
 
+    # Bidirectional gate: of THIS phase's strong reflections, how many appear in
+    # the data? A real phase shows nearly all of them (gate ~1.0); a coincidental
+    # false match leaves most of its own strong peaks unobserved -> gate < 1 ->
+    # FoM cut, so a wrong-chemistry phase can no longer score "marginal" off a
+    # few overlapping peaks.
+    imax = max(sim_pl.intensities) if sim_pl.intensities else 0.0
+    if imax > 0:
+        strong_total = sum(
+            sim_pl.intensities[j] / imax for j in range(sim_pl.n)
+            if sim_pl.intensities[j] / imax >= _STRONG_SIM_FRAC
+        )
+        strong_matched = sum(
+            sim_pl.intensities[j] / imax for j in used_sim
+            if sim_pl.intensities[j] / imax >= _STRONG_SIM_FRAC
+        )
+        predicted_coverage = strong_matched / strong_total if strong_total > 0 else 1.0
+    else:
+        predicted_coverage = 1.0
+    fom = fom * min(1.0, predicted_coverage / _PRED_COV_FULL)
+
     if fom >= _HANAWALT_ACCEPT_MIN:
         verdict = "accept"
     elif fom >= _HANAWALT_MARGINAL_MIN:
@@ -456,6 +488,7 @@ def _score_hanawalt(
         "algorithm": "hanawalt",
         "figure_of_merit": float(fom),
         "coverage": float(coverage),
+        "predicted_coverage": float(predicted_coverage),
         "position_score": float(mean_pos),
         "intensity_score": float(mean_int),
         "verdict": verdict,
