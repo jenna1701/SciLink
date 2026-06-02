@@ -30,6 +30,7 @@ def render_skills_tab() -> None:
 def _render_upload_section(agent) -> None:
     """Upload custom skill files."""
     st.subheader("Upload Skills")
+    st.caption("Available for this session only — not saved to persistent memory.")
     uploaded = st.file_uploader(
         "Upload a custom skill file (.md)",
         type=["md"],
@@ -73,6 +74,7 @@ def _load_skill_file(agent, uploaded_file) -> None:
 def _render_available_skills(agent) -> None:
     """Show built-in and custom skills."""
     st.subheader("Available Skills")
+    st.caption("Active in this session: shipped built-in skills plus any you uploaded.")
 
     # Built-in subsection
     st.markdown("**Built-in**")
@@ -99,16 +101,19 @@ def _render_available_skills(agent) -> None:
 def _render_memory_section() -> None:
     """Persistent memory — graduated and auto-distilled skills under ~/.scilink.
 
-    Provisional skills (auto-distilled from successful T=2 curve fits) are shown
-    with a badge and can be promoted (made auto-routable) or pruned. Promoted
-    skills survive sessions and pip upgrades and are auto-discovered by the loader.
+    Provisional skills (auto-distilled from hard fits the agent solved only after
+    escalating — T=2 auto-distillation, today wired in the curve-fitting agent;
+    the provisional mechanism itself is domain-agnostic) are shown with a badge
+    and can be promoted (made auto-routable) or pruned. Promoted skills survive
+    sessions and pip upgrades and are auto-discovered by the loader.
     """
     from scilink.skills._shared import _memory
 
-    st.subheader("🧠 Persistent Memory")
+    st.subheader("Persistent Memory")
     st.caption(
         "Graduated and auto-distilled skills stored under `~/.scilink` — they "
-        "survive sessions and upgrades. Provisional skills (from hard T=2 fits) "
+        "survive sessions and upgrades. Provisional skills (auto-distilled from "
+        "hard fits the agent had to solve from scratch — currently curve fitting) "
         "are held out of auto-routing until you promote them."
     )
 
