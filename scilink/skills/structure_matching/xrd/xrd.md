@@ -1,5 +1,5 @@
 ---
-description: XRD structure matching — query crystal-structure databases (Materials Project, local CIF), simulate kinematic patterns, score by cross-correlation (fast) and Hanawalt / MIP peak-matching (robust).
+description: 'XRD phase identification (search-match) — the default first-pass XRD analysis answering "what phase(s) is this?". Queries crystal-structure databases (COD, Materials Project, local CIF), simulates kinematic patterns, and scores by cross-correlation (fast) and Hanawalt / MIP peak-matching (robust). Use this for routine phase ID; the xrd_profile skill is the specialized follow-up for line-broadening (crystallite size / strain) once the phase is known.'
 quality_gate:
   metric: figure_of_merit
   accept_threshold: 0.70
@@ -11,11 +11,20 @@ quality_gate:
 ## overview
 
 Identify a crystalline phase from an experimental X-ray diffraction (XRD)
-pattern by matching against database structures. The skill ships five
-tools the analysis script chains together:
+pattern by matching against database structures. **This is the default,
+highest-frequency XRD question — "what phase(s) is my sample?" — and the usual
+first pass for any XRD pattern.** Profile fitting (the `xrd_profile` skill:
+per-peak pseudo-Voigt → Scherrer crystallite size / Williamson-Hall strain) is
+the *specialized follow-up* once the phase is known, not the starting point.
 
-- `search_structures` — query Materials Project and / or a local CIF
-  directory for candidate structures (chemistry + symmetry filters).
+The skill ships five tools the analysis script chains together:
+
+- `search_structures` — query the **COD** (Crystallography Open Database — the
+  recommended default: experimental structures, organic + inorganic, no API key),
+  **Materials Project** (computed inorganic; for stability ranking / predicted
+  phases), and / or a local CIF directory for candidate structures (chemistry +
+  symmetry filters). COD's experimental cells avoid the DFT lattice mismatch that
+  MP structures carry.
 - `simulate_xrd_pattern` — kinematic XRD pattern from a CIF via pymatgen
   (CuKa default; any wavelength supported).
 - `score_xrd_match_fast` — **fast tier**. Cross-correlation of the
@@ -55,6 +64,14 @@ addressable as `sources=["icsd"]` in `search_structures`. See
 protocol and the registration helpers.
 
 ## planning
+
+**This is pattern-MATCHING, not fitting.** The deliverable is a ranked candidate
+match plus a `figure_of_merit` (the skill's quality gate) — *not* a fitted model.
+The plan must not list peak-shape fit parameters (pseudo-Voigt mixing `eta`,
+per-peak FWHM / amplitude as fit targets); the only quantitative outputs are the
+matched phase(s), the scorer's `figure_of_merit`, and its fitted zero-shift /
+lattice-scale. Every stage below chains search → simulate → score; no stage fits
+the experimental pattern.
 
 **Two-tier identification workflow** — both tiers usually run, never
 either-alone:
@@ -124,11 +141,21 @@ single-candidate list — it gracefully reduces to the single-phase MIP
 under that input (with one phase always active) and the joint solver's
 output format is the same.
 
-**Bounding the candidate count.** Always set `search_structures(query={
-"top_n": N, ...})` with N in [3, 10]. More than 10 candidates per
-spectrum bloats simulation cost without adding identification certainty
-— if the answer isn't in the top 5, the chemistry hypothesis is usually
-wrong, not the candidate count.
+**Candidate count — tight first pass, widen on failure.** The cost is the
+per-candidate *simulation*, so keep the FIRST pass cheap: `search_structures(
+query={"top_n": N, ...})` with N in [5, 10]. That already identifies common
+single-polymorph phases.
+
+But if that pass FAILS (best `figure_of_merit` below the accept threshold /
+all candidates marginal-or-reject), the answer is often a phase that the tight
+retrieval simply did not return — a *polymorph-rich* chemistry (e.g. Ti-O has
+many TiO2 polymorphs plus Magnéli suboxides; the right one can be candidate #20,
+not #5). On such a re-plan you SHOULD widen the retrieval — `top_n` up to ~30
+(and/or relax symmetry/lattice filters, or try an alternate chemistry
+hypothesis) — and re-run. This widening is *expected and allowed* on a failed
+pass; do not stay capped at 10 while re-planning a search that returned no
+confident match. (For an in-situ *series*, keep it tight per frame — the
+establishing frame can widen once, then lock the identified phase.)
 
 **Wavelength selection.** Default CuKa unless the experiment metadata
 says otherwise. MoKa is common for high-2θ work. A wavelength mismatch
@@ -159,26 +186,18 @@ accepts three optional filters that often pay for themselves:
 All three are optional and respected by Materials Project and the
 local CIF backend; COD ignores them.
 
-**Pairing with `curve_fitting/xrd_profile`.** When both skills are
-active in the same run (`skill=["xrd", "xrd_profile"]`), the
-recommended flow is:
-
-1. `extract_peaks` seeds candidate peak centers on the experimental
-   pattern.
-2. `fit_profile` (from `xrd_profile`) fits each peak with a
-   pseudo-Voigt and returns refined center, FWHM, amplitude, and per-
-   peak R².
-3. The refined values are passed to `score_xrd_match_robust` as
-   `exp_peaks={'positions': [...], 'amplitudes': [...], 'fwhms': [...]}`
-   — the existing peak-list input format. No API change needed.
-4. The scorer then ranks candidates against peaks with calibrated
-   widths instead of the default uniform broadening, which matters
-   most for nanocrystalline samples where peaks are 5-10× broader
-   than the 0.15° default.
-
-For data without significant line broadening (well-crystallized,
-sharp peaks), the bridge is unnecessary — `extract_peaks` alone gives
-fine positions and the scorers' defaults work.
+**Profile fitting is a DOWNSTREAM follow-up, not part of identification.**
+Crystallite size / strain (per-peak pseudo-Voigt → Scherrer / Williamson-Hall)
+is the `curve_fitting/xrd_profile` skill's job, run as a **separate step after
+the phase is identified** — never an in-ID fit. Identification needs only peak
+*positions and relative intensities* (the light `extract_peaks`), which the
+scorers consume directly. Do **not** call `fit_profile`, fit pseudo-Voigt peaks,
+or compute per-peak R² inside the identification script: it adds nothing the
+match needs and pulls the run into the curve-fitting pipeline (an R²-shaped
+deliverable the `figure_of_merit` gate then rejects, triggering avoidable
+refinement iterations). When line broadening matters for the match on
+nanocrystalline data, **widen the scorer's `fwhm` (0.3-0.5°)** rather than
+fitting each peak.
 
 ## analysis
 
@@ -186,7 +205,9 @@ fine positions and the scorers' defaults work.
 must follow this exact sequence:
 
 1. Load experimental 2-theta + intensity arrays.
-2. Call `search_structures` once with `top_n` between 3 and 10.
+2. Call `search_structures` with `top_n` 5-10 (first pass). If the run is a
+   re-plan after a failed/low-FoM pass, widen `top_n` up to ~30 and/or relax
+   filters (see "Candidate count — tight first pass, widen on failure").
 3. For each candidate, call `simulate_xrd_pattern` and `score_xrd_match_fast`.
 4. Filter to candidates with `verdict in {'accept', 'marginal'}`.
 5. Call `extract_peaks` once on the experimental pattern.
@@ -197,6 +218,21 @@ must follow this exact sequence:
    metadata. The `search_structures` tool already prints its own
    `DB_MATCHES_JSON:` marker; the framework's stdout parser lifts it
    into `fit_results['db_matches']` automatically.
+
+**Don't profile-fit for identification.** Two common over-builds to avoid:
+- The **fast tier needs no peak extraction** — it cross-correlates the
+  *continuous* (background-subtracted) pattern directly. Subtract the background,
+  then correlate; do not extract or fit peaks before Step 3.
+- For the **robust tier**, use the **light** `extract_peaks` (positions +
+  relative intensities). Do **NOT** fit a pseudo-Voigt profile to every peak —
+  that is the `xrd_profile` skill's specialized job (crystallite size / strain)
+  and is unnecessary for identification, which only needs positions + relative
+  intensities. FWHMs from `extract_peaks` are optional refinement, not a goal.
+- **Emit `figure_of_merit`, never `r_squared`.** The ID gate scores by
+  `figure_of_merit`; there is no curve fit here, so there is no R² to report.
+  For the visualization, overlay the best-match **simulated** pattern (broadened
+  sticks) on the experimental data — do not `curve_fit` a profile for the plot
+  or compute an R² for it.
 
 **Complete two-tier template** — adapt for the active wavelength and
 chemistry hypothesis:
@@ -280,6 +316,27 @@ print("FIT_RESULTS_JSON: " + json.dumps({
 }))
 ```
 
+**Multi-phase emit (REQUIRED when using `score_xrd_match_multiphase`).** The
+multi-phase scorer returns ONE result with `active_phases` (not a ranked
+per-candidate list), plus `figure_of_merit` (= 1 − cost) and `verdict`. The
+quality gate reads `fit_quality.figure_of_merit`, so you MUST surface the
+multi-phase `figure_of_merit` there or the run is hard-rejected as "metric
+missing" regardless of how good the match is:
+
+```python
+mp = score_xrd_match_multiphase(exp_peaks=exp_peaks, candidates=candidates)
+print("FIT_RESULTS_JSON: " + json.dumps({
+    "active_phases": mp["active_phases"],          # each: id, formula, coverage,
+                                                   # matched_peaks, lattice_scale
+    "unmatched_exp": mp["unmatched_exp"],          # peaks no phase explains
+    "fit_quality": {
+        "figure_of_merit": mp["figure_of_merit"],  # gate reads THIS
+        "verdict": mp["verdict"],
+        "cost": mp["cost"],
+    },
+}))
+```
+
 **Background handling.** Both scorers default to subtracting the
 experimental minimum as a flat offset. For patterns with significant
 continuous background (amorphous halo, fluorescence), call
@@ -294,15 +351,50 @@ genuinely the right model.
 `simulate_xrd_pattern` call. Pull from experiment metadata when present;
 otherwise default CuKa.
 
-**Peak broadening.** Both scorers use a Lorentzian with FWHM=0.15° by
-default. For low-resolution or strongly broadened experimental patterns
-(nanocrystalline samples), bump `fwhm` to 0.3-0.5° so peaks overlap as
-they do in the data.
+**Peak broadening.** The fast tier's `fwhm` defaults to `'auto'`, which
+estimates the experimental peak width and broadens the simulation to match
+(floored at 0.15°) — so nanocrystalline / low-resolution patterns are handled
+without manual tuning. Pass a number only to force an exact width. The robust
+tier matches on peak *positions* within `tol_deg` (default 0.3°); widen
+`tol_deg` to ~0.5° for very broad peaks whose centers are poorly defined.
 
 **When the robust tier disagrees with the fast tier.** Trust the robust
 tier — it factors out background, scale, and intensity-ratio effects
 that the fast tier folds into the correlation. The fast tier is a
 triage step; the robust tier is the identification.
+
+**In-situ / series — lock the phase set, not the search.** For a
+time/temperature series (operando, a ramp), identify ONCE on the establishing
+(anchor) frame, then score every later frame against that LOCKED phase set — do
+**not** re-search the database per frame (slow, and the candidate ranking can
+flicker frame-to-frame). The agent reuses the anchor's script VERBATIM in a
+per-frame working directory, and the anchor always runs first, so make the script
+**self-locking** via a shared file one directory up (the per-frame dirs are
+siblings under a common parent):
+
+1. Read this frame's pattern from the canonical `data.npy` in the working dir.
+2. Resolve a shared lock path: `lock = Path.cwd().parent / "xrd_locked_phases.json"`.
+3. **Anchor frame (lock absent):** run the normal search → simulate → score
+   identification; once the phase(s) are confirmed, SAVE the matched phase
+   references to `lock` — for each phase its simulated `two_theta` + `intensities`
+   (the `sim_*` keys `score_xrd_match_multiphase` expects), plus `formula`, `id`,
+   and any fitted `lattice_scale`. This is the "lock the identified phase" step.
+4. **Later frames (lock present):** SKIP the search entirely; load the locked
+   phase patterns and run `score_xrd_match_multiphase(exp_peaks=<this frame's
+   extracted peaks>, candidates=<locked phases>)` → per-frame per-phase `coverage`
+   and `lattice_scale`.
+5. Emit `FIT_RESULTS_JSON` with `figure_of_merit` plus, for THIS frame, each
+   phase's `coverage` and `lattice_scale`. Aggregated across frames these trace
+   the **phase-fraction evolution** (coverage rising / falling = a phase growing /
+   disappearing) and **thermal expansion** (lattice_scale drift).
+
+The anchor establishes the lock before any later frame reads it (later frames may
+run in parallel and only READ the lock — no race). Locking the phase *set* — not
+a frozen search, not frozen peak positions — is what generalises: each later frame
+re-extracts its own peaks and re-fits per-phase lattice scale, so the method
+follows peak shifts (thermal expansion) and intensity changes (phase fraction)
+while keeping the *identity* decision fixed from the anchor. (Mirrors the
+`xrd_profile` skill's "lock the method, not the values," adapted to identification.)
 
 ## interpretation
 
@@ -353,6 +445,22 @@ mixture has many resolved peaks per phase. The tool does NOT compute
 quantitative phase fractions (peak-area weighted Rietveld refinement
 is the standard for that); the `coverage` field is a peak-count
 proxy, not a phase fraction. Note this caveat in the report.
+
+**`predicted_coverage` — reject over-predicting false matches.** Each active
+phase reports `predicted_coverage`: the intensity-weighted fraction of *that
+phase's own strong reflections* that are actually present in the data
+(bidirectional matching). A real phase shows nearly all its strong peaks
+(`predicted_coverage` ≈ 0.8–1.0). A **peak-rich wrong phase** (e.g. a Magnéli
+suboxide standing in for TiO₂, or a telluride/alloy standing in for a pure
+metal) explains a few experimental peaks by overlap but leaves most of its OWN
+strong peaks unobserved (`predicted_coverage` ≈ 0.1–0.4). **Treat an active
+phase with `predicted_coverage` below ~0.5 as a likely false match: do not
+report or lock it — widen the search (more candidates / the correct polymorph)
+to find a phase that explains those peaks with high predicted_coverage.** Low
+`coverage` AND low `predicted_coverage` together = the scorer latched onto a
+minority of correctly-positioned peaks while the phase is wrong. (A genuinely
+textured sample can suppress some reflections and lower `predicted_coverage`
+legitimately — weigh it against the residuals and the alternatives.)
 
 ## validation
 

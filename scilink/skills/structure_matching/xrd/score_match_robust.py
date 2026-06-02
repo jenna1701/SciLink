@@ -53,6 +53,14 @@ _HANAWALT_MARGINAL_MIN = 0.40
 _MIP_ACCEPT_MAX = 0.25
 _MIP_MARGINAL_MAX = 0.55
 
+# MIP cost weights (intensity-weighted form). The cost penalises the UNEXPLAINED
+# INTENSITY fraction (weak noise peaks the extractor picked up barely count; a
+# missing STRONG reflection still drives cost up) plus the mean matched-peak
+# residual. Replaces the old count-based "each unmatched peak costs a tolerance
+# unit", which let ~10 noise peaks reject an otherwise-correct multi-phase match.
+_COST_UNCOVERED_W = 0.8
+_COST_RESIDUAL_W = 0.2
+
 # Multi-phase MIP: per-phase activation penalty in the MILP objective. Each
 # active phase costs this many "implicit unmatched peaks" — so a phase is
 # only kept when it accounts for more matches than that. Tuned to ~3 peaks:
@@ -60,16 +68,45 @@ _MIP_MARGINAL_MAX = 0.55
 # real component.
 _MULTIPHASE_ACTIVATION_PENALTY = 3.0
 
+# Multi-phase MIP: predicted-but-absent penalty (BIDIRECTIONAL matching). The
+# bare "maximize matched exp peaks" objective rewards a peak-RICH phase for
+# covering experimental peaks while never charging it for its OWN strong
+# reflections that are absent from the data — so a Magnéli-type suboxide with
+# ~30 reflections can out-cover the true anatase+rutile by overlap. We add a
+# penalty: for each ACTIVE phase, every strong predicted peak (relative
+# intensity >= _STRONG_SIM_FRAC) that is NOT matched to an experimental peak
+# costs `_MULTIPHASE_ABSENT_PENALTY * (its relative intensity)`. A phase whose
+# strong predicted peaks are mostly missing then loses, even if it covers a few
+# experimental peaks. Weak predicted reflections (the long tail, often below
+# detection) are NOT penalised — only the strong ones a real phase must show.
+_MULTIPHASE_ABSENT_PENALTY = 3.0
+_STRONG_SIM_FRAC = 0.15
+
+# Single-phase Hanawalt predicted-coverage gate. A phase whose OWN strong
+# reflections are mostly absent from the data is a coincidental few-peak false
+# match (e.g. a wrong-chemistry phase grabbing 2-3 peaks by overlap, or a
+# lattice-scaled near-miss). Down-weight its FoM by predicted_coverage once that
+# drops below _PRED_COV_FULL; at/above it the gate is 1.0 so a real phase (which
+# shows nearly all its strong peaks) is unaffected. This is the single-phase
+# analogue of the multiphase predicted-but-absent penalty. Calibrated to 0.65:
+# real phases (predicted_coverage ~0.89-1.0 even nanocrystalline) keep full FoM,
+# while a wrong-chemistry match (predicted_coverage ~0.46) is cut below the
+# reject threshold instead of scoring a false "marginal".
+_PRED_COV_FULL = 0.65
+
 
 TOOL_SPEC = ToolSpec(
     name="score_xrd_match_robust",
     description=(
         "Peak-list-based scoring of a simulated XRD pattern against an "
         "experimental one, with selectable algorithm. 'hanawalt' (default) "
-        "is classical figure-of-merit search-match; 'mip' is mixed-integer "
-        "linear programming with joint peak-assignment + zero-shift + "
-        "lattice-scale optimization. Use after the fast tier identifies a "
-        "short list of candidates; this tier is for confident "
+        "is classical figure-of-merit search-match; both algorithms fit a "
+        "single lattice scale so a DFT-relaxed reference cell (Materials "
+        "Project structures sit a few % off the experimental lattice) is "
+        "aligned before matching instead of being falsely rejected. 'mip' is "
+        "mixed-integer linear programming with joint peak-assignment + "
+        "zero-shift + lattice-scale optimization. Use after the fast tier "
+        "identifies a short list of candidates; this tier is for confident "
         "identification on real-lab patterns."
     ),
     import_line="from scilink.skills.structure_matching.xrd.score_match_robust import score_xrd_match_robust",
@@ -77,7 +114,8 @@ TOOL_SPEC = ToolSpec(
         "score_xrd_match_robust(exp_two_theta=None, exp_intensity=None, "
         "exp_peaks=None, sim_two_theta, sim_intensity, algorithm='hanawalt', "
         "tol_deg=0.3, max_exp_peaks=20, max_sim_peaks=30, "
-        "scale_search=(0.99, 1.01, 0.0025), shift_search=(-0.4, 0.4)) -> dict"
+        "scale_search=(0.96, 1.04, 0.002), shift_search=(-0.4, 0.4), "
+        "fit_lattice_scale=True) -> dict"
     ),
     parameters={
         "exp_two_theta": {
@@ -118,11 +156,15 @@ TOOL_SPEC = ToolSpec(
         },
         "scale_search": {
             "type": "tuple",
-            "description": "(min, max, step) lattice-scale grid for MIP. Default (0.98, 1.02, 0.002) — covers ±2% lattice-parameter mismatch (typical between MP DFT-relaxed cells and experimental conditions). Ignored by hanawalt.",
+            "description": "(min, max, step) lattice-scale grid used by BOTH algorithms. Default (0.96, 1.04, 0.002) — covers ±4% lattice-parameter mismatch (DFT-relaxed MP cells are typically 1-3% larger than the experimental cell; thermal expansion adds more). The scale is applied via Bragg's law (sin-theta scaling), not a constant 2-theta shift.",
         },
         "shift_search": {
             "type": "tuple",
             "description": "(min, max) zero-shift bounds for MIP (degrees). Default (-0.4, 0.4). Ignored by hanawalt.",
+        },
+        "fit_lattice_scale": {
+            "type": "bool",
+            "description": "hanawalt only. Default True: fit a single lattice scale (over scale_search) before matching, adopted only if it aligns >=2 reflections so a wrong phase is not force-aligned. Set False to match at the reference lattice as-is (e.g. when the reference is already at experimental conditions).",
         },
     },
     required=["sim_two_theta", "sim_intensity"],
@@ -131,7 +173,10 @@ TOOL_SPEC = ToolSpec(
         "'verdict' ('accept' | 'marginal' | 'reject'), 'matched_peaks' "
         "(list of {exp_idx, sim_idx, exp_pos, sim_pos, residual_deg}), "
         "'unmatched_exp' (list of exp peak indices), 'fitted_shift' "
-        "(degrees; 0 for hanawalt), 'fitted_scale' (1.0 for hanawalt), "
+        "(degrees; 0 for hanawalt), 'fitted_scale' (the fitted lattice scale; "
+        "1.0 = no scaling / reference already at the experimental lattice, "
+        ">1.0 = reference cell larger than experimental, e.g. ~1.02 for a "
+        "DFT-relaxed metal — a value near the search bound warrants review), "
         "'n_exp_peaks', 'n_sim_peaks'."
     ),
     when_to_use=(
@@ -159,8 +204,9 @@ def score_xrd_match_robust(
     tol_deg: float = 0.3,
     max_exp_peaks: int = 20,
     max_sim_peaks: int = 30,
-    scale_search: tuple = (0.98, 1.02, 0.002),
+    scale_search: tuple = (0.96, 1.04, 0.002),
     shift_search: tuple = (-0.4, 0.4),
+    fit_lattice_scale: bool = True,
 ) -> dict[str, Any]:
     """Robust peak-list scoring. See ``TOOL_SPEC`` for full contract."""
     if algorithm not in {"hanawalt", "mip"}:
@@ -177,7 +223,9 @@ def score_xrd_match_robust(
         return _empty_result(algorithm, exp_pl, sim_pl, "no simulated peaks")
 
     if algorithm == "hanawalt":
-        return _score_hanawalt(exp_pl, sim_pl, tol_deg=tol_deg)
+        return _score_hanawalt(
+            exp_pl, sim_pl, tol_deg=tol_deg,
+            scale_search=scale_search if fit_lattice_scale else None)
     return _score_mip(
         exp_pl, sim_pl,
         tol_deg=tol_deg,
@@ -272,14 +320,110 @@ def _empty_result(algorithm: str, exp_pl: _PeakList, sim_pl: _PeakList, why: str
 # Hanawalt search-match
 # ---------------------------------------------------------------------------
 
+def _apply_lattice_scale(positions, scale: float):
+    """Re-position peaks for a lattice-parameter scale `a` via Bragg's law.
+
+    A uniform lattice scaling multiplies every d-spacing, so sin(theta) scales:
+    sin(theta_scaled) = a * sin(theta_orig). This is the physically-correct
+    transform for a DFT-relaxed reference cell (typically a few % larger than
+    the experimental cell) — NOT a constant 2-theta shift, which is wrong away
+    from low angle."""
+    positions = np.asarray(positions, dtype=float)
+    sin_scaled = scale * np.sin(np.radians(positions / 2.0))
+    sin_scaled = np.clip(sin_scaled, -1.0, 1.0)
+    return 2.0 * np.degrees(np.arcsin(sin_scaled))
+
+
+def _scaled_peaklist(pl: "_PeakList", scale: float) -> "_PeakList":
+    """A copy of a peak list with positions re-scaled for a lattice parameter."""
+    return _PeakList(
+        positions=[float(p) for p in _apply_lattice_scale(pl.positions, scale)],
+        intensities=list(pl.intensities),
+        intensities_norm=list(pl.intensities_norm),
+    )
+
+
+def _fit_lattice_scale(exp_pl, sim_pl, tol_deg, scale_search, min_matches: int = 2) -> float:
+    """Find the single lattice scale that best aligns the simulated peaks to the
+    experimental ones (intensity-weighted matched coverage). Bounded to a few %
+    so a wrong phase can't be force-aligned.
+
+    A non-unity scale is only adopted if it aligns at least ``min_matches`` peaks
+    — a real DFT-relaxed phase snaps *multiple* reflections into place at the
+    right scale, whereas a wrong phase produces at most a lone coincidental
+    alignment that must not be allowed to drive the scale (which would erode
+    discrimination). Falls back to 1.0 (no scaling) otherwise."""
+    lo, hi, step = scale_search
+    scales = np.arange(lo, hi + step / 2.0, step)
+    sim_pos = np.asarray(sim_pl.positions)
+    exp_pos = np.asarray(exp_pl.positions)
+    exp_w = np.sqrt(np.asarray(exp_pl.intensities_norm))
+
+    def _eval(a: float):
+        sp = _apply_lattice_scale(sim_pos, a)
+        used: set[int] = set()
+        score = 0.0
+        n = 0
+        for ep, w in zip(exp_pos, exp_w):
+            res = np.abs(sp - ep)
+            for j in used:
+                res[j] = np.inf
+            j = int(np.argmin(res))
+            if res[j] <= tol_deg:
+                used.add(j)
+                n += 1
+                score += w * (1.0 - res[j] / tol_deg)
+        return score, n
+
+    base_score, _ = _eval(1.0)
+    best_scale, best_score = 1.0, base_score
+    for a in scales:
+        score, n = _eval(float(a))
+        if n < min_matches:
+            continue  # a lone coincidental alignment must not select a scale
+        if score > best_score + 1e-9 or (
+            abs(score - best_score) <= 1e-9 and abs(a - 1.0) < abs(best_scale - 1.0)
+        ):
+            best_score, best_scale = score, float(a)
+    return best_scale
+
+
+def _weighted_cost(exp_pl: "_PeakList", unmatched_exp, total_residual: float, tol_deg: float) -> float:
+    """Intensity-weighted joint cost in [0, 1] (figure_of_merit = 1 - cost).
+    Penalises the UNEXPLAINED INTENSITY fraction (so weak noise peaks barely
+    count, while a missing strong reflection still drives cost up) plus the mean
+    matched-peak residual. Replaces the old count-based form where each unmatched
+    peak — noise or not — cost a full tolerance unit, which rejected otherwise-
+    correct matches whenever the extractor returned a handful of noise peaks."""
+    total_int = sum(exp_pl.intensities)
+    if total_int > 0:
+        unmatched_int = sum(exp_pl.intensities[i] for i in unmatched_exp)
+        uncovered = unmatched_int / total_int
+    else:
+        uncovered = len(unmatched_exp) / max(exp_pl.n, 1)
+    n_matched = exp_pl.n - len(unmatched_exp)
+    mean_res = (total_residual / n_matched) / tol_deg if n_matched > 0 else 1.0
+    return float(_COST_UNCOVERED_W * uncovered + _COST_RESIDUAL_W * min(mean_res, 1.0))
+
+
 def _score_hanawalt(
     exp_pl: _PeakList,
     sim_pl: _PeakList,
     *,
     tol_deg: float,
+    scale_search: tuple | None = None,
 ) -> dict[str, Any]:
-    """Classical Hanawalt-style figure-of-merit with intensity weighting."""
-    sim_positions = np.asarray(sim_pl.positions)
+    """Classical Hanawalt-style figure-of-merit with intensity weighting.
+
+    When ``scale_search`` is given, a single lattice scale is fit first so a
+    DFT-relaxed reference cell (peaks shifted a few % in sin-theta) is aligned
+    to the experimental pattern before matching — otherwise such a reference is
+    falsely rejected even when the phase is clearly present."""
+    fitted_scale = (
+        _fit_lattice_scale(exp_pl, sim_pl, tol_deg, scale_search)
+        if scale_search else 1.0
+    )
+    sim_positions = _apply_lattice_scale(sim_pl.positions, fitted_scale)
     sim_norm = np.asarray(sim_pl.intensities_norm)
     used_sim = set()
     matched_peaks = []
@@ -339,6 +483,26 @@ def _score_hanawalt(
 
     fom = 0.55 * coverage + 0.35 * mean_pos + 0.10 * mean_int
 
+    # Bidirectional gate: of THIS phase's strong reflections, how many appear in
+    # the data? A real phase shows nearly all of them (gate ~1.0); a coincidental
+    # false match leaves most of its own strong peaks unobserved -> gate < 1 ->
+    # FoM cut, so a wrong-chemistry phase can no longer score "marginal" off a
+    # few overlapping peaks.
+    imax = max(sim_pl.intensities) if sim_pl.intensities else 0.0
+    if imax > 0:
+        strong_total = sum(
+            sim_pl.intensities[j] / imax for j in range(sim_pl.n)
+            if sim_pl.intensities[j] / imax >= _STRONG_SIM_FRAC
+        )
+        strong_matched = sum(
+            sim_pl.intensities[j] / imax for j in used_sim
+            if sim_pl.intensities[j] / imax >= _STRONG_SIM_FRAC
+        )
+        predicted_coverage = strong_matched / strong_total if strong_total > 0 else 1.0
+    else:
+        predicted_coverage = 1.0
+    fom = fom * min(1.0, predicted_coverage / _PRED_COV_FULL)
+
     if fom >= _HANAWALT_ACCEPT_MIN:
         verdict = "accept"
     elif fom >= _HANAWALT_MARGINAL_MIN:
@@ -350,13 +514,14 @@ def _score_hanawalt(
         "algorithm": "hanawalt",
         "figure_of_merit": float(fom),
         "coverage": float(coverage),
+        "predicted_coverage": float(predicted_coverage),
         "position_score": float(mean_pos),
         "intensity_score": float(mean_int),
         "verdict": verdict,
         "matched_peaks": matched_peaks,
         "unmatched_exp": unmatched_exp,
         "fitted_shift": 0.0,
-        "fitted_scale": 1.0,
+        "fitted_scale": float(fitted_scale),
         "n_exp_peaks": exp_pl.n,
         "n_sim_peaks": sim_pl.n,
     }
@@ -569,11 +734,9 @@ def _solve_mip_for_scale(
             "residual_deg": float(residual),
         })
     unmatched_exp = [i for i in range(nE) if i not in matched_exp_set]
-    # Normalized cost in [0, 1]: each unmatched peak costs tol, each matched
-    # pair costs its residual. Divide by tol * nE so a perfect identification
-    # gives ~0 and total mismatch gives 1.
-    raw_cost = total_residual + tol_deg * len(unmatched_exp)
-    cost = raw_cost / (tol_deg * max(nE, 1))
+    # Intensity-weighted cost (see _weighted_cost): unexplained INTENSITY plus
+    # mean residual, so noise peaks don't reject a correct match.
+    cost = _weighted_cost(exp_pl, unmatched_exp, total_residual, tol_deg)
 
     return {
         "cost": float(cost),
@@ -635,14 +798,26 @@ TOOL_SPEC_MULTIPHASE = ToolSpec(
             "type": "int",
             "description": "Cap on experimental peaks considered (strongest kept). Default 30 (higher than single-phase since the assignment problem allocates across phases).",
         },
+        "lattice_scale_search": {
+            "type": "tuple",
+            "description": "(min, max, step) PER-PHASE lattice-scale grid (default (0.96, 1.04, 0.002), ±4%). Each phase is aligned independently before the joint assignment, because lattice mismatch is per-phase — e.g. a DFT-relaxed metal (+2%) and an experimental molecular reference (0%) in the same pattern need different scales. This is separate from scale_search/shift_search, which absorb the SHARED instrument zero-shift.",
+        },
+        "fit_lattice_scale": {
+            "type": "bool",
+            "description": "Default True: fit a per-phase lattice scale before the joint assignment (adopted only if it aligns >=2 reflections). Set False to match each phase at its reference lattice as-is.",
+        },
     },
     required=["exp_peaks", "candidates"],
     returns=(
         "dict with 'algorithm' ('mip_multiphase'), 'cost' (overall joint "
-        "cost in [0, 1]), 'verdict', 'active_phases' (list of {id, "
-        "formula, coverage, matched_peaks, mean_residual_deg}), "
+        "cost in [0, 1], lower better), 'figure_of_merit' (1 - cost, "
+        "higher-better mirror so the same quality gate as the single-phase "
+        "scorer reads a multi-phase result), 'verdict', 'active_phases' (list of {id, "
+        "formula, coverage, matched_peaks, mean_residual_deg, lattice_scale "
+        "— the per-phase fitted lattice scale, ~1.02 for a DFT-relaxed metal}), "
         "'unmatched_exp' (peak indices not explained by any phase), "
-        "'fitted_shift', 'fitted_scale', 'n_exp_peaks', 'n_phases_considered'."
+        "'fitted_shift', 'fitted_scale' (shared instrument terms), "
+        "'n_exp_peaks', 'n_phases_considered'."
     ),
     when_to_use=(
         "Suspected mixtures (system_info / notes mention 'mixture', "
@@ -662,6 +837,8 @@ def score_xrd_match_multiphase(
     scale_search: tuple = (0.99, 1.01, 0.005),
     shift_search: tuple = (-0.4, 0.4),
     max_exp_peaks: int = 30,
+    lattice_scale_search: tuple = (0.96, 1.04, 0.002),
+    fit_lattice_scale: bool = True,
 ) -> dict[str, Any]:
     """Joint multi-phase MIP. See ``TOOL_SPEC_MULTIPHASE`` for full contract."""
     if not PULP_AVAILABLE:
@@ -689,6 +866,20 @@ def score_xrd_match_multiphase(
         ))
     if all(pl.n == 0 for pl in sim_pls):
         return _empty_multiphase_result(candidates, "no simulated peaks")
+
+    # Lattice mismatch is PER-PHASE (a DFT-relaxed metal and an experimental
+    # molecular reference in the same pattern need different scales), so align
+    # each phase independently before the joint assignment. The MILP's shared
+    # scale/shift below then only absorbs the common instrument zero-shift, which
+    # genuinely IS shared (one detector). Without this, a single shared scale
+    # can align at most one phase of a mixture.
+    per_phase_scale = [1.0] * len(sim_pls)
+    if fit_lattice_scale:
+        for i, pl in enumerate(sim_pls):
+            if pl.n:
+                a = _fit_lattice_scale(exp_pl, pl, tol_deg, lattice_scale_search)
+                per_phase_scale[i] = a
+                sim_pls[i] = _scaled_peaklist(pl, a)
 
     scales = _scale_grid(scale_search)
     shift_lo, shift_hi = float(shift_search[0]), float(shift_search[1])
@@ -728,13 +919,21 @@ def score_xrd_match_multiphase(
             "id": cand.get("id", str(p_idx)),
             "formula": cand.get("formula", ""),
             "coverage": per_phase["coverage"],
+            "predicted_coverage": per_phase.get("predicted_coverage", 1.0),
             "matched_peaks": per_phase["matched_peaks"],
             "mean_residual_deg": per_phase["mean_residual_deg"],
+            "lattice_scale": float(per_phase_scale[p_idx]),
         })
 
     return {
         "algorithm": "mip_multiphase",
         "cost": float(cost),
+        # Higher-is-better mirror of `cost`, so the same quality gate the
+        # single-phase scorer feeds (metric='figure_of_merit') can read a
+        # multi-phase result. cost in [0,1] (lower better) -> fom = 1 - cost;
+        # the multi-phase accept (cost <= 0.25) maps to fom >= 0.75, above the
+        # 0.70 gate. The authoritative accept/marginal/reject is `verdict`.
+        "figure_of_merit": float(max(0.0, 1.0 - cost)),
         "verdict": verdict,
         "active_phases": active_phases,
         "unmatched_exp": best["unmatched_exp"],
@@ -749,6 +948,7 @@ def _empty_multiphase_result(candidates: list[dict], why: str) -> dict[str, Any]
     return {
         "algorithm": "mip_multiphase",
         "cost": float("inf"),
+        "figure_of_merit": 0.0,
         "verdict": "reject",
         "active_phases": [],
         "unmatched_exp": [],
@@ -758,6 +958,25 @@ def _empty_multiphase_result(candidates: list[dict], why: str) -> dict[str, Any]
         "n_phases_considered": len(candidates),
         "note": why,
     }
+
+
+def _strong_sim_weights(sim_pls: list["_PeakList"]) -> dict[int, list[tuple[int, float]]]:
+    """Per phase, the (sim peak index, relative-intensity weight) list for peaks
+    at >= _STRONG_SIM_FRAC of that phase's maximum intensity — the strong
+    reflections a real phase must show, used by the predicted-but-absent
+    penalty. Weak peaks (the long tail, often below detection) are excluded."""
+    out: dict[int, list[tuple[int, float]]] = {}
+    for p_idx, pl in enumerate(sim_pls):
+        items: list[tuple[int, float]] = []
+        if pl.n and pl.intensities:
+            imax = max(pl.intensities)
+            if imax > 0:
+                for j in range(pl.n):
+                    w = pl.intensities[j] / imax
+                    if w >= _STRONG_SIM_FRAC:
+                        items.append((j, float(w)))
+        out[p_idx] = items
+    return out
 
 
 def _solve_multiphase_mip(
@@ -831,13 +1050,8 @@ def _solve_multiphase_mip(
     }
     shift = pulp.LpVariable("shift", lowBound=shift_lo, upBound=shift_hi)
 
-    # Objective: maximize matches, minus per-phase activation cost
-    prob += (
-        pulp.lpSum(x.values())
-        - _MULTIPHASE_ACTIVATION_PENALTY * pulp.lpSum(y.values())
-    )
-
-    # Constraint groupings
+    # Constraint groupings (built before the objective so the predicted-absent
+    # penalty can reference per-(sim-peak, phase) match sums).
     by_i: dict[int, list[tuple[int, int, int]]] = {i: [] for i in range(nE)}
     by_jp: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
     by_p: dict[int, list[tuple[int, int, int]]] = {p_idx: [] for p_idx in range(nP)}
@@ -846,6 +1060,26 @@ def _solve_multiphase_mip(
         by_i[i].append(t)
         by_jp.setdefault((j, p_idx), []).append(t)
         by_p[p_idx].append(t)
+
+    # Strong predicted peaks per phase (relative intensity >= _STRONG_SIM_FRAC),
+    # weighted by relative intensity — the reflections a real phase must show.
+    strong_sim = _strong_sim_weights(sim_pls)
+
+    # Objective: maximize matched exp peaks, minus per-phase activation cost,
+    # minus the predicted-but-absent penalty (BIDIRECTIONAL matching). For an
+    # active phase (y=1) a strong predicted peak j contributes its weight unless
+    # it is matched (Σ_i x[i,j,p] = 1); an inactive phase contributes nothing
+    # (y=0 forces every x[*,j,p]=0, so y - Σx = 0). This is linear in x, y.
+    absent_penalty = pulp.lpSum(
+        w * (y[p_idx] - pulp.lpSum(x[t] for t in by_jp.get((j, p_idx), [])))
+        for p_idx, js in strong_sim.items()
+        for j, w in js
+    )
+    prob += (
+        pulp.lpSum(x.values())
+        - _MULTIPHASE_ACTIVATION_PENALTY * pulp.lpSum(y.values())
+        - _MULTIPHASE_ABSENT_PENALTY * absent_penalty
+    )
 
     for i, triples in by_i.items():
         if triples:
@@ -889,6 +1123,7 @@ def _solve_multiphase_mip(
         active = pulp.value(y[p_idx]) is not None and pulp.value(y[p_idx]) >= 0.5
         matched_for_phase: list[dict[str, Any]] = []
         phase_matched_exp: set[int] = set()
+        phase_matched_sim: set[int] = set()
         phase_residuals: list[float] = []
         for t in by_p[p_idx]:
             val = pulp.value(x[t])
@@ -906,6 +1141,7 @@ def _solve_multiphase_mip(
                 "residual_deg": float(residual),
             })
             phase_matched_exp.add(i)
+            phase_matched_sim.add(j)
             phase_residuals.append(residual)
             matched_exp_set.add(i)
             total_residual += residual
@@ -914,19 +1150,30 @@ def _solve_multiphase_mip(
             sum(exp_pl.intensities[i] for i in phase_matched_exp) / sum(exp_pl.intensities)
             if sum(exp_pl.intensities) > 0 else 0.0
         )
+        # Predicted-coverage: of this phase's STRONG predicted peaks, the
+        # intensity-weighted fraction actually observed. Low predicted-coverage
+        # flags an over-predicting (Magnéli-type) false match.
+        strong = strong_sim.get(p_idx, [])
+        strong_total = sum(w for _, w in strong)
+        absent_w = sum(w for j, w in strong if j not in phase_matched_sim)
+        predicted_coverage = (1.0 - absent_w / strong_total) if strong_total > 0 else 1.0
         per_phase.append({
             "active": bool(active and matched_for_phase),
             "coverage": float(coverage),
+            "predicted_coverage": float(predicted_coverage),
+            "absent_weight": float(absent_w),
             "matched_peaks": matched_for_phase,
             "mean_residual_deg": float(np.mean(phase_residuals)) if phase_residuals else 0.0,
         })
 
     unmatched_exp = [i for i in range(nE) if i not in matched_exp_set]
-    # Normalized joint cost: same shape as single-phase MIP — every
-    # unmatched peak costs a tolerance unit, every matched pair costs its
-    # residual.
-    raw_cost = total_residual + tol_deg * len(unmatched_exp)
-    cost = raw_cost / (tol_deg * max(nE, 1))
+    # Intensity-weighted cost (see _weighted_cost): unexplained INTENSITY plus
+    # mean residual, so the handful of weak noise peaks the extractor returns
+    # no longer rejects an otherwise-correct multi-phase match. The predicted-
+    # but-absent penalty governs SELECTION in the MILP OBJECTIVE (not the cost);
+    # `predicted_coverage` is surfaced per phase so an over-predicting phase that
+    # slips through is still visible downstream.
+    cost = _weighted_cost(exp_pl, unmatched_exp, total_residual, tol_deg)
 
     return {
         "cost": float(cost),

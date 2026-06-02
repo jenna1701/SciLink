@@ -3433,7 +3433,20 @@ Return JSON with:
 
             # --- Verification loop (for anchor spectra: first overall or first in regime) ---
             fit_was_approved = False
-            if _is_anchor:
+            if (_is_anchor and self.max_verification_iterations <= 0
+                    and best_result and best_result.get("success")):
+                # Explicit verification bypass (max_verification_iterations=0):
+                # the caller asked for a fast / in-situ turnaround. Accept the
+                # initial successful fit as-is, with no LLM verification or
+                # refit loop. Only triggers at <= 0, so the default thorough
+                # path (>= 1) is unaffected. A failed/degenerate initial fit
+                # (no success) still falls through to the loop below for the
+                # recovery path rather than locking garbage.
+                self.logger.info(
+                    f"   ⏩ Verification bypassed (max_verification_iterations=0); "
+                    f"accepting initial fit (R² = {best_r2:.4f})")
+                fit_was_approved = True
+            elif _is_anchor:
                 # Skip verification ONLY when there is no successful fit to work
                 # with. A fit that executed but is degenerate (low/zero R²) must
                 # still enter the loop: the verifier + adaptive annealing (which
@@ -4220,13 +4233,22 @@ Return JSON with:
         mode_str = "SINGLE SPECTRUM" if is_single else f"SERIES ({num_spectra} spectra)"
         self.logger.info("")
         self.logger.info(f"⚙️ FITTING: {mode_str}")
-        _accept = float(self.r2_threshold)
-        _floor = max(_accept - self._r2_soft_margin(_accept), 0.0)
-        self.logger.info(
-            f"   R² targets: accept ≥ {_accept:.3f} (with clean residuals); "
-            f"hard-reject below {_floor:.3f}; soft band {_floor:.3f}–{_accept:.3f} "
-            f"(verifier may reject on physics)"
-        )
+        _gate_obj = _gate(state)
+        if _gate_obj.metric == "r_squared":
+            _accept = float(self.r2_threshold)
+            _floor = max(_accept - self._r2_soft_margin(_accept), 0.0)
+            self.logger.info(
+                f"   R² targets: accept ≥ {_accept:.3f} (with clean residuals); "
+                f"hard-reject below {_floor:.3f}; soft band {_floor:.3f}–{_accept:.3f} "
+                f"(verifier may reject on physics)"
+            )
+        else:
+            _cmp = "≥" if _gate_obj.direction == "higher_is_better" else "≤"
+            self.logger.info(
+                f"   Quality: {_gate_obj.metric} {_cmp} {_gate_obj.accept_threshold:.3f} "
+                f"accepts ({_gate_obj.direction}); skill scoring is the verification "
+                f"(curve-fit R² verifier bypassed)."
+            )
         self.logger.info(f"   Max verification iterations: {self.max_verification_iterations}")
         if not is_single:
             self.logger.info(f"   Outlier detection: {self.outlier_sigma}σ")
@@ -5131,6 +5153,24 @@ class AdaptiveRefitController:
             return state
 
         if state.get("is_single_spectrum", True):
+            return state
+
+        # Scoring-gated (non-R²) skills — e.g. XRD phase identification — lock a
+        # phase set on the anchor frame by design. Adaptive refit re-derives the
+        # model per frame (for ID that means re-identifying), which defeats the
+        # lock; and a lower score on a later frame is the physical signal (a phase
+        # being consumed / a transformation), NOT a bad fit to repair. So skip the
+        # refit for these — the flagged frames are surfaced in the report for
+        # interpretation instead. (This is also what eliminated the pathological
+        # 100+ min "re-analysis" grind on real in-situ series: each flagged frame
+        # was being re-fit under the R² verification loop.) R² skills (all curve
+        # fitting) are unaffected — they fall through to the refit below.
+        if _gate(state).metric != "r_squared":
+            self.logger.info(
+                "\n🔄 Adaptive refit: scoring-gated skill (non-R² gate) — the phase "
+                "set is locked by design; skipping per-frame model re-derivation. "
+                "Lower per-frame scores are reported as physical evolution."
+            )
             return state
 
         flagged_spectra = state.get("flagged_spectra", [])
