@@ -1,5 +1,5 @@
 ---
-description: p-XRD profile fitting — per-peak pseudo-Voigt fits with FWHM, position, and intensity; Scherrer crystallite size and Williamson-Hall microstrain from the fitted line widths.
+description: 'p-XRD profile fitting — the quantitative follow-up to phase identification: per-peak pseudo-Voigt fits (position, intensity, FWHM), Scherrer crystallite size and Williamson-Hall microstrain, and a Rietveld tier (phase fractions / accurate lattice; engine pending) that refines against the identified-phase CIF.'
 technique: [XRD, "X-ray diffraction", "powder diffraction", pXRD]
 quality_gate:
   metric: r_squared
@@ -11,30 +11,56 @@ quality_gate:
 
 ## overview
 
-Powder X-ray diffraction profile fitting for line-broadening physics.
-Per-peak pseudo-Voigt fits yield calibrated peak positions, intensities,
-and full widths at half maximum (FWHMs). Those widths then feed two
-classical analyses:
+Powder X-ray diffraction profile fitting — **the quantitative follow-up to
+phase identification.** You normally arrive here *after* `structure_matching/
+xrd` has answered "what phase(s) is this?": the identified phase(s) and their
+reference CIF(s) are the prior this skill builds on. (It also runs standalone
+when the phase is already known.)
 
-- **Scherrer equation** for an average crystallite (coherent domain) size
-  from any single peak's broadening:
-  `D = K · λ / (β · cos θ)`.
-- **Williamson-Hall (W-H) plot** for separating size and strain
-  contributions from the 2θ dependence of broadening:
-  `β · cos θ = K · λ / D + 4 · ε · sin θ`.
+The skill is organized as three **depth tiers** — go only as deep as the
+question demands:
 
-This skill is the *profile* half of p-XRD analysis. The *identification*
-half — matching observed peaks to a candidate crystal phase — lives in
-the separate `structure_matching/xrd` skill. The two are designed to be
-co-activated: pass `skill=["xrd", "xrd_profile"]` and the LLM can chain
-profile fitting + phase identification in one analysis script.
+1. **Per-peak profile fit (default).** A global multi-peak (split) pseudo-Voigt
+   fit (`fit_pattern`) yields calibrated peak positions, intensities, and full
+   widths at half maximum (FWHMs). The identified phase's reference peak
+   positions are a strong prior for *which* reflections to expect.
+2. **Microstructure — size & strain.** The fitted FWHMs feed two classical
+   line-broadening analyses:
+   - **Scherrer** — average crystallite (coherent domain) size from a single
+     peak's broadening: `D = K · λ / (β · cos θ)`.
+   - **Williamson-Hall** — separates size and strain from the 2θ dependence of
+     broadening: `β · cos θ = K · λ / D + 4 · ε · sin θ`.
+3. **Rietveld refinement (deepest; engine pending).** Whole-pattern refinement
+   against the matched CIF for quantitative phase fractions (QPA), accurate
+   lattice parameters, and site occupancies. True Rietveld needs a dedicated
+   engine (GSAS-II) — see *planning* for the seam. Tiers 1–2 are always
+   available; tier 3 is a documented escalation, not yet wired.
 
-**Out of scope:** Rietveld refinement (atomic positions / occupancies);
-quantitative phase-fraction analysis (covered in
-`structure_matching/xrd`'s multi-phase MIP path); texture / preferred
-orientation correction; whole-pattern Le Bail fitting.
+Frame the work as: **identify (upstream) → profile-fit (here) → escalate to
+Rietveld only when phase fractions / accurate cell / occupancies are the actual
+deliverable.** Most follow-ups stop at tier 1 or 2.
+
+When both skills are co-activated (`skill=["xrd", "xrd_profile"]`) the LLM can
+chain identification and profile fitting in one script; the sequential
+"identify first, then this" framing above is the same pipeline, just split
+across calls.
+
+**Out of scope:** texture / preferred-orientation correction; whole-pattern
+Le Bail fitting. (Rietveld and quantitative phase fractions are **tier 3
+above**, not out of scope — the structural model comes from the upstream ID
+match; only the refinement *engine* is a pending GSAS-II seam.)
 
 ## planning
+
+**You usually arrive here with an identified phase — use it as a prior.** When
+`structure_matching/xrd` ran first, its result shapes this fit: the matched
+phase's reference peak positions tell you *which* reflections to expect (a
+sanity check on auto-detect, and a seed for a one-off single-pattern refine),
+and the matched CIF is the structural model a tier-3 Rietveld refine needs. Do
+**not** freeze those reference positions into a series script, though — for a
+series keep `fit_pattern` auto-detecting (see "In-situ / series"); the ID tells
+you the *phase*, not frozen centers. If no ID was run and the phase is already
+known, proceed standalone.
 
 **Default mechanism: global full-pattern fit.** Plan for a single
 `fit_pattern` call that detects and fits all significant peaks at once
@@ -98,6 +124,21 @@ FWHMs as `exp_peaks={'positions': [...], 'amplitudes': [...],
 broadening per peak instead of the default uniform FWHM, which matters
 for nanocrystalline patterns with peaks several times broader than the
 0.15° default.
+
+**Escalating to Rietveld (tier 3).** Reach for Rietveld only when the
+deliverable is **quantitative phase fractions (QPA), accurate refined lattice
+parameters, or site occupancies** — not for size/strain, which tiers 1–2 cover.
+Rietveld refines the *whole pattern* against a structural model, so it requires
+the matched CIF from the upstream identification as the starting model (another
+reason ID comes first). True Rietveld is **not** in pymatgen; it needs a
+dedicated engine — GSAS-II via `GSASIIscriptable`. That plugs in through the
+same pluggable-engine pattern already established for simulation
+(`structure_matching/xrd/simulate_xrd.py`'s `_ENGINES` registry): a
+`refine_rietveld(cif, exp_data, ...)` tool behind a lazy import + optional
+`gsas` extra, leaving downstream scoring/reporting unaffected. **Until that
+engine is wired, do not attempt a whole-pattern refine with the kinematic
+tools** — report tiers 1–2 and recommend Rietveld as the explicit next step,
+naming the matched CIF as the model to refine.
 
 ## implementation
 
