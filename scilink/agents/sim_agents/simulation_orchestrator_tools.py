@@ -1254,150 +1254,89 @@ class SimulationOrchestratorTools:
         )
 
         # =====================================================================
-        # 8. ANALYZE VASP OUTPUT (post-run)
+        # 8. ANALYZE OUTPUT (engine-neutral, post-run)
         # =====================================================================
-        def analyze_vasp_output(output_dir: str) -> str:
-            from .post_run_analysis import analyze_run_directory
+        def analyze_output(output_dir: str, research_goal: str,
+                           software: str = None, fixes_mode: str = "auto") -> str:
+            skill, domain = self._resolve_engine(software)
+            if not skill:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        "No engine selected. Call route_simulation first, or "
+                        "pass `software` explicitly (e.g. 'vasp')."
+                    ),
+                })
 
-            summary = analyze_run_directory(output_dir)
-            # Trim verbose subdicts before sending back — keep it scannable
-            if isinstance(summary, dict):
-                vr = summary.get("vasprun") or {}
-                if "incar_snapshot" in vr and len(vr["incar_snapshot"]) > 30:
-                    vr["incar_snapshot"] = dict(list(vr["incar_snapshot"].items())[:30])
-                    vr["incar_snapshot_truncated"] = True
-            return json.dumps(summary)
+            try:
+                critic = self._get_run_critic()
+                report = critic.assess(
+                    output_dir=output_dir,
+                    research_goal=research_goal,
+                    skill=skill,
+                    domain=domain,
+                    fixes_mode=fixes_mode,
+                )
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Run analysis failed: {e}",
+                })
+
+            report.setdefault("status", "success")
+            report["engine"] = skill
+            return json.dumps(report, default=str)
 
         self._register_tool(
-            func=analyze_vasp_output,
-            name="analyze_vasp_output",
+            func=analyze_output,
+            name="analyze_output",
             description=(
-                "Read VASP output files (vasprun.xml + OUTCAR + stdout/"
-                "stderr logs) from a completed or failed run and return a "
-                "structured summary: convergence status (converged / "
-                "not_converged / failed / unknown), final energy, ionic "
-                "step count, max force on last step, snapshot of effective "
-                "INCAR settings, and a list of human-readable hints for "
-                "any known VASP error patterns matched in the logs. Use "
-                "after the user runs VASP and points you at the run "
-                "directory."
+                "Post-run review of a finished calculation directory, "
+                "engine-neutral. Routes to the RunCritic, which reads the "
+                "engine's output files and the active skill's interpretation "
+                "guidance to return a verdict (good / warning / poor / "
+                "needs_fixes), the run status, reasoning, and — when the run "
+                "failed or the result is unsatisfactory — proposed patched "
+                "input files. Handles both failed and successful runs in one "
+                "call. The engine is taken from the active routing decision "
+                "unless `software` is given. Use after the user runs the "
+                "calculation and points you at the run directory."
             ),
             parameters={
                 "output_dir": {
                     "type": "string",
                     "description": (
-                        "Absolute path to the VASP run directory containing "
-                        "vasprun.xml / OUTCAR / log files."
+                        "Absolute path to the finished run's output "
+                        "directory (engine-specific contents, e.g. "
+                        "vasprun.xml / OUTCAR / logs for VASP)."
+                    ),
+                },
+                "research_goal": {
+                    "type": "string",
+                    "description": (
+                        "What the calculation was meant to compute — drives "
+                        "whether the result is sufficient for the intent and "
+                        "what fixes to suggest."
+                    ),
+                },
+                "software": {
+                    "type": "string",
+                    "description": (
+                        "Optional engine override (e.g. 'vasp'). Defaults to "
+                        "the engine chosen by route_simulation."
+                    ),
+                },
+                "fixes_mode": {
+                    "type": "string",
+                    "enum": ["auto", "always", "skip"],
+                    "description": (
+                        "When to propose patched inputs: 'auto' (default; "
+                        "only on failure or a poor verdict), 'always' "
+                        "(whenever below 'good'), or 'skip' (verdict only)."
                     ),
                 },
             },
-            required=["output_dir"],
-        )
-
-        # =====================================================================
-        # 9. SUGGEST INCAR FIXES (from VASP error log)
-        # =====================================================================
-        def suggest_incar_fixes(log_path: str, original_request: str) -> str:
-            from .vasp_updater import VaspUpdater
-
-            log_file = Path(log_path)
-            if not log_file.exists():
-                return json.dumps({
-                    "status": "error",
-                    "message": f"Log file not found: {log_path}",
-                })
-
-            run_dir = log_file.parent
-            poscar = run_dir / "POSCAR"
-            incar = run_dir / "INCAR"
-            kpoints = run_dir / "KPOINTS"
-            for required in [poscar, incar, kpoints]:
-                if not required.exists():
-                    return json.dumps({
-                        "status": "error",
-                        "message": (
-                            f"Expected {required.name} alongside the log at "
-                            f"{run_dir}, not found. suggest_incar_fixes "
-                            "needs the original POSCAR, INCAR, and KPOINTS "
-                            "in the same directory as the log."
-                        ),
-                    })
-
-            try:
-                updater = VaspUpdater(
-                    api_key=self.orch.api_key,
-                    base_url=self.orch.base_url,
-                    model_name=self.orch.model_name,
-                )
-            except Exception as e:
-                return json.dumps({
-                    "status": "error",
-                    "message": f"Failed to construct VaspUpdater: {e}",
-                })
-
-            log_text = log_file.read_text(errors="replace")
-            try:
-                plan = updater.refine_inputs(
-                    poscar_path=str(poscar),
-                    incar_path=str(incar),
-                    kpoints_path=str(kpoints),
-                    vasp_log=log_text,
-                    original_request=original_request,
-                )
-            except Exception as e:
-                return json.dumps({
-                    "status": "error",
-                    "message": f"VaspUpdater failed: {e}",
-                })
-
-            if plan.get("status") != "success":
-                return json.dumps({
-                    "status": "error",
-                    "message": plan.get("message") or "VaspUpdater did not produce a plan",
-                })
-
-            return json.dumps({
-                "status": "success",
-                "suggested_incar": plan.get("suggested_incar", ""),
-                "suggested_kpoints": plan.get("suggested_kpoints", ""),
-                "explanation": plan.get("explanation", ""),
-                "note": (
-                    "Suggestions returned as text; not applied to disk. "
-                    "If the user wants to use them, write them to disk "
-                    "manually or re-generate via generate_vasp_inputs with "
-                    "an updated request."
-                ),
-            })
-
-        self._register_tool(
-            func=suggest_incar_fixes,
-            name="suggest_incar_fixes",
-            description=(
-                "When a VASP run failed and the user has the log, ask the "
-                "VaspUpdater to read the log + the original INCAR/KPOINTS/"
-                "POSCAR and propose revised inputs that would address the "
-                "error. Returns suggested INCAR + KPOINTS as text plus an "
-                "explanation. Does NOT write to disk; the user decides "
-                "whether to apply the suggestions."
-            ),
-            parameters={
-                "log_path": {
-                    "type": "string",
-                    "description": (
-                        "Absolute path to the VASP stdout/stderr log file. "
-                        "POSCAR / INCAR / KPOINTS must live in the same "
-                        "directory."
-                    ),
-                },
-                "original_request": {
-                    "type": "string",
-                    "description": (
-                        "What the calculation was supposed to do — used as "
-                        "context for the fix suggestions."
-                    ),
-                },
-            },
-            required=["log_path", "original_request"],
+            required=["output_dir", "research_goal"],
         )
 
         # =====================================================================
@@ -1763,15 +1702,25 @@ class SimulationOrchestratorTools:
                     ),
                 })
 
-            # Run post-run analysis if results are available
-            vasp_analysis = None
+            # Run post-run analysis if results are available — engine-neutral
+            # via the active skill's snapshot_run tool. Only include the
+            # analysis section when the snapshot reflects a real run.
+            run_snapshot = None
             results_dir = record.get("hpc_results_dir") or record.get("structure_dir")
-            if results_dir and (Path(results_dir) / "vasprun.xml").exists():
+            skill, _domain = self._resolve_engine(None)
+            if results_dir and skill:
                 try:
-                    from .post_run_analysis import analyze_run_directory
-                    vasp_analysis = analyze_run_directory(results_dir)
+                    from ...skills._shared._registry import get_tool_function
+                    snap = get_tool_function("snapshot_run", active_skills=[skill])
+                    snapshot = snap(results_dir)
+                    if (snapshot.get("status") == "ok"
+                            and (snapshot.get("files_found")
+                                 or snapshot.get("convergence_status", "unknown") != "unknown")):
+                        run_snapshot = snapshot
+                except LookupError:
+                    run_snapshot = None
                 except Exception as e:
-                    vasp_analysis = {"error": str(e)}
+                    run_snapshot = {"error": str(e)}
 
             lines = [
                 "# VASP DFT Simulation Report",
@@ -1820,20 +1769,19 @@ class SimulationOrchestratorTools:
                     f"- **Local results:** `{record.get('hpc_results_dir', 'N/A')}`",
                 ]
 
-            if vasp_analysis:
+            if run_snapshot:
                 lines.append("\n## Calculation Results")
-                if "error" in vasp_analysis:
-                    lines.append(f"- **Parse error:** {vasp_analysis['error']}")
+                if "error" in run_snapshot:
+                    lines.append(f"- **Parse error:** {run_snapshot['error']}")
                 else:
-                    vr = vasp_analysis.get("vasprun") or {}
-                    oc = vasp_analysis.get("outcar") or {}
+                    vr = run_snapshot.get("vasprun") or {}
                     lines += [
-                        f"- **Convergence:** {vasp_analysis.get('convergence_status', 'unknown')}",
-                        f"- **Final energy:** {vr.get('final_energy_eV', 'N/A')} eV",
+                        f"- **Convergence:** {run_snapshot.get('convergence_status', 'unknown')}",
+                        f"- **Final energy:** {vr.get('final_energy', 'N/A')} eV",
                         f"- **Ionic steps:** {vr.get('n_ionic_steps', 'N/A')}",
-                        f"- **Max force (last step):** {oc.get('max_force_eV_per_A', 'N/A')} eV/Å",
+                        f"- **Max force (last step):** {vr.get('max_force_eV_per_A', 'N/A')} eV/Å",
                     ]
-                    hints = vasp_analysis.get("error_hints") or []
+                    hints = run_snapshot.get("log_error_hints") or []
                     if hints:
                         lines.append("- **Error hints:**")
                         for h in hints:
