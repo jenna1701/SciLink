@@ -1346,7 +1346,7 @@ class GenerateCurveFittingReportController:
         html += "</div>"
         
         if quality_warning:
-            html += f'<div class="quality-warning-box">⚠️ <strong>Note:</strong> {quality_warning}. Alternative models were attempted but could not improve fit quality significantly.</div>'
+            html += f'<div class="quality-warning-box">⚠️ <strong>Note:</strong> {quality_warning}.</div>'
         
         return html
 
@@ -2756,6 +2756,12 @@ configured acceptance target:
   `overall_assessment` rather than just citing the R² number, so the
   trace is interpretable.
 
+**Never claim R² is "below the threshold" unless the number truly is below
+{accept_threshold:.2f}** — when you reject a fit whose R² is at or above the
+accept floor, give only the physics reason for rejection (the systematic
+residual, missed feature, or unphysical parameter), never the R² value, so the
+report stays factually correct.
+
 **Do NOT reject for:**
 - Ambiguous or subtle features — but distinguish "subtle" (small, noise-level,
   non-repeating) from "under-resolved" (localized, RMS ≫ noise, oscillating);
@@ -3956,7 +3962,20 @@ Return JSON with:
 
         # --- Return best available result ---
         if best_result:
-            best_result["quality_warning"] = f"R² = {best_r2:.4f} below threshold {self.r2_threshold}"
+            # This is the "best available" fallback (the accept/threshold paths
+            # return earlier). A fit can land here two ways: (a) R² genuinely
+            # below threshold, or (b) R² meets threshold but the verifier kept
+            # rejecting on PHYSICS grounds. Word the warning to match reality —
+            # never claim "below threshold" when the number is at/above it.
+            if best_r2 >= self.r2_threshold:
+                best_result["quality_warning"] = (
+                    f"R² = {best_r2:.4f} meets the threshold {self.r2_threshold} but the "
+                    f"fit was not accepted on physical grounds (see verifier notes)"
+                )
+            else:
+                best_result["quality_warning"] = (
+                    f"R² = {best_r2:.4f} below threshold {self.r2_threshold}"
+                )
             best_result["attempted_models"] = [a["model"] for a in all_attempts]
             best_result["quality_history"] = self._build_quality_history(
                 best_r2, self.r2_threshold, all_attempts,

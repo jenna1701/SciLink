@@ -2848,6 +2848,60 @@ the caller.
 
 Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
 
+
+T2_TECHNIQUE_LABEL_INSTRUCTIONS = """A hard analysis fit succeeded only after the agent \
+abandoned its plan and regenerated the approach from scratch (T=2 hot annealing). To file \
+this solution for later distillation, assign it a short normalized TECHNIQUE label.
+
+**Final model / approach:** {model}
+**How it deviated from the plan:** {deviation}
+
+**Existing technique labels in this domain (reuse one if it fits):**
+{existing}
+
+**Instructions:**
+Return a single snake_case label naming the *technique/model family* (not this dataset) — \
+e.g. `stretched_exponential`, `multi_edge_core_loss`, `asymmetric_voigt_doublet`. Reuse an \
+existing label verbatim if the solution belongs to that family; otherwise coin a new concise \
+one. Lowercase, words joined by underscores, no spaces or punctuation.
+
+Output ONLY the label, nothing else."""
+
+
+T2_CONSOLIDATION_INSTRUCTIONS = """You are an expert scientific data analyst. Several runs \
+independently solved the same kind of hard problem from scratch (T=2 hot annealing). Distill \
+these worked examples into ONE generalized, reusable skill so a future run can apply it directly.
+
+**Skill Name:** {skill_name}
+**Domain:** {domain}
+
+**The worked examples (N independent solutions of the same technique):**
+{knowledge_text}
+
+**Instructions:**
+Synthesize the COMMON, reusable recipe across the examples — the model form, parameter \
+initialization/bounds strategy, and procedure that worked repeatedly. Abstract away each \
+dataset's specific paths and magic numbers. Where the examples differ, note what varies and \
+when to choose each option (this is the value of having several examples). Explain why the \
+naive/default plan was insufficient.
+
+The best example's working script is appended verbatim to the implementation section by the \
+system as a reference — do NOT paste scripts back; write the generalized recipe.
+
+Return a JSON object with exactly the following keys. Use markdown within values when helpful \
+(lists, inline code), but no section headings (`##`) or YAML frontmatter — the caller adds those.
+
+{{
+  "description": "<one self-contained sentence (no trailing period) naming the technique/model so a downstream agent can decide if this skill is relevant>",
+  "overview": "<what kind of data/problem this approach fits and when to reach for it>",
+  "planning": "<the model form and strategy in general terms; parameter heuristics; what varies across the examples and how to choose; why the default plan was insufficient>",
+  "analysis": "<the generalized, parameterized recipe distilled from all examples>",
+  "interpretation": "<how to read the results and judge plausibility>",
+  "validation": "<quality criteria, sanity checks, and failure indicators>"
+}}
+
+Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
+
 # Backwards compatibility
 FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS = FITTING_INTERPRETATION_INSTRUCTIONS
 

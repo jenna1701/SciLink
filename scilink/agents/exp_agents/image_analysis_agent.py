@@ -593,13 +593,12 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         else:
             final_results = tier1_results
 
-        # Auto-distill novel T=2 (hot-annealing) successes into persistent
-        # memory as provisional skills. Failure-isolated: never affects the
-        # returned analysis. Keys off the Tier-1 state (which ran the
-        # verification/annealing loop). Surfaces any new skills on the result.
-        distilled = self._maybe_distill_t2_skills(tier1_state)
-        if distilled:
-            final_results["distilled_skills"] = distilled
+        # Stage novel T=2 (hot-annealing) successes for later, review-gated
+        # distillation. Failure-isolated; keys off Tier-1 state (which ran the
+        # verification/annealing loop). Surfaces staged ids on the result.
+        staged = self._maybe_stage_t2_solutions(tier1_state)
+        if staged:
+            final_results["staged_solutions"] = staged
 
         # Save final merged results
         results_path = self.output_dir / "analysis_results.json"
@@ -779,38 +778,34 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if saved:
             self.logger.info(f"   📝 Scripts: {scripts_dir} ({len(saved)} file(s))")
 
-    def _maybe_distill_t2_skills(self, state: dict) -> List[str]:
-        """Distill novel T=2 (hot-annealing) image-analysis successes into memory.
+    def _maybe_stage_t2_solutions(self, state: dict) -> List[str]:
+        """Stage novel T=2 (hot-annealing) image-analysis successes for later distillation.
 
-        Image-side mirror of ``CurveFittingAgent._maybe_distill_t2_skills``.
-        Gate (all must hold): the analysis succeeded; verification reached the
-        hottest annealing level (the pipeline was regenerated from scratch);
-        and the result is novel — it deviated from the locked plan
-        (``plan_deviation_summary``, stamped on every hot success by the
-        controller) or ran with no active skill. On trigger, an LLM pass
-        generalizes the working approach into a reusable recipe and the exact
-        working script is appended verbatim. The skill is written
-        **provisional** (kept out of auto-routing until promoted).
+        Image-side mirror of ``CurveFittingAgent._maybe_stage_t2_solutions``.
+        Gate (all must hold): the analysis succeeded; met the quality bar
+        (``approved``); verification reached the hottest annealing level (the
+        pipeline was regenerated from scratch); and it is novel — it deviated
+        from the locked plan (``plan_deviation_summary``) or ran with no active
+        skill. On trigger the raw solution (approach, deviation, quality score,
+        verbatim script) is filed in the staging buffer under an LLM-assigned
+        technique label; skills are produced later, review-gated (upgrade an
+        existing skill, or consolidate N into a new one — see ``scilink memory``).
 
-        Returns the list of skill-file paths written. Fully failure-isolated:
-        any error is logged and swallowed so a distill problem never affects
-        the user's analysis.
+        Returns the list of staged solution ids. Fully failure-isolated.
+        ``SCILINK_T2_AUTODISTILL=0`` disables staging.
         """
         flag = os.environ.get("SCILINK_T2_AUTODISTILL", "").strip().lower()
         if flag in ("0", "false", "off", "no"):
             return []
 
-        distilled: List[str] = []
+        staged: List[str] = []
         try:
-            import hashlib
-            import re
-
             from .controllers.image_analysis_controllers import (
                 UnifiedImageProcessingController,
                 _active_skill_names,
             )
-            from .instruct import IMAGE_T2_DISTILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS
-            from scilink.skills._shared._graduation import graduate_to_skill_file
+            from .instruct import T2_TECHNIQUE_LABEL_INSTRUCTIONS
+            from scilink.skills._shared import _staging
 
             n_levels = len(UnifiedImageProcessingController._CONSTRAINT_ANNEALING_SCHEDULE)
             hot_level = n_levels - 1
@@ -834,10 +829,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     continue
 
                 qh = r.get("quality_history") or {}
-                # Only distill analyses that actually met the quality bar. A
-                # below-threshold "best available" result is still returned with
-                # success=True (the script ran), so gate on the verifier's
-                # `approved` verdict to avoid memorializing a mediocre recipe.
+                # Only stage analyses that actually met the quality bar.
                 if not qh.get("approved"):
                     continue
                 score = qh.get("final_score")
@@ -849,62 +841,37 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
                 deviation = (r.get("plan_deviation_summary") or "").strip()
                 novel = bool(deviation) or not active_skills
-
                 if not (reached_hot and novel):
                     continue
 
                 kind = r.get("analysis_type") or approach or "image_analysis"
-                slug = re.sub(r"[^a-z0-9]+", "_", str(kind).lower()).strip("_")[:40] or "image"
-                digest = hashlib.sha1(
-                    (json.dumps(approach, sort_keys=True, default=str) + script).encode("utf-8")
-                ).hexdigest()[:8]
-                skill_name = f"auto_{slug}_{digest}"
-
-                knowledge_entry = {
+                technique = _staging.assign_technique_label(
+                    "image_analysis", kind, deviation, _llm_call,
+                    T2_TECHNIQUE_LABEL_INSTRUCTIONS,
+                )
+                record = {
                     "planned_analysis_approach": approach,
                     "final_analysis_type": r.get("analysis_type"),
                     "deviation_from_plan": deviation or "(no explicit note; ran without an active skill)",
-                    "quality_score": score,
+                    "quality_score": round(float(score), 4) if isinstance(score, (int, float)) else score,
                     "working_script": script,
-                }
-                ref_block = (
-                    "### Reference implementation (verbatim analysis that produced this skill)\n\n"
-                    "```python\n" + script.strip() + "\n```"
-                )
-
-                extra_meta = {
-                    "provisional": True,
-                    "provenance": "t2_autodistill",
                     "session": self.output_dir.name,
                 }
-                if score is not None:
-                    extra_meta["quality_score"] = round(float(score), 4)
-
-                result = graduate_to_skill_file(
-                    knowledge_entry=knowledge_entry,
-                    skill_name=skill_name,
-                    domain="image_analysis",
-                    llm_call=_llm_call,
-                    fresh_template=IMAGE_T2_DISTILL_INSTRUCTIONS,
-                    update_template=SKILL_UPDATE_INSTRUCTIONS,
-                    extra_meta=extra_meta,
-                    append_sections={"implementation": ref_block},
-                )
-                distilled.append(result["skill_path"])
+                sid = _staging.stage_solution("image_analysis", technique, record)
+                staged.append(sid)
                 self.logger.info(
-                    f"   🧠 Distilled provisional skill from T=2 image fit: "
-                    f"{skill_name} → {result['skill_path']}"
+                    f"   🧠 Staged T=2 image solution [{technique}] id={sid}"
                 )
         except Exception as e:
-            self.logger.warning(f"T=2 auto-distillation skipped: {e}")
-            return distilled
+            self.logger.warning(f"T=2 staging skipped: {e}")
+            return staged
 
-        if distilled:
+        if staged:
             self.logger.info(
-                f"   🧠 {len(distilled)} provisional skill(s) added to persistent "
-                f"memory; review with `scilink memory list --provisional-only`."
+                f"   🧠 {len(staged)} T=2 solution(s) staged; review with "
+                f"`scilink memory staged`."
             )
-        return distilled
+        return staged
 
     def _evaluate_tier2_needed(
         self, tier1_results: dict, objective: Optional[str]

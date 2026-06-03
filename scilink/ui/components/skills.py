@@ -123,10 +123,6 @@ def _render_memory_section() -> None:
         st.error(f"Could not read persistent memory: {e}")
         return
 
-    if not rows:
-        st.caption("No persisted skills yet.")
-        return
-
     provisional = [r for r in rows if r["provisional"]]
     promoted = [r for r in rows if not r["provisional"]]
 
@@ -138,6 +134,78 @@ def _render_memory_section() -> None:
         st.markdown(f"**Promoted ({len(promoted)})**")
         for r in promoted:
             _render_memory_row(_memory, r, provisional=False)
+    if not rows:
+        st.caption("No persisted skills yet.")
+
+    _render_staged_section()
+
+
+def _render_staged_section() -> None:
+    """Staged raw T=2 solutions — distill into skills (upgrade an existing skill,
+    or consolidate N of a technique into a new one)."""
+    from scilink.skills._shared import _staging, _memory
+
+    st.markdown("---")
+    st.markdown("**Staged T=2 solutions**")
+    st.caption(
+        "Hard problems the agent solved from scratch (T=2). Upgrade an existing "
+        "skill from one, or consolidate several of the same technique into a new "
+        "skill. Both use the active session's model."
+    )
+
+    groups = {}
+    for rec in _staging.list_staged():
+        groups.setdefault((rec["domain"], rec.get("technique") or "unlabeled"), []).append(rec)
+    if not groups:
+        st.caption("No staged solutions.")
+        return
+
+    agent = st.session_state.get("agent")
+    model = getattr(agent, "model", None)
+
+    def _llm_call(prompt: str) -> str:
+        r = model.generate_content(contents=[prompt])
+        return r.text if hasattr(r, "text") else str(r)
+
+    for (domain, technique), recs in sorted(groups.items()):
+        with st.expander(f"`{domain}/{technique}` — {len(recs)} staged", expanded=False):
+            for r in recs:
+                metric = r.get("r_squared") or r.get("quality_score")
+                st.caption(f"id={r['id']} · session={r.get('session','?')}"
+                           + (f" · metric={metric}" if metric is not None else ""))
+            if model is None:
+                st.info("Start a session to enable upgrade/consolidate (needs a model).")
+                continue
+            # candidate existing skills to upgrade into (same domain)
+            targets = [f"{s['domain']}/{s['name']}" for s in _memory.list_memory(domain=domain)]
+            c1, c2 = st.columns(2)
+            with c1:
+                if targets:
+                    tgt = st.selectbox("Upgrade into", targets, key=f"tgt::{domain}/{technique}")
+                    sid = recs[0]["id"]
+                    if st.button("Upgrade (use newest)", key=f"up::{domain}/{technique}"):
+                        from scilink.agents.exp_agents.instruct import (
+                            KNOWLEDGE_TO_SKILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
+                        td, tn = tgt.split("/", 1)
+                        res = _staging.upgrade_skill_from_staged(
+                            domain, [sid], target_domain=td, target_name=tn,
+                            llm_call=_llm_call,
+                            fresh_template=KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                            update_template=SKILL_UPDATE_INSTRUCTIONS)
+                        st.success(f"Upgraded {tgt} ({res.get('method')}).")
+                        st.rerun()
+                else:
+                    st.caption("No existing skills in this domain to upgrade into.")
+            with c2:
+                if st.button("Consolidate → new skill", key=f"con::{domain}/{technique}"):
+                    from scilink.agents.exp_agents.instruct import (
+                        T2_CONSOLIDATION_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
+                    res = _staging.consolidate_technique(
+                        domain, technique, llm_call=_llm_call,
+                        consolidation_template=T2_CONSOLIDATION_INSTRUCTIONS,
+                        update_template=SKILL_UPDATE_INSTRUCTIONS)
+                    st.success(f"Consolidated {res.get('n_examples')} → auto_{technique} (provisional).")
+                    st.rerun()
 
 
 def _render_memory_row(_memory, r, *, provisional: bool) -> None:
