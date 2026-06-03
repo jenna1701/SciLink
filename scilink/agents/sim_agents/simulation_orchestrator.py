@@ -406,6 +406,33 @@ class SimulationOrchestratorAgent:
         logging.info(f"✅ SimulationOrchestratorAgent initialized. Session: {self.base_dir}")
 
     # ------------------------------------------------------------------
+    # Routing helpers
+    # ------------------------------------------------------------------
+
+    def active_skill_and_domain(self) -> tuple[Optional[str], Optional[str]]:
+        """Return ``(skill, domain)`` derived from the current routing decision.
+
+        Maps the router's ``(engine, scale)`` vocabulary onto the skill
+        infrastructure's ``(skill, domain)`` vocabulary so downstream tools
+        — in particular the engine-neutral critic agents — can derive their
+        ``skill=`` and ``domain=`` parameters from session state instead of
+        requiring the LLM to pass them on every call.
+
+        Returns:
+            ``(engine, scale)`` from ``routing_decision`` when it has been
+            populated by a successful ``route_simulation`` call. Returns
+            ``(None, None)`` when the orchestrator has not routed yet or
+            the prior routing call failed (the LLM should call
+            ``route_simulation`` before invoking tools that need this).
+        """
+        decision = self.routing_decision or {}
+        scale = decision.get("scale")
+        engine = decision.get("engine")
+        if not scale or not engine:
+            return None, None
+        return engine, scale
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 

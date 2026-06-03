@@ -39,10 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
-import warnings as _warnings
-from difflib import SequenceMatcher, get_close_matches
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from ...auth import (
     APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
@@ -54,178 +51,14 @@ from ..lit_agents.literature_agent import IncarLiteratureAgent
 from ._deprecation import normalize_params
 from .instruct import INCAR_VALIDATION_INSTRUCTIONS
 
-
-# Tokens that show up inside legitimate INCAR *values* (e.g. ``LDAUL = 3
-# 3 -1``, ``LSORBIT = .TRUE.``) rather than as standalone tags.  Filtered
-# out of the difflib suggestion pool so we don't propose nonsense
-# renames.
-_VASP_SUGGESTION_BLOCKLIST = {"TRUE", "FALSE"}
-
-
-def _load_valid_vasp_tags() -> List[str]:
-    """Return the canonical VASP INCAR-tag list bundled with pymatgen.
-
-    Returns an empty list if pymatgen is unavailable or the bundled JSON
-    has moved — callers degrade gracefully (no rename suggestions).
-    """
-    try:
-        from pymatgen.io.vasp import inputs as _vasp_inputs
-    except Exception:
-        return []
-    tags_path = os.path.join(
-        os.path.dirname(_vasp_inputs.__file__), "incar_parameters.json"
-    )
-    if not os.path.exists(tags_path):
-        return []
-    try:
-        with open(tags_path) as f:
-            return list(json.load(f).keys())
-    except Exception:
-        return []
-
-
-def check_incar_syntax(incar_content: str) -> List[Dict[str, Any]]:
-    """Engine-native pre-run syntax check for a VASP INCAR.
-
-    Parameters
-    ----------
-    incar_content : str
-        Raw INCAR text (not a path).  Pass ``open(...).read()``.
-
-    Returns
-    -------
-    list of issue dicts (possibly empty).  Each dict carries:
-
-        severity    : "warning"
-        category    : "incar_tag"
-        tag         : the offending tag as written (str or None)
-        suggested   : closest valid VASP tag (str or None)
-        confidence  : "high" | "low"
-        description : human-readable summary
-        source      : "pymatgen Incar.check_params"
-
-    ``confidence="high"`` requires the top match to be ≥0.85 similar to
-    the bad tag AND clearly better than the runner-up (>0.05 margin).
-    The auto-fix path (``apply_incar_syntax_fixes``) only consumes
-    high-confidence entries; low-confidence entries are returned for the
-    LLM regenerator to consider as context.
-    """
-    try:
-        from pymatgen.io.vasp.inputs import Incar
-    except Exception:
-        return []
-
-    try:
-        if hasattr(Incar, "from_str"):
-            incar = Incar.from_str(incar_content)
-        else:
-            incar = Incar.from_string(incar_content)  # older pymatgen
-    except Exception:
-        # Malformed INCAR — let VASP itself complain.  Syntax pass is
-        # specifically for the "syntactically valid but contains a fake
-        # tag" failure mode.
-        return []
-
-    valid_tags = [
-        t for t in _load_valid_vasp_tags()
-        if t not in _VASP_SUGGESTION_BLOCKLIST
-    ]
-
-    issues: List[Dict[str, Any]] = []
-    with _warnings.catch_warnings(record=True) as caught:
-        _warnings.simplefilter("always")
-        try:
-            incar.check_params()
-        except Exception:
-            return []
-
-    for w in caught:
-        msg = str(w.message)
-        m = re.search(r"Cannot find\s+(\S+)", msg)
-        bad_tag = m.group(1).strip().strip(",.") if m else None
-
-        suggested: Optional[str] = None
-        confidence = "low"
-        if bad_tag and valid_tags:
-            matches = get_close_matches(
-                bad_tag.upper(), valid_tags, n=2, cutoff=0.7
-            )
-            if matches:
-                suggested = matches[0]
-                top_sim = SequenceMatcher(
-                    None, bad_tag.upper(), matches[0]
-                ).ratio()
-                runner_sim = (
-                    SequenceMatcher(None, bad_tag.upper(), matches[1]).ratio()
-                    if len(matches) > 1 else 0.0
-                )
-                if top_sim >= 0.85 and (top_sim - runner_sim) >= 0.05:
-                    confidence = "high"
-
-        issues.append({
-            "severity": "warning",
-            "category": "incar_tag",
-            "tag": bad_tag,
-            "suggested": suggested,
-            "confidence": confidence,
-            "description": (
-                f"INCAR tag '{bad_tag}' is not recognised by VASP. "
-                f"Closest match: {suggested}."
-                if bad_tag and suggested else msg
-            ),
-            "source": "pymatgen Incar.check_params",
-        })
-
-    return issues
-
-
-def apply_incar_syntax_fixes(
-    incar_content: str,
-    issues: Optional[List[Dict[str, Any]]] = None,
-) -> Tuple[str, List[Dict[str, Any]]]:
-    """Apply high-confidence tag renames in-place to an INCAR string.
-
-    Parameters
-    ----------
-    incar_content : str
-        Raw INCAR text.
-    issues : list, optional
-        Issues from a prior ``check_incar_syntax`` call.  If omitted,
-        the check is run inline.
-
-    Returns
-    -------
-    (fixed_content, applied) : tuple
-        ``fixed_content`` is the (possibly modified) INCAR text.
-        ``applied`` is the subset of issues whose rename actually fired,
-        each augmented with ``renamed_from`` / ``renamed_to`` keys.
-
-    Low-confidence issues are returned untouched; caller is expected to
-    forward them to the LLM regenerator as context.
-    """
-    if issues is None:
-        issues = check_incar_syntax(incar_content)
-
-    fixed = incar_content
-    applied: List[Dict[str, Any]] = []
-    for issue in issues:
-        if issue.get("category") != "incar_tag":
-            continue
-        if issue.get("confidence") != "high":
-            continue
-        bad = issue.get("tag")
-        good = issue.get("suggested")
-        if not bad or not good:
-            continue
-        # Only rename when ``bad`` is on the LHS of an assignment.  The
-        # word-boundary regex + line anchor avoids touching value tokens
-        # that happen to share the spelling.
-        pattern = re.compile(rf"(?im)^(\s*){re.escape(bad)}(\s*=)")
-        new_fixed, n = pattern.subn(rf"\1{good}\2", fixed)
-        if n > 0:
-            fixed = new_fixed
-            applied.append({**issue, "renamed_from": bad, "renamed_to": good})
-    return fixed, applied
+# The deterministic INCAR syntax helpers live in the VASP skill bundle
+# (scilink/skills/periodic_dft/vasp/vasp_syntax.py) — the single source of
+# truth, discovered via the skill registry. Re-exported here so existing
+# imports and IncarValidatorAgent.check_syntax keep resolving unchanged.
+from ...skills.periodic_dft.vasp.vasp_syntax import (  # noqa: F401
+    apply_incar_syntax_fixes,
+    check_incar_syntax,
+)
 
 
 class IncarValidatorAgent:

@@ -338,33 +338,46 @@ class PeriodicDFTAgent:
             }
 
         # ── pre-submit syntax pass ────────────────────────────────────
-        # Engine-native syntax check on whatever the engine considers its
-        # primary parameter file.  Lives behind a per-engine validator
-        # module — PeriodicDFTAgent itself doesn't know about pymatgen.
-        # See CLAUDE.md "Engine-neutral contracts".
-        if software == "vasp" and "INCAR" in result["input_files"]:
+        # Engine-neutral: ask the active engine's skill bundle for its
+        # syntax checker/fixer via the registry. The agent never names an
+        # engine or imports a bundle by path — an engine with no such
+        # tools simply skips this advisory pass. See CLAUDE.md
+        # "Engine-neutral contracts" and the skill-bundle callables pattern.
+        try:
+            from ...skills._shared._registry import get_tool_function
             try:
-                from .vasp_input_validator import (
-                    check_incar_syntax, apply_incar_syntax_fixes,
+                checker = get_tool_function(
+                    "check_input_syntax", active_skills=[software]
                 )
-                incar_text = result["input_files"]["INCAR"]
-                issues = check_incar_syntax(incar_text)
+            except LookupError:
+                checker = None
+            if checker is not None:
+                issues = checker(input_files=result["input_files"])
                 if issues:
-                    fixed, applied = apply_incar_syntax_fixes(incar_text, issues)
-                    if applied:
-                        result["input_files"]["INCAR"] = fixed
+                    applied: list = []
+                    try:
+                        fixer = get_tool_function(
+                            "apply_input_syntax_fixes", active_skills=[software]
+                        )
+                    except LookupError:
+                        fixer = None
+                    if fixer is not None:
+                        fixed_files, applied = fixer(
+                            input_files=result["input_files"], issues=issues
+                        )
+                        result["input_files"] = fixed_files
                         for a in applied:
                             self.logger.info(
                                 "pre-submit syntax fix: %s → %s",
-                                a["renamed_from"], a["renamed_to"],
+                                a.get("renamed_from"), a.get("renamed_to"),
                             )
                     result["syntax_check"] = {
                         "issues": issues,
                         "applied_fixes": applied,
                     }
-            except Exception as exc:
-                # Syntax check is advisory — never block generation on it.
-                self.logger.warning("INCAR syntax check failed: %s", exc)
+        except Exception as exc:
+            # Syntax check is advisory — never block generation on it.
+            self.logger.warning("input syntax check failed: %s", exc)
 
         result["status"] = "success"
         result["software"] = software

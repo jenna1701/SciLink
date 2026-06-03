@@ -92,6 +92,8 @@ class SimulationOrchestratorTools:
         def session_status() -> str:
             structures = self.orch.generated_structures or []
             params = self.orch.default_calc_params or {}
+            engine, scale = self.orch.active_skill_and_domain()
+            routing = self.orch.routing_decision or {}
             return json.dumps({
                 "status": "ok",
                 "session_dir": str(self.orch.base_dir),
@@ -106,6 +108,12 @@ class SimulationOrchestratorTools:
                 ],
                 "default_calc_params": params,
                 "simulation_mode": self.orch.simulation_mode.value,
+                "routing": {
+                    "scale": scale,
+                    "engine": engine,
+                    "routed": bool(scale and engine),
+                    "reasoning": routing.get("reasoning"),
+                },
             })
 
         self._register_tool(
@@ -113,9 +121,11 @@ class SimulationOrchestratorTools:
             name="session_status",
             description=(
                 "Report the current simulation session state — structures "
-                "generated so far, sticky calculation parameters, output "
-                "directory. Free to call; useful when you need to remember "
-                "what's already been built before deciding the next step."
+                "generated so far, sticky calculation parameters, the "
+                "active routing decision (which scale and engine are in "
+                "use), and the output directory. Free to call; useful "
+                "when you need to remember what's already been built "
+                "before deciding the next step."
             ),
             parameters={},
             required=[],
