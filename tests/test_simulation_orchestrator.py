@@ -89,21 +89,21 @@ def _make_orch(model_name: str, base_dir: str, autonomy: str = "co-pilot"):
 EXPECTED_TOOLS = {
     "session_status",
     "generate_structure",
+    "plan_structure",
     "validate_structure",
-    "generate_vasp_inputs",
+    "generate_dft_inputs",
     "run_complete_dft_workflow",
     "refine_structure",
     "view_structure",
-    "validate_incar",
-    "apply_incar_improvements",
+    "validate_inputs",
+    "apply_input_adjustments",
     "list_generated_structures",
-    "analyze_vasp_output",
-    "suggest_incar_fixes",
+    "analyze_output",
     "route_simulation",
     # HPC tools
-    "submit_vasp_job",
+    "submit_simulation_job",
     "get_job_status",
-    "download_vasp_results",
+    "download_job_results",
     "generate_final_report",
 }
 

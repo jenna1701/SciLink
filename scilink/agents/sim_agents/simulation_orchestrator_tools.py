@@ -171,7 +171,7 @@ class SimulationOrchestratorTools:
                         "slug": s.get("slug"),
                         "description": s.get("description"),
                         "structure_path": s.get("structure_path"),
-                        "incar_path": s.get("incar_path"),
+                        "input_files": s.get("input_files") or {},
                     } for s in structures
                 ],
                 "default_calc_params": params,
@@ -399,9 +399,8 @@ class SimulationOrchestratorTools:
                 "script_content": result.get("final_script_content"),
                 "skill": skill,
                 "based_on_slug": based_on_slug,
-                "incar_path": None,
-                "kpoints_path": None,
-                "vasp_summary": None,
+                "input_files": {},
+                "summary": None,
                 "validation": val,
                 "created_at": datetime.now().isoformat(),
             }
@@ -425,7 +424,7 @@ class SimulationOrchestratorTools:
                 "refinement_cycles_used": result.get("cycles_used", 1),
                 "warning": result.get("warning"),
                 "next_steps": (
-                    "Generate VASP inputs with generate_vasp_inputs(...) "
+                    "Generate VASP inputs with generate_dft_inputs(...) "
                     "for the desired calculation type, or build a related "
                     "structure variant via another generate_structure call."
                     if not result.get("warning")
@@ -444,7 +443,7 @@ class SimulationOrchestratorTools:
                 "`run_analysis`: one tool call returns a structure that has "
                 "already been reviewed and improved if needed.\n\n"
                 "Returns POSCAR + the structure record's session slug. Does "
-                "NOT produce VASP inputs — call `generate_vasp_inputs` for "
+                "NOT produce VASP inputs — call `generate_dft_inputs` for "
                 "those, or `run_complete_dft_workflow` for the full pipeline "
                 "(structure + inputs together).\n\n"
                 "Set `skill='aimsgb'` for grain boundaries / bicrystals / "
@@ -620,121 +619,107 @@ class SimulationOrchestratorTools:
         # =====================================================================
         # 5. GENERATE VASP INPUTS
         # =====================================================================
-        def generate_vasp_inputs(structure_path: str, request: str,
-                                 method: str = "llm") -> str:
+        def generate_dft_inputs(structure_path: str, request: str,
+                                software: str = None, method: str = "llm") -> str:
             if not Path(structure_path).exists():
                 return json.dumps({
                     "status": "error",
-                    "message": f"POSCAR not found: {structure_path}",
+                    "message": f"Structure file not found: {structure_path}",
+                })
+
+            skill, domain = self._resolve_engine(software)
+            if not skill:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        "No engine selected. Call route_simulation first, or "
+                        "pass `software` explicitly (e.g. 'vasp')."
+                    ),
                 })
 
             structure_dir = Path(structure_path).parent
-
             try:
-                if method == "llm":
-                    from .vasp_agent import VaspInputAgent
-                    agent = VaspInputAgent(
-                        api_key=self.orch.api_key,
-                        base_url=self.orch.base_url,
-                        model_name=self.orch.model_name,
-                    )
-                    vasp_result = agent.generate_vasp_inputs(
-                        structure_path=structure_path,
-                        original_request=request,
-                    )
-                    if vasp_result.get("status") != "success":
-                        return json.dumps({
-                            "status": "error",
-                            "message": vasp_result.get("message") or "VASP input generation failed",
-                        })
-                    saved = agent.save_inputs(vasp_result, str(structure_dir))
-                    if "error" in saved:
-                        return json.dumps({"status": "error", "message": saved["error"]})
-                    summary = vasp_result.get("summary", "")
-
-                elif method == "atomate2":
-                    try:
-                        from .atomate2_utils import Atomate2Input
-                    except ImportError as e:
-                        return json.dumps({
-                            "status": "error",
-                            "message": (
-                                "method='atomate2' requires the [sim] extras "
-                                "(pymatgen, atomate2). Install with: "
-                                "pip install 'scilink[sim]'. "
-                                f"Original error: {e}"
-                            ),
-                        })
-                    from ase.io import read as ase_read
-                    structure_obj = ase_read(structure_path)
-                    Atomate2Input().generate(
-                        structure=structure_obj,
-                        output_dir=str(structure_dir),
-                    )
-                    summary = "Standard relaxation set from atomate2/pymatgen"
-
-                else:
-                    return json.dumps({
-                        "status": "error",
-                        "message": f"Invalid method '{method}'. Choose 'llm' or 'atomate2'.",
-                    })
-
+                from .simulation_pipeline import _generate_inputs
+                gen = _generate_inputs(
+                    scale=domain, software=skill, method=method,
+                    structure_file=structure_path, request=request,
+                    output_dir=str(structure_dir),
+                    api_key=self.orch.api_key, base_url=self.orch.base_url,
+                    model_name=self.orch.model_name,
+                )
             except Exception as e:
                 return json.dumps({
                     "status": "error",
-                    "message": f"VASP input generation failed: {e}",
+                    "message": f"DFT input generation failed: {e}",
                 })
 
-            incar_path = structure_dir / "INCAR"
-            kpoints_path = structure_dir / "KPOINTS"
+            if gen.get("status") not in (None, "success"):
+                return json.dumps({
+                    "status": "error",
+                    "message": gen.get("message") or "DFT input generation failed",
+                })
 
+            # Generic input-files record: filename -> path of the saved inputs.
+            file_paths = {
+                fn: str(structure_dir / fn)
+                for fn in (gen.get("input_files") or {})
+                if (structure_dir / fn).exists()
+            }
+            summary = gen.get("summary", "")
             record = self._find_structure_record(structure_path)
             if record is not None:
-                record["incar_path"] = str(incar_path)
-                record["kpoints_path"] = str(kpoints_path)
-                record["vasp_summary"] = summary
+                record["input_files"] = file_paths
+                record["summary"] = summary
 
             return json.dumps({
                 "status": "success",
-                "incar_path": str(incar_path),
-                "kpoints_path": str(kpoints_path),
+                "engine": skill,
+                "input_files": file_paths,
                 "summary": summary,
                 "method": method,
                 "structure_dir": str(structure_dir),
             })
 
         self._register_tool(
-            func=generate_vasp_inputs,
-            name="generate_vasp_inputs",
+            func=generate_dft_inputs,
+            name="generate_dft_inputs",
             description=(
-                "Generate VASP INCAR and KPOINTS files for a given structure "
-                "tailored to the scientific objective in `request`. Saves "
-                "INCAR + KPOINTS alongside the POSCAR. method='llm' (default) "
-                "uses an LLM to derive parameters; method='atomate2' uses "
-                "pymatgen/atomate2's MPRelaxSet (deterministic, requires the "
-                "[sim] extras)."
+                "Generate periodic-DFT input files for a structure, tailored "
+                "to the scientific objective in `request`, and save them "
+                "alongside the structure. Engine-neutral: `software` selects "
+                "the engine (e.g. 'vasp', 'qe'), defaulting to the routing "
+                "decision. method='llm' (default) derives parameters with an "
+                "LLM; a named method (e.g. 'atomate2' for VASP) uses a "
+                "deterministic generation backend from the engine's skill "
+                "bundle (requires the [sim] extras). Returns a generic "
+                "input_files map."
             ),
             parameters={
                 "structure_path": {
                     "type": "string",
-                    "description": "Absolute path to the POSCAR the inputs should match.",
+                    "description": "Absolute path to the structure the inputs should match.",
                 },
                 "request": {
                     "type": "string",
                     "description": (
-                        "Scientific objective / calculation type description "
+                        "Scientific objective / calculation type "
                         "(e.g., 'static SCF for band structure', "
-                        "'relaxation with vdW corrections for an interface'). "
-                        "Drives INCAR parameter choices."
+                        "'relaxation with vdW corrections'). Drives parameters."
+                    ),
+                },
+                "software": {
+                    "type": "string",
+                    "description": (
+                        "Optional engine override (e.g. 'vasp', 'qe'). "
+                        "Defaults to the engine chosen by route_simulation."
                     ),
                 },
                 "method": {
                     "type": "string",
-                    "enum": ["llm", "atomate2"],
                     "description": (
-                        "'llm' (default): AI-driven, more flexible. "
-                        "'atomate2': rule-based, deterministic, requires the "
-                        "[sim] extras."
+                        "'llm' (default): AI-driven generation. A named "
+                        "method (e.g. 'atomate2') uses a deterministic "
+                        "backend from the engine's skill bundle."
                     ),
                 },
             },
@@ -779,9 +764,17 @@ class SimulationOrchestratorTools:
             val_result = structure_gen.get("validation_result", {}) or {}
             outstanding_issues = val_result.get("all_identified_issues", []) or []
 
-            structure_path = workdir / "POSCAR"
-            incar_path = workdir / "INCAR"
-            kpoints_path = workdir / "KPOINTS"
+            # Engine-neutral: take the structure path from the result and
+            # build the input-files map from the generated inputs.
+            structure_path = Path(
+                structure_gen.get("final_structure_path") or (workdir / "POSCAR")
+            )
+            input_generation = result.get("input_generation", {}) or {}
+            input_files = {
+                fn: str(workdir / fn)
+                for fn in (input_generation.get("input_files") or {})
+                if (workdir / fn).exists()
+            }
 
             # Record in session state (only if structure exists)
             if structure_path.exists():
@@ -792,9 +785,8 @@ class SimulationOrchestratorTools:
                     "structure_path": str(structure_path),
                     "script_path": structure_gen.get("final_script_path"),
                     "script_content": None,  # not surfaced by run_complete_workflow
-                    "incar_path": str(incar_path) if incar_path.exists() else None,
-                    "kpoints_path": str(kpoints_path) if kpoints_path.exists() else None,
-                    "vasp_summary": result.get("vasp_generation", {}).get("summary"),
+                    "input_files": input_files,
+                    "summary": input_generation.get("summary"),
                     "validation": val_result,
                     "created_at": datetime.now().isoformat(),
                 }
@@ -822,7 +814,7 @@ class SimulationOrchestratorTools:
                 "without iterating on each step. For iterative work "
                 "(build → check → refine → inputs), use the granular tools "
                 "(generate_structure, validate_structure, refine_structure, "
-                "generate_vasp_inputs) instead."
+                "generate_dft_inputs) instead."
             ),
             parameters={
                 "description": {
@@ -913,31 +905,30 @@ class SimulationOrchestratorTools:
                     "message": result.get("message") or result.get("last_error") or "Refinement failed",
                 })
 
-            new_poscar = result["output_file"]
+            new_structure_path = result["output_file"]
             new_script_path = result["final_script_path"]
             new_script_content = result["final_script_content"]
-            n_atoms = self._count_atoms(new_poscar)
+            n_atoms = self._count_atoms(new_structure_path)
 
             # Update the record in place rather than appending — refinement
             # produces a successor of the same logical structure.
-            record["structure_path"] = new_poscar
+            record["structure_path"] = new_structure_path
             record["script_path"] = new_script_path
             record["script_content"] = new_script_content
             record["validation"] = None  # invalidate prior validation
-            record["incar_path"] = None  # invalidate prior inputs (geometry changed)
-            record["kpoints_path"] = None
-            record["vasp_summary"] = None
+            record["input_files"] = {}    # invalidate prior inputs (geometry changed)
+            record["summary"] = None
 
             return json.dumps({
                 "status": "success",
                 "slug": record["slug"],
-                "structure_path": new_poscar,
+                "structure_path": new_structure_path,
                 "script_path": new_script_path,
                 "n_atoms": n_atoms,
                 "next_steps": (
                     "Optionally call validate_structure again to confirm the "
                     "refinement addressed the prior issues; then proceed to "
-                    "generate_vasp_inputs."
+                    "generate_dft_inputs."
                 ),
             })
 
@@ -1118,19 +1109,15 @@ class SimulationOrchestratorTools:
         # =====================================================================
         # 7. APPLY INCAR IMPROVEMENTS
         # =====================================================================
-        def apply_incar_improvements(incar_path: str, structure_path: str,
-                                     original_request: str,
-                                     suggested_adjustments: list,
-                                     overall_assessment: str = "") -> str:
-            if not Path(incar_path).exists():
-                return json.dumps({
-                    "status": "error",
-                    "message": f"INCAR not found: {incar_path}",
-                })
+        def apply_input_adjustments(structure_path: str,
+                                    original_request: str,
+                                    suggested_adjustments: list,
+                                    software: str = None,
+                                    overall_assessment: str = "") -> str:
             if not Path(structure_path).exists():
                 return json.dumps({
                     "status": "error",
-                    "message": f"POSCAR not found: {structure_path}",
+                    "message": f"Structure file not found: {structure_path}",
                 })
             if not suggested_adjustments:
                 return json.dumps({
@@ -1138,9 +1125,42 @@ class SimulationOrchestratorTools:
                     "message": "No adjustments provided — nothing to apply.",
                 })
 
+            skill, domain = self._resolve_engine(software)
+            if not skill:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        "No engine selected. Call route_simulation first, or "
+                        "pass `software` explicitly (e.g. 'vasp')."
+                    ),
+                })
+
+            record = self._find_structure_record(structure_path)
+            original_inputs = self._record_input_files(record)
+            if not original_inputs:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        "No generated inputs to adjust. Run generate_dft_inputs "
+                        "(or generate_md_inputs) first."
+                    ),
+                })
+
+            # The engine-neutral apply lives on the periodic-DFT foundation
+            # agent (software-agnostic across vasp/qe). Other scales gain
+            # their own apply when their foundation agent implements it.
+            if domain != "periodic_dft":
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        f"apply_input_adjustments is not yet available for "
+                        f"scale '{domain}'."
+                    ),
+                })
+
             try:
-                from .vasp_agent import VaspInputAgent
-                agent = VaspInputAgent(
+                from .periodic_dft_agent import PeriodicDFTAgent
+                agent = PeriodicDFTAgent(
                     api_key=self.orch.api_key,
                     base_url=self.orch.base_url,
                     model_name=self.orch.model_name,
@@ -1148,54 +1168,57 @@ class SimulationOrchestratorTools:
             except Exception as e:
                 return json.dumps({
                     "status": "error",
-                    "message": f"Failed to construct VaspInputAgent: {e}",
+                    "message": f"Failed to construct generator agent: {e}",
                 })
 
-            original_incar = Path(incar_path).read_text()
-            output_dir = str(Path(incar_path).parent)
-
+            output_dir = str(Path(structure_path).parent)
             result = agent.apply_improvements(
-                original_incar=original_incar,
+                original_inputs=original_inputs,
                 validation_result={
                     "validation_status": "needs_adjustment",
                     "suggested_adjustments": suggested_adjustments,
                     "overall_assessment": overall_assessment,
                 },
-                structure_path=structure_path,
-                original_request=original_request,
+                structure_file=structure_path,
+                request=original_request,
                 output_dir=output_dir,
+                software=skill,
             )
 
             if result.get("status") not in ("success", "no_changes"):
                 return json.dumps({
                     "status": "error",
-                    "message": result.get("message") or "Apply-improvements failed",
+                    "message": result.get("message") or "Apply-adjustments failed",
                 })
+
+            improved = result.get("improved_paths") or {}
+            if record is not None and improved:
+                record["input_files"] = dict(improved)
 
             return json.dumps({
                 "status": result.get("status"),
-                "improvements_applied": result.get("improvements_applied", False),
-                "adjustments_count": result.get("adjustments_count", 0),
-                "improved_incar_path": result.get("improved_incar_path"),
+                "engine": skill,
+                "improved_paths": improved,
             })
 
         self._register_tool(
-            func=apply_incar_improvements,
-            name="apply_incar_improvements",
+            func=apply_input_adjustments,
+            name="apply_input_adjustments",
             description=(
-                "Apply a list of literature-validated INCAR adjustments to an "
-                "existing INCAR, writing the result as INCAR_improved next to "
-                "the original. Pair with validate_incar — pass its "
+                "Apply a list of validated parameter adjustments to a "
+                "structure's generated inputs, writing improved files next to "
+                "the originals and updating the session record. Engine-neutral: "
+                "`software` selects the engine (defaults to the routing "
+                "decision). Pair with validate_inputs — pass its "
                 "suggested_adjustments through directly."
             ),
             parameters={
-                "incar_path": {
-                    "type": "string",
-                    "description": "Absolute path to the original INCAR.",
-                },
                 "structure_path": {
                     "type": "string",
-                    "description": "Absolute path to the POSCAR (provides system context).",
+                    "description": (
+                        "Absolute path to the structure whose generated inputs "
+                        "should be adjusted (provides system context)."
+                    ),
                 },
                 "original_request": {
                     "type": "string",
@@ -1205,17 +1228,23 @@ class SimulationOrchestratorTools:
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "List of adjustment dicts in the shape returned by "
-                        "validate_incar (each with parameter/current_value/"
-                        "suggested_value/reason)."
+                        "Adjustment dicts in the shape validate_inputs returns "
+                        "(each with file/key/current/suggested/reason)."
+                    ),
+                },
+                "software": {
+                    "type": "string",
+                    "description": (
+                        "Optional engine override (e.g. 'vasp', 'qe'). "
+                        "Defaults to the engine chosen by route_simulation."
                     ),
                 },
                 "overall_assessment": {
                     "type": "string",
-                    "description": "Brief literature-review summary (passed verbatim).",
+                    "description": "Brief validation summary (passed verbatim).",
                 },
             },
-            required=["incar_path", "structure_path", "original_request", "suggested_adjustments"],
+            required=["structure_path", "original_request", "suggested_adjustments"],
         )
 
         # =====================================================================
@@ -1232,8 +1261,7 @@ class SimulationOrchestratorTools:
                         "description": s.get("description"),
                         "structure_dir": s.get("structure_dir"),
                         "structure_path": s.get("structure_path"),
-                        "incar_path": s.get("incar_path"),
-                        "kpoints_path": s.get("kpoints_path"),
+                        "input_files": s.get("input_files") or {},
                         "has_validation": s.get("validation") is not None,
                         "created_at": s.get("created_at"),
                     } for s in structures
@@ -1342,15 +1370,15 @@ class SimulationOrchestratorTools:
         # =====================================================================
         # 12. SUBMIT VASP JOB
         # =====================================================================
-        def submit_vasp_job(
+        def submit_simulation_job(
             structure_slug: str,
             remote_dir: str,
-            job_name: str = "vasp",
+            run_command: str,
+            job_name: str = "sim",
             partition: str = "",
             n_nodes: int = 1,
             n_tasks: int = 16,
             time_limit: str = "04:00:00",
-            vasp_command: str = "srun vasp_std",
             modules: str = "",
             extra_directives: str = "",
         ) -> str:
@@ -1386,30 +1414,39 @@ class SimulationOrchestratorTools:
                     ),
                 })
 
-            poscar = record.get("structure_path")
-            incar = record.get("incar_path")
-            kpoints = record.get("kpoints_path")
-            missing = [
-                n for n, p in [("POSCAR", poscar), ("INCAR", incar), ("KPOINTS", kpoints)]
-                if not p or not Path(p).exists()
-            ]
-            if missing:
+            structure_file = record.get("structure_path")
+            input_files = record.get("input_files") or {}
+            if not structure_file or not Path(structure_file).exists():
                 return json.dumps({
                     "status": "error",
                     "message": (
-                        f"Missing local files before upload: {missing}. "
-                        "Run generate_vasp_inputs first."
+                        "No local structure file to upload. Run "
+                        "generate_structure first."
                     ),
+                })
+            if not input_files:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        "No generated input files to upload. Run "
+                        "generate_dft_inputs (or generate_md_inputs) first."
+                    ),
+                })
+            missing = [fn for fn, p in input_files.items()
+                       if not p or not Path(p).exists()]
+            if missing:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Missing local input files before upload: {missing}.",
                 })
 
             try:
                 conn.mkdir_p(remote_dir)
-                for local_path, remote_name in [
-                    (poscar, "POSCAR"),
-                    (incar, "INCAR"),
-                    (kpoints, "KPOINTS"),
-                ]:
-                    conn.upload(local_path, f"{remote_dir}/{remote_name}")
+                # Upload the structure under its own filename + every input file.
+                conn.upload(structure_file,
+                            f"{remote_dir}/{Path(structure_file).name}")
+                for fname, local_path in input_files.items():
+                    conn.upload(local_path, f"{remote_dir}/{fname}")
 
                 script_content = self._generate_job_script(
                     sched=sched,
@@ -1418,7 +1455,7 @@ class SimulationOrchestratorTools:
                     n_tasks=n_tasks,
                     time_limit=time_limit,
                     partition=partition,
-                    vasp_command=vasp_command,
+                    run_command=run_command,
                     modules=modules,
                     extra_directives=extra_directives,
                 )
@@ -1443,19 +1480,22 @@ class SimulationOrchestratorTools:
                 "next_steps": (
                     f"Monitor with get_job_status('{job_id}'). "
                     "When status is Completed, call "
-                    f"download_vasp_results('{job_id}') to retrieve outputs."
+                    f"download_job_results('{job_id}') to retrieve outputs."
                 ),
             })
 
         self._register_tool(
-            func=submit_vasp_job,
-            name="submit_vasp_job",
+            func=submit_simulation_job,
+            name="submit_simulation_job",
             description=(
-                "Upload VASP input files (POSCAR, INCAR, KPOINTS) to a remote "
+                "Upload a structure and its generated input files to a remote "
                 "HPC cluster and submit a job via the active scheduler "
-                "(SLURM / PBS / LSF). Requires hpc_connection and hpc_scheduler "
-                "to be set on the orchestrator. Call generate_vasp_inputs first "
-                "to ensure local inputs exist."
+                "(SLURM / PBS / LSF). Engine-neutral: uploads whatever inputs "
+                "were generated for the structure plus the structure file. "
+                "Requires hpc_connection and hpc_scheduler on the orchestrator, "
+                "and that inputs were generated first (generate_dft_inputs / "
+                "generate_md_inputs). The engine's run command is supplied "
+                "via `run_command`."
             ),
             parameters={
                 "structure_slug": {
@@ -1466,9 +1506,18 @@ class SimulationOrchestratorTools:
                     "type": "string",
                     "description": "Absolute remote path for the job working directory (e.g. /scratch/user/run1).",
                 },
+                "run_command": {
+                    "type": "string",
+                    "description": (
+                        "Full engine run command including MPI launcher, "
+                        "written verbatim into the job script (e.g. "
+                        "'srun vasp_std', 'mpirun -np 16 lmp -in run.lammps'). "
+                        "Engine-specific — there is no default."
+                    ),
+                },
                 "job_name": {
                     "type": "string",
-                    "description": "Scheduler job name (default: 'vasp').",
+                    "description": "Scheduler job name (default: 'sim').",
                 },
                 "partition": {
                     "type": "string",
@@ -1486,21 +1535,13 @@ class SimulationOrchestratorTools:
                     "type": "string",
                     "description": "Wall-time limit in HH:MM:SS (default: '04:00:00').",
                 },
-                "vasp_command": {
-                    "type": "string",
-                    "description": (
-                        "Full run command including MPI launcher "
-                        "(e.g. 'srun vasp_std', 'mpirun -np 16 vasp_std'). "
-                        "Written verbatim into the job script. Default: 'srun vasp_std'."
-                    ),
-                },
                 "modules": {
                     "type": "string",
                     "description": (
-                        "Shell commands to load the VASP environment, written "
-                        "verbatim into the job script "
-                        "(e.g. 'module load vasp/6.3.2 intel/2023'). Omit if "
-                        "the user's .bashrc already loads VASP."
+                        "Shell commands to load the engine environment, written "
+                        "verbatim into the job script (e.g. "
+                        "'module load vasp/6.3.2 intel/2023'). Omit if the "
+                        "user's .bashrc already loads it."
                     ),
                 },
                 "extra_directives": {
@@ -1512,7 +1553,7 @@ class SimulationOrchestratorTools:
                     ),
                 },
             },
-            required=["structure_slug", "remote_dir"],
+            required=["structure_slug", "remote_dir", "run_command"],
         )
 
         # =====================================================================
@@ -1553,7 +1594,7 @@ class SimulationOrchestratorTools:
                 "exit_code": job.exit_code,
                 "node_list": job.node_list,
                 "next_steps": (
-                    f"download_vasp_results('{job_id}') to retrieve outputs."
+                    f"download_job_results('{job_id}') to retrieve outputs."
                     if job.status.is_terminal and job.status.value == "Completed"
                     else (
                         f"Call get_job_status('{job_id}') again to check progress."
@@ -1570,13 +1611,13 @@ class SimulationOrchestratorTools:
                 "Poll the HPC scheduler for the current status of a submitted "
                 "job. Returns job_status (Pending / Running / Completed / "
                 "Failed / Cancelled / Timeout), time used, and whether the "
-                "job has reached a terminal state. Use after submit_vasp_job "
+                "job has reached a terminal state. Use after submit_simulation_job "
                 "to check progress."
             ),
             parameters={
                 "job_id": {
                     "type": "string",
-                    "description": "Scheduler job ID returned by submit_vasp_job.",
+                    "description": "Scheduler job ID returned by submit_simulation_job.",
                 },
             },
             required=["job_id"],
@@ -1585,7 +1626,7 @@ class SimulationOrchestratorTools:
         # =====================================================================
         # 14. DOWNLOAD VASP RESULTS
         # =====================================================================
-        def download_vasp_results(job_id: str, local_dir: str = "") -> str:
+        def download_job_results(job_id: str, local_dir: str = "") -> str:
             conn = self.orch.hpc_connection
             if conn is None:
                 return json.dumps({
@@ -1604,7 +1645,7 @@ class SimulationOrchestratorTools:
                     "status": "error",
                     "message": (
                         f"No session record found for job_id='{job_id}'. "
-                        "Only jobs submitted via submit_vasp_job in this "
+                        "Only jobs submitted via submit_simulation_job in this "
                         "session can be downloaded automatically."
                     ),
                 })
@@ -1656,8 +1697,8 @@ class SimulationOrchestratorTools:
             })
 
         self._register_tool(
-            func=download_vasp_results,
-            name="download_vasp_results",
+            func=download_job_results,
+            name="download_job_results",
             description=(
                 "Download VASP output files (vasprun.xml, OUTCAR, CONTCAR, "
                 "OSZICAR, etc.) from the remote HPC directory to a local "
@@ -1668,7 +1709,7 @@ class SimulationOrchestratorTools:
             parameters={
                 "job_id": {
                     "type": "string",
-                    "description": "Scheduler job ID returned by submit_vasp_job.",
+                    "description": "Scheduler job ID returned by submit_simulation_job.",
                 },
                 "local_dir": {
                     "type": "string",
@@ -1747,14 +1788,13 @@ class SimulationOrchestratorTools:
                     for iss in issues:
                         lines.append(f"  - {iss}")
 
-            if record.get("incar_path") and Path(record["incar_path"]).exists():
-                lines += [
-                    "\n## VASP Inputs",
-                    f"- **INCAR:** `{record['incar_path']}`",
-                    f"- **KPOINTS:** `{record.get('kpoints_path', 'N/A')}`",
-                ]
-                if record.get("vasp_summary"):
-                    lines.append(f"- **Summary:** {record['vasp_summary']}")
+            input_files = record.get("input_files") or {}
+            if input_files:
+                lines.append("\n## Generated Inputs")
+                for fname, fpath in input_files.items():
+                    lines.append(f"- **{fname}:** `{fpath}`")
+                if record.get("summary"):
+                    lines.append(f"- **Summary:** {record['summary']}")
 
             if record.get("hpc_job_id"):
                 sched_name = (
@@ -1811,7 +1851,7 @@ class SimulationOrchestratorTools:
                 "workflow: structure description, validation outcome, VASP input "
                 "settings, HPC job info, and parsed results (energy, convergence, "
                 "error hints). Saves to <structure_dir>/final_report.md by default. "
-                "Call after download_vasp_results to include calculation outcomes."
+                "Call after download_job_results to include calculation outcomes."
             ),
             parameters={
                 "structure_slug": {
@@ -1976,11 +2016,11 @@ class SimulationOrchestratorTools:
         n_tasks: int,
         time_limit: str,
         partition: str,
-        vasp_command: str,
+        run_command: str,
         modules: str,
         extra_directives: str,
     ) -> str:
-        """Generate a scheduler job script for VASP."""
+        """Generate a scheduler job script for an arbitrary engine run command."""
         sname = getattr(sched, "name", "SLURM").upper()
         lines = ["#!/bin/bash"]
 
@@ -2026,7 +2066,7 @@ class SimulationOrchestratorTools:
         if modules:
             lines += ["", modules]
 
-        lines += ["", vasp_command, ""]
+        lines += ["", run_command, ""]
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
