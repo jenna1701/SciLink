@@ -187,20 +187,26 @@ def _render_staged_section() -> None:
             # than stretching across the full-width memory panel.
             targets = [f"{s['domain']}/{s['name']}" for s in _memory.list_memory(domain=domain)]
             c1, c2, _ = st.columns([2, 2, 4])
+            prop_key = f"upgprop::{domain}/{technique}"
             with c1:
                 if targets:
                     tgt = st.selectbox("Upgrade into", targets, key=f"tgt::{domain}/{technique}")
                     sid = recs[0]["id"]
-                    if st.button("Upgrade (use newest)", key=f"up::{domain}/{technique}"):
+                    # Upgrade mutates an existing skill in place, so preview first:
+                    # build the merged skill, show a diff, and apply only on confirm.
+                    if st.button("Preview upgrade", key=f"up::{domain}/{technique}"):
                         from scilink.agents.exp_agents.instruct import (
                             KNOWLEDGE_TO_SKILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
                         td, tn = tgt.split("/", 1)
-                        res = _staging.upgrade_skill_from_staged(
+                        prop = _staging.propose_skill_upgrade(
                             domain, [sid], target_domain=td, target_name=tn,
                             llm_call=_llm_call,
                             fresh_template=KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
                             update_template=SKILL_UPDATE_INSTRUCTIONS)
-                        st.success(f"Upgraded {tgt} ({res.get('method')}).")
+                        if prop.get("status") == "success":
+                            st.session_state[prop_key] = prop
+                        else:
+                            st.error(prop.get("message", "Could not build upgrade."))
                         st.rerun()
                 else:
                     st.caption("No existing skills in this domain to upgrade into.")
@@ -226,6 +232,38 @@ def _render_staged_section() -> None:
                         consolidation_template=T2_CONSOLIDATION_INSTRUCTIONS,
                         update_template=SKILL_UPDATE_INSTRUCTIONS)
                     st.success(f"Consolidated {res.get('n_examples')} → auto_{technique} (provisional).")
+                    st.rerun()
+
+            # Pending upgrade preview — review the merged content before applying.
+            prop = st.session_state.get(prop_key)
+            if prop:
+                import difflib
+                st.markdown(
+                    f"**Review upgrade → `{prop['target_domain']}/{prop['target_name']}`** "
+                    "— applies in place; the current version is backed up to `.md.bak`."
+                )
+                diff = "\n".join(difflib.unified_diff(
+                    prop["existing_content"].splitlines(),
+                    prop["proposed_content"].splitlines(),
+                    fromfile="current", tofile="after upgrade", lineterm=""))
+                st.code(diff or "(no textual change)", language="diff")
+                a1, a2, _ = st.columns([2, 2, 4])
+                if a1.button("Apply upgrade", key=f"upapply::{domain}/{technique}",
+                             type="primary"):
+                    res = _staging.apply_skill_upgrade(
+                        domain, prop["staged_ids"],
+                        target_domain=prop["target_domain"],
+                        target_name=prop["target_name"],
+                        proposed_content=prop["proposed_content"])
+                    st.session_state.pop(prop_key, None)
+                    if res.get("status") == "success":
+                        st.success(f"Upgraded {prop['target_domain']}/{prop['target_name']} "
+                                   f"(backup saved).")
+                    else:
+                        st.error(res.get("message", "Apply failed."))
+                    st.rerun()
+                if a2.button("Cancel", key=f"upcancel::{domain}/{technique}"):
+                    st.session_state.pop(prop_key, None)
                     st.rerun()
                 if not ready:
                     st.caption(f"Accumulating {len(recs)}/{need} examples before a new skill.")
