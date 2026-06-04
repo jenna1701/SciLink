@@ -1764,11 +1764,11 @@ class SimulationOrchestratorTools:
                     run_snapshot = {"error": str(e)}
 
             lines = [
-                "# VASP DFT Simulation Report",
+                "# Simulation Report",
                 f"\n## Structure: {record.get('description', structure_slug)}",
                 f"- **Slug:** `{structure_slug}`",
                 f"- **Created:** {record.get('created_at', 'unknown')}",
-                f"- **POSCAR:** `{record.get('structure_path', 'N/A')}`",
+                f"- **Structure:** `{record.get('structure_path', 'N/A')}`",
             ]
 
             n_atoms = self._count_atoms(record.get("structure_path", ""))
