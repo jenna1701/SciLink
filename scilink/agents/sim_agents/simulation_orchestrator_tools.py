@@ -86,15 +86,30 @@ class SimulationOrchestratorTools:
     def _resolve_engine(self, software: Optional[str]) -> "tuple[Optional[str], Optional[str]]":
         """Resolve ``(skill, domain)`` for a critic call.
 
-        An explicit ``software`` argument names the engine skill directly
-        (domain inferred from the active routing decision when available,
-        else defaulted to periodic_dft). When ``software`` is omitted, both
-        are taken from the orchestrator's routing decision.
+        With an explicit ``software`` override, the scale (domain) is derived
+        from where that engine's skill bundle lives — not from routing or a
+        hardcoded default — so e.g. ``software="lammps"`` resolves to
+        ``("lammps", "molecular_dynamics")`` and ``software="vasp"`` to
+        ``("vasp", "periodic_dft")`` regardless of routing. The search is
+        scoped to the known simulation scales (the pipeline's scale
+        registry). When ``software`` is omitted, both come from the
+        orchestrator's routing decision.
         """
-        if software:
-            _engine, scale = self.orch.active_skill_and_domain()
-            return software, (scale or "periodic_dft")
-        return self.orch.active_skill_and_domain()
+        if not software:
+            return self.orch.active_skill_and_domain()
+
+        # Derive the scale from the engine's bundle location across the
+        # known simulation scales — no hardcoded engine→scale bias.
+        from ...skills.loader import list_all_skills
+        from .simulation_pipeline import _DEFAULT_ENGINE
+        all_skills = list_all_skills()
+        for scale in _DEFAULT_ENGINE:
+            if software in all_skills.get(scale, []):
+                return software, scale
+        # Unknown engine for the known scales: keep the name, take the scale
+        # from routing if any (still no hardcoded default).
+        _engine, routed_scale = self.orch.active_skill_and_domain()
+        return software, routed_scale
 
     def _get_input_validator(self):
         """Construct an InputValidator with the session's credentials.
