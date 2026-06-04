@@ -402,7 +402,7 @@ planned follow-up work; see CLAUDE.md.
             print(f"\n🏗️  Structures generated this session: {len(structures)}")
             for s in structures:
                 print(f"  • {s.get('slug')}: {s.get('description')}")
-                print(f"      POSCAR: {s.get('poscar_path')}")
+                print(f"      POSCAR: {s.get('structure_path')}")
                 if s.get('incar_path'):
                     print(f"      INCAR/KPOINTS: ✓")
             return True

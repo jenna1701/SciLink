@@ -128,7 +128,7 @@ def test_2_tool_error_paths(model_name: str):
         # validate_structure on missing file
         r = json.loads(orch.tools.execute_tool(
             "validate_structure",
-            poscar_path="/nonexistent/POSCAR",
+            structure_path="/nonexistent/POSCAR",
             original_request="test",
         ))
         assert r["status"] == "error" and "not found" in r["message"]
@@ -138,7 +138,7 @@ def test_2_tool_error_paths(model_name: str):
         fake.write_text("Si\n1.0\n3 0 0\n0 3 0\n0 0 3\nSi\n1\nDirect\n0 0 0\n")
         r = json.loads(orch.tools.execute_tool(
             "generate_vasp_inputs",
-            poscar_path=str(fake),
+            structure_path=str(fake),
             request="test",
             method="banana",
         ))
@@ -147,7 +147,7 @@ def test_2_tool_error_paths(model_name: str):
         # refine_structure on a path with no session record
         r = json.loads(orch.tools.execute_tool(
             "refine_structure",
-            poscar_path=str(fake),
+            structure_path=str(fake),
             original_request="test",
         ))
         assert r["status"] == "error" and "No record found" in r["message"]
@@ -155,7 +155,7 @@ def test_2_tool_error_paths(model_name: str):
         # view_structure on missing file
         r = json.loads(orch.tools.execute_tool(
             "view_structure",
-            poscar_path="/nope/POSCAR",
+            structure_path="/nope/POSCAR",
         ))
         assert r["status"] == "error"
 
@@ -173,7 +173,7 @@ def test_2_tool_error_paths(model_name: str):
         r = json.loads(orch.tools.execute_tool(
             "apply_incar_improvements",
             incar_path=str(fake_incar),
-            poscar_path=str(fake),
+            structure_path=str(fake),
             original_request="test",
             suggested_adjustments=[],
         ))
@@ -250,7 +250,7 @@ def test_5_run_task_without_llm(model_name: str):
             orch.generated_structures.append({
                 "slug": "fake_001",
                 "description": "test structure",
-                "poscar_path": "/tmp/POSCAR",
+                "structure_path": "/tmp/POSCAR",
                 "incar_path": None,
                 "kpoints_path": None,
                 "script_path": "/tmp/script.py",
@@ -292,7 +292,7 @@ def test_6_session_persistence(model_name: str):
         orch.generated_structures.append({
             "slug": "persist_001",
             "description": "survival test",
-            "poscar_path": "/tmp/POSCAR",
+            "structure_path": "/tmp/POSCAR",
         })
         orch.default_calc_params = {"ENCUT": 520, "kpoint_density": 30}
         # Force a checkpoint write
@@ -379,7 +379,7 @@ def test_8_hpc_tools_mock_connection(model_name: str):
             "slug": slug,
             "description": "bulk silicon",
             "structure_dir": str(struct_dir),
-            "poscar_path": str(poscar),
+            "structure_path": str(poscar),
             "incar_path": str(incar),
             "kpoints_path": str(kpoints),
             "hpc_job_id": None,
@@ -465,8 +465,8 @@ def stress_1_generate_then_inputs(model_name: str):
     structures = orch.generated_structures
     assert structures, "Agent did not record any generated structures"
     s = structures[-1]
-    assert Path(s["poscar_path"]).exists(), f"POSCAR missing: {s['poscar_path']}"
-    print(f"   ✅ POSCAR produced: {s['poscar_path']}")
+    assert Path(s["structure_path"]).exists(), f"POSCAR missing: {s['structure_path']}"
+    print(f"   ✅ POSCAR produced: {s['structure_path']}")
 
     if s.get("incar_path"):
         assert Path(s["incar_path"]).exists()
@@ -569,7 +569,7 @@ def stress_4_aimsgb_skill_loaded(model_name: str):
     assert "GrainBoundary" in script_text, "Script should use GrainBoundary"
     assert "build_gb" in script_text, "Script should call .build_gb()"
 
-    poscar = Path(s["poscar_path"])
+    poscar = Path(s["structure_path"])
     assert poscar.exists(), f"POSCAR missing: {poscar}"
 
     from ase.io import read as ase_read
@@ -632,7 +632,7 @@ def stress_5_hpc_workflow_mocked(model_name: str):
         "slug": "si_bulk_001",
         "description": "2x2x2 bulk silicon supercell",
         "structure_dir": str(struct_dir),
-        "poscar_path": str(poscar),
+        "structure_path": str(poscar),
         "incar_path": str(incar),
         "kpoints_path": str(kpoints),
         "hpc_job_id": None,
@@ -694,8 +694,8 @@ def e2e_1_run_task_minimal_structure(model_name: str):
     assert result["status"] == "success", f"run_task failed: {result.get('error')}"
     assert result["structures"], "No structures recorded"
     s = result["structures"][0]
-    assert Path(s["poscar_path"]).exists(), "POSCAR not on disk"
-    print(f"   ✅ run_task produced a structure at {s['poscar_path']}")
+    assert Path(s["structure_path"]).exists(), "POSCAR not on disk"
+    print(f"   ✅ run_task produced a structure at {s['structure_path']}")
 
 
 # ---------------------------------------------------------------------------
@@ -777,7 +777,7 @@ def integration_1_hpc_slurm(model_name: str):
         "slug": slug,
         "description": "bulk silicon integration test",
         "structure_dir": str(struct_dir),
-        "poscar_path": str(poscar),
+        "structure_path": str(poscar),
         "incar_path": str(incar),
         "kpoints_path": str(kpoints),
         "hpc_job_id": None,

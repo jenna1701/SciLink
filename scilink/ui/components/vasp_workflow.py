@@ -367,7 +367,7 @@ def _render_configure() -> None:
 
         # Stash files + draft SLURM script in session state.
         try:
-            poscar_text = Path(structure["poscar_path"]).read_text()
+            poscar_text = Path(structure["structure_path"]).read_text()
             incar_text = Path(structure["incar_path"]).read_text()
             kpoints_text = Path(structure["kpoints_path"]).read_text()
         except Exception as exc:
@@ -493,7 +493,7 @@ def _run_generation(
     # agent decided to refine; the wizard always uses the latest).
     candidate = new[-1]
     if not (
-        candidate.get("poscar_path")
+        candidate.get("structure_path")
         and candidate.get("incar_path")
         and candidate.get("kpoints_path")
     ):

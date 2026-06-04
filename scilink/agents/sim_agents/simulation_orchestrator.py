@@ -324,7 +324,7 @@ class SimulationOrchestratorAgent:
         self.structures_dir.mkdir(parents=True, exist_ok=True)
 
         # Session state — structure-centric (vs analysis-centric in analyze mode)
-        # generated_structures: list of {slug, poscar_path, description,
+        # generated_structures: list of {slug, structure_path, description,
         #     created_at, vasp_inputs_path?, vasp_output_dir?}
         self.generated_structures: List[Dict[str, Any]] = []
 
@@ -555,7 +555,7 @@ class SimulationOrchestratorAgent:
         files_produced: List[str] = []
         key_findings: List[str] = []
         for s in new_structures:
-            for key in ("poscar_path", "incar_path", "kpoints_path", "script_path"):
+            for key in ("structure_path", "incar_path", "kpoints_path", "script_path"):
                 p = s.get(key)
                 if p:
                     files_produced.append(p)
@@ -579,10 +579,10 @@ class SimulationOrchestratorAgent:
         # generate VASP inputs for it.
         suggested_followups: List[str] = []
         for s in new_structures:
-            if s.get("poscar_path") and not s.get("incar_path"):
+            if s.get("structure_path") and not s.get("incar_path"):
                 suggested_followups.append(
                     f"Generate VASP inputs for {s.get('slug')} "
-                    f"(POSCAR at {s.get('poscar_path')})."
+                    f"(POSCAR at {s.get('structure_path')})."
                 )
 
         result = {
@@ -596,7 +596,7 @@ class SimulationOrchestratorAgent:
                 {
                     "slug": s.get("slug"),
                     "description": s.get("description"),
-                    "poscar_path": s.get("poscar_path"),
+                    "structure_path": s.get("structure_path"),
                     "incar_path": s.get("incar_path"),
                     "kpoints_path": s.get("kpoints_path"),
                 } for s in new_structures

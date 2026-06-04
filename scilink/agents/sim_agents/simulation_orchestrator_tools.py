@@ -170,7 +170,7 @@ class SimulationOrchestratorTools:
                     {
                         "slug": s.get("slug"),
                         "description": s.get("description"),
-                        "poscar_path": s.get("poscar_path"),
+                        "structure_path": s.get("structure_path"),
                         "incar_path": s.get("incar_path"),
                     } for s in structures
                 ],
@@ -394,7 +394,7 @@ class SimulationOrchestratorTools:
                 "slug": slug,
                 "description": description,
                 "structure_dir": str(workdir),
-                "poscar_path": result["final_structure_path"],
+                "structure_path": result["final_structure_path"],
                 "script_path": result["final_script_path"],
                 "script_content": result.get("final_script_content"),
                 "skill": skill,
@@ -411,9 +411,9 @@ class SimulationOrchestratorTools:
                 "status": "success",
                 "slug": slug,
                 "structure_dir": str(workdir),
-                "poscar_path": record["poscar_path"],
+                "structure_path": record["structure_path"],
                 "script_path": record["script_path"],
-                "n_atoms": self._count_atoms(record["poscar_path"]),
+                "n_atoms": self._count_atoms(record["structure_path"]),
                 "skill_used": skill,
                 "validation": {
                     "status": (val or {}).get("status"),
@@ -537,16 +537,16 @@ class SimulationOrchestratorTools:
         # =====================================================================
         # 2. VALIDATE STRUCTURE
         # =====================================================================
-        def validate_structure(poscar_path: str, original_request: str) -> str:
+        def validate_structure(structure_path: str, original_request: str) -> str:
             from .val_agent import StructureValidatorAgent
 
-            if not Path(poscar_path).exists():
+            if not Path(structure_path).exists():
                 return json.dumps({
                     "status": "error",
-                    "message": f"POSCAR not found: {poscar_path}",
+                    "message": f"POSCAR not found: {structure_path}",
                 })
 
-            script_content = self._find_script_content(poscar_path)
+            script_content = self._find_script_content(structure_path)
             if not script_content:
                 return json.dumps({
                     "status": "error",
@@ -570,13 +570,13 @@ class SimulationOrchestratorTools:
                 })
 
             val_result = validator.validate_structure_and_script(
-                structure_file_path=poscar_path,
+                structure_file_path=structure_path,
                 generating_script_content=script_content,
                 original_request=original_request,
             )
 
             # Attach to the matching session record (if any)
-            record = self._find_structure_record(poscar_path)
+            record = self._find_structure_record(structure_path)
             if record is not None:
                 record["validation"] = val_result
 
@@ -585,7 +585,7 @@ class SimulationOrchestratorTools:
                 "overall_assessment": val_result.get("overall_assessment", ""),
                 "all_identified_issues": val_result.get("all_identified_issues", []),
                 "script_modification_hints": val_result.get("script_modification_hints", []),
-                "poscar_path": poscar_path,
+                "structure_path": structure_path,
             })
 
         self._register_tool(
@@ -601,7 +601,7 @@ class SimulationOrchestratorTools:
                 "VASP inputs."
             ),
             parameters={
-                "poscar_path": {
+                "structure_path": {
                     "type": "string",
                     "description": "Absolute path to the POSCAR file to validate.",
                 },
@@ -614,21 +614,21 @@ class SimulationOrchestratorTools:
                     ),
                 },
             },
-            required=["poscar_path", "original_request"],
+            required=["structure_path", "original_request"],
         )
 
         # =====================================================================
         # 5. GENERATE VASP INPUTS
         # =====================================================================
-        def generate_vasp_inputs(poscar_path: str, request: str,
+        def generate_vasp_inputs(structure_path: str, request: str,
                                  method: str = "llm") -> str:
-            if not Path(poscar_path).exists():
+            if not Path(structure_path).exists():
                 return json.dumps({
                     "status": "error",
-                    "message": f"POSCAR not found: {poscar_path}",
+                    "message": f"POSCAR not found: {structure_path}",
                 })
 
-            structure_dir = Path(poscar_path).parent
+            structure_dir = Path(structure_path).parent
 
             try:
                 if method == "llm":
@@ -639,7 +639,7 @@ class SimulationOrchestratorTools:
                         model_name=self.orch.model_name,
                     )
                     vasp_result = agent.generate_vasp_inputs(
-                        poscar_path=poscar_path,
+                        structure_path=structure_path,
                         original_request=request,
                     )
                     if vasp_result.get("status") != "success":
@@ -666,7 +666,7 @@ class SimulationOrchestratorTools:
                             ),
                         })
                     from ase.io import read as ase_read
-                    structure_obj = ase_read(poscar_path)
+                    structure_obj = ase_read(structure_path)
                     Atomate2Input().generate(
                         structure=structure_obj,
                         output_dir=str(structure_dir),
@@ -688,7 +688,7 @@ class SimulationOrchestratorTools:
             incar_path = structure_dir / "INCAR"
             kpoints_path = structure_dir / "KPOINTS"
 
-            record = self._find_structure_record(poscar_path)
+            record = self._find_structure_record(structure_path)
             if record is not None:
                 record["incar_path"] = str(incar_path)
                 record["kpoints_path"] = str(kpoints_path)
@@ -715,7 +715,7 @@ class SimulationOrchestratorTools:
                 "[sim] extras)."
             ),
             parameters={
-                "poscar_path": {
+                "structure_path": {
                     "type": "string",
                     "description": "Absolute path to the POSCAR the inputs should match.",
                 },
@@ -738,7 +738,7 @@ class SimulationOrchestratorTools:
                     ),
                 },
             },
-            required=["poscar_path", "request"],
+            required=["structure_path", "request"],
         )
 
         # =====================================================================
@@ -779,17 +779,17 @@ class SimulationOrchestratorTools:
             val_result = structure_gen.get("validation_result", {}) or {}
             outstanding_issues = val_result.get("all_identified_issues", []) or []
 
-            poscar_path = workdir / "POSCAR"
+            structure_path = workdir / "POSCAR"
             incar_path = workdir / "INCAR"
             kpoints_path = workdir / "KPOINTS"
 
             # Record in session state (only if structure exists)
-            if poscar_path.exists():
+            if structure_path.exists():
                 record = {
                     "slug": slug,
                     "description": description,
                     "structure_dir": str(workdir),
-                    "poscar_path": str(poscar_path),
+                    "structure_path": str(structure_path),
                     "script_path": structure_gen.get("final_script_path"),
                     "script_content": None,  # not surfaced by run_complete_workflow
                     "incar_path": str(incar_path) if incar_path.exists() else None,
@@ -848,8 +848,8 @@ class SimulationOrchestratorTools:
         # =====================================================================
         # 3. REFINE STRUCTURE
         # =====================================================================
-        def refine_structure(poscar_path: str, original_request: str) -> str:
-            record = self._find_structure_record(poscar_path)
+        def refine_structure(structure_path: str, original_request: str) -> str:
+            record = self._find_structure_record(structure_path)
             if record is None:
                 return json.dumps({
                     "status": "error",
@@ -857,7 +857,7 @@ class SimulationOrchestratorTools:
                         "Refinement requires a structure that was generated "
                         "in this session (so the validator feedback and "
                         "prior script are available). No record found for: "
-                        f"{poscar_path}. Generate the structure first via "
+                        f"{structure_path}. Generate the structure first via "
                         "generate_structure, then validate, then refine."
                     ),
                 })
@@ -874,7 +874,7 @@ class SimulationOrchestratorTools:
                     ),
                 })
 
-            prior_script = record.get("script_content") or self._find_script_content(poscar_path)
+            prior_script = record.get("script_content") or self._find_script_content(structure_path)
             if not prior_script:
                 return json.dumps({
                     "status": "error",
@@ -920,7 +920,7 @@ class SimulationOrchestratorTools:
 
             # Update the record in place rather than appending — refinement
             # produces a successor of the same logical structure.
-            record["poscar_path"] = new_poscar
+            record["structure_path"] = new_poscar
             record["script_path"] = new_script_path
             record["script_content"] = new_script_content
             record["validation"] = None  # invalidate prior validation
@@ -931,7 +931,7 @@ class SimulationOrchestratorTools:
             return json.dumps({
                 "status": "success",
                 "slug": record["slug"],
-                "poscar_path": new_poscar,
+                "structure_path": new_poscar,
                 "script_path": new_script_path,
                 "n_atoms": n_atoms,
                 "next_steps": (
@@ -954,7 +954,7 @@ class SimulationOrchestratorTools:
                 "validated in this session — run validate_structure first."
             ),
             parameters={
-                "poscar_path": {
+                "structure_path": {
                     "type": "string",
                     "description": "Absolute path to the POSCAR to refine.",
                 },
@@ -967,23 +967,23 @@ class SimulationOrchestratorTools:
                     ),
                 },
             },
-            required=["poscar_path", "original_request"],
+            required=["structure_path", "original_request"],
         )
 
         # =====================================================================
         # 4. VIEW STRUCTURE
         # =====================================================================
-        def view_structure(poscar_path: str) -> str:
+        def view_structure(structure_path: str) -> str:
             from .utils import generate_structure_views
 
-            if not Path(poscar_path).exists():
+            if not Path(structure_path).exists():
                 return json.dumps({
                     "status": "error",
-                    "message": f"POSCAR not found: {poscar_path}",
+                    "message": f"POSCAR not found: {structure_path}",
                 })
 
             try:
-                image_paths = generate_structure_views(poscar_path)
+                image_paths = generate_structure_views(structure_path)
             except Exception as e:
                 return json.dumps({
                     "status": "error",
@@ -1021,18 +1021,18 @@ class SimulationOrchestratorTools:
                 "not to the model itself."
             ),
             parameters={
-                "poscar_path": {
+                "structure_path": {
                     "type": "string",
                     "description": "Absolute path to the POSCAR to render.",
                 },
             },
-            required=["poscar_path"],
+            required=["structure_path"],
         )
 
         # =====================================================================
         # 6. VALIDATE INPUTS (engine-neutral, pre-run)
         # =====================================================================
-        def validate_inputs(poscar_path: str, system_description: str,
+        def validate_inputs(structure_path: str, system_description: str,
                             software: str = None) -> str:
             skill, domain = self._resolve_engine(software)
             if not skill:
@@ -1044,7 +1044,7 @@ class SimulationOrchestratorTools:
                     ),
                 })
 
-            record = self._find_structure_record(poscar_path)
+            record = self._find_structure_record(structure_path)
             input_files = self._record_input_files(record)
             if not input_files:
                 return json.dumps({
@@ -1089,7 +1089,7 @@ class SimulationOrchestratorTools:
                 "generating inputs and before submitting a run."
             ),
             parameters={
-                "poscar_path": {
+                "structure_path": {
                     "type": "string",
                     "description": (
                         "Absolute path to the structure's POSCAR, used to "
@@ -1112,13 +1112,13 @@ class SimulationOrchestratorTools:
                     ),
                 },
             },
-            required=["poscar_path", "system_description"],
+            required=["structure_path", "system_description"],
         )
 
         # =====================================================================
         # 7. APPLY INCAR IMPROVEMENTS
         # =====================================================================
-        def apply_incar_improvements(incar_path: str, poscar_path: str,
+        def apply_incar_improvements(incar_path: str, structure_path: str,
                                      original_request: str,
                                      suggested_adjustments: list,
                                      overall_assessment: str = "") -> str:
@@ -1127,10 +1127,10 @@ class SimulationOrchestratorTools:
                     "status": "error",
                     "message": f"INCAR not found: {incar_path}",
                 })
-            if not Path(poscar_path).exists():
+            if not Path(structure_path).exists():
                 return json.dumps({
                     "status": "error",
-                    "message": f"POSCAR not found: {poscar_path}",
+                    "message": f"POSCAR not found: {structure_path}",
                 })
             if not suggested_adjustments:
                 return json.dumps({
@@ -1161,7 +1161,7 @@ class SimulationOrchestratorTools:
                     "suggested_adjustments": suggested_adjustments,
                     "overall_assessment": overall_assessment,
                 },
-                poscar_path=poscar_path,
+                structure_path=structure_path,
                 original_request=original_request,
                 output_dir=output_dir,
             )
@@ -1193,7 +1193,7 @@ class SimulationOrchestratorTools:
                     "type": "string",
                     "description": "Absolute path to the original INCAR.",
                 },
-                "poscar_path": {
+                "structure_path": {
                     "type": "string",
                     "description": "Absolute path to the POSCAR (provides system context).",
                 },
@@ -1215,7 +1215,7 @@ class SimulationOrchestratorTools:
                     "description": "Brief literature-review summary (passed verbatim).",
                 },
             },
-            required=["incar_path", "poscar_path", "original_request", "suggested_adjustments"],
+            required=["incar_path", "structure_path", "original_request", "suggested_adjustments"],
         )
 
         # =====================================================================
@@ -1231,7 +1231,7 @@ class SimulationOrchestratorTools:
                         "slug": s.get("slug"),
                         "description": s.get("description"),
                         "structure_dir": s.get("structure_dir"),
-                        "poscar_path": s.get("poscar_path"),
+                        "structure_path": s.get("structure_path"),
                         "incar_path": s.get("incar_path"),
                         "kpoints_path": s.get("kpoints_path"),
                         "has_validation": s.get("validation") is not None,
@@ -1386,7 +1386,7 @@ class SimulationOrchestratorTools:
                     ),
                 })
 
-            poscar = record.get("poscar_path")
+            poscar = record.get("structure_path")
             incar = record.get("incar_path")
             kpoints = record.get("kpoints_path")
             missing = [
@@ -1727,10 +1727,10 @@ class SimulationOrchestratorTools:
                 f"\n## Structure: {record.get('description', structure_slug)}",
                 f"- **Slug:** `{structure_slug}`",
                 f"- **Created:** {record.get('created_at', 'unknown')}",
-                f"- **POSCAR:** `{record.get('poscar_path', 'N/A')}`",
+                f"- **POSCAR:** `{record.get('structure_path', 'N/A')}`",
             ]
 
-            n_atoms = self._count_atoms(record.get("poscar_path", ""))
+            n_atoms = self._count_atoms(record.get("structure_path", ""))
             if n_atoms is not None:
                 lines.append(f"- **Atoms:** {n_atoms}")
 
@@ -1915,16 +1915,16 @@ class SimulationOrchestratorTools:
         return f"{safe}_{self.orch._structure_counter:03d}"
 
     @staticmethod
-    def _count_atoms(poscar_path: str) -> Optional[int]:
+    def _count_atoms(structure_path: str) -> Optional[int]:
         """Best-effort atom count via ASE; returns None on parse failure."""
         try:
             from ase.io import read as ase_read
-            atoms = ase_read(poscar_path)
+            atoms = ase_read(structure_path)
             return len(atoms)
         except Exception:
             return None
 
-    def _find_script_content(self, poscar_path: str) -> Optional[str]:
+    def _find_script_content(self, structure_path: str) -> Optional[str]:
         """Find the generating script for a POSCAR.
 
         First check the orchestrator's session records (cheap, exact). If
@@ -1933,11 +1933,11 @@ class SimulationOrchestratorTools:
         work even when the LLM passes around paths without going through
         the session record path.
         """
-        record = self._find_structure_record(poscar_path)
+        record = self._find_structure_record(structure_path)
         if record and record.get("script_content"):
             return record["script_content"]
 
-        poscar_dir = Path(poscar_path).parent
+        poscar_dir = Path(structure_path).parent
         candidates = sorted(
             poscar_dir.glob("script_*.py"),
             key=lambda p: p.stat().st_mtime,
@@ -1950,12 +1950,12 @@ class SimulationOrchestratorTools:
         except Exception:
             return None
 
-    def _find_structure_record(self, poscar_path: str) -> Optional[Dict[str, Any]]:
+    def _find_structure_record(self, structure_path: str) -> Optional[Dict[str, Any]]:
         """Find the session record matching a POSCAR path, by string match."""
-        target = str(Path(poscar_path).resolve())
+        target = str(Path(structure_path).resolve())
         for record in self.orch.generated_structures or []:
             try:
-                if str(Path(record.get("poscar_path", "")).resolve()) == target:
+                if str(Path(record.get("structure_path", "")).resolve()) == target:
                     return record
             except Exception:
                 continue
