@@ -130,6 +130,7 @@ def _cmd_show(args) -> int:
 
 
 def _cmd_promote(args) -> int:
+    _warn_memory_off()
     domain, name = _split_ref(args.ref)
     try:
         res = promote_memory(domain, name, to_domain=args.to_domain)
@@ -159,6 +160,14 @@ def _cmd_prune(args) -> int:
 
 def _consolidate_n() -> int:
     return _staging.consolidate_min_n()
+
+def _warn_memory_off():
+    """Distilling/promoting while memory is off produces skills that won't load
+    into runs until it's enabled — warn so the action isn't silently inert."""
+    from scilink.skills import loader
+    if not loader.memory_enabled():
+        print("⚠️  Persistent memory is OFF — this won't affect runs until you "
+              "enable it (`scilink memory enable`).")
 
 
 def _cmd_staged(args) -> int:
@@ -202,6 +211,7 @@ def _cmd_staged(args) -> int:
 
 
 def _cmd_upgrade(args) -> int:
+    _warn_memory_off()
     import difflib
     from scilink.agents.exp_agents.instruct import (
         KNOWLEDGE_TO_SKILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS,
@@ -259,6 +269,7 @@ def _cmd_upgrade(args) -> int:
 
 
 def _cmd_consolidate(args) -> int:
+    _warn_memory_off()
     from scilink.agents.exp_agents.instruct import (
         T2_CONSOLIDATION_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS,
     )

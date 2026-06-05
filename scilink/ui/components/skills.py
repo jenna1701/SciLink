@@ -166,6 +166,8 @@ def _render_staged_section() -> None:
     """Staged raw T=2 solutions — distill into skills (upgrade an existing skill,
     or consolidate N of a technique into a new one)."""
     from scilink.skills._shared import _staging, _memory
+    from scilink.skills import loader
+    mem_on = loader.memory_enabled()
 
     st.markdown("---")
     st.markdown("**Staged solutions** (solved from scratch)")
@@ -218,7 +220,11 @@ def _render_staged_section() -> None:
                     sid = recs[0]["id"]
                     # Upgrade mutates an existing skill in place, so preview first:
                     # build the merged skill, show a diff, and apply only on confirm.
-                    if st.button("Preview upgrade", key=f"up::{domain}/{technique}"):
+                    if st.button("Preview upgrade", key=f"up::{domain}/{technique}",
+                                 disabled=not mem_on,
+                                 help=(None if mem_on else
+                                       "Persistent memory is off — turn it on to distill "
+                                       "staged solutions into skills.")):
                         from scilink.agents.exp_agents.instruct import (
                             KNOWLEDGE_TO_SKILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
                         td, tn = tgt.split("/", 1)
@@ -242,13 +248,18 @@ def _render_staged_section() -> None:
                 # is exempt — that's the upgrade@1 path on the left.
                 need = _staging.consolidate_min_n()
                 ready = len(recs) >= need
+                if not mem_on:
+                    con_help = ("Persistent memory is off — turn it on to distill "
+                                "staged solutions into skills.")
+                elif not ready:
+                    con_help = (f"Accumulating {len(recs)}/{need} — consolidation into a "
+                                f"new skill unlocks once {need} solutions of this technique "
+                                f"are staged (set SCILINK_CONSOLIDATE_N to change; "
+                                f"`scilink memory consolidate` can force it).")
+                else:
+                    con_help = None
                 if st.button("Consolidate → new skill", key=f"con::{domain}/{technique}",
-                             disabled=not ready,
-                             help=(None if ready else
-                                   f"Accumulating {len(recs)}/{need} — consolidation into a "
-                                   f"new skill unlocks once {need} solutions of this technique "
-                                   f"are staged (set SCILINK_CONSOLIDATE_N to change; "
-                                   f"`scilink memory consolidate` can force it).")):
+                             disabled=(not ready) or (not mem_on), help=con_help):
                     from scilink.agents.exp_agents.instruct import (
                         T2_CONSOLIDATION_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
                     res = _staging.consolidate_technique(
@@ -326,9 +337,15 @@ def _render_memory_row(_memory, r, *, provisional: bool) -> None:
         except Exception as e:
             st.warning(f"Could not render skill: {e}")
 
+        from scilink.skills import loader
+        mem_on = loader.memory_enabled()
         c1, c2, _ = st.columns([2, 2, 4])
         if provisional:
-            if c1.button("Promote", key=f"promote::{ref}", type="primary"):
+            if c1.button("Promote", key=f"promote::{ref}", type="primary",
+                         disabled=not mem_on,
+                         help=(None if mem_on else
+                               "Persistent memory is off — promoted skills won't load "
+                               "until you turn it on.")):
                 _memory.promote_memory(r["domain"], r["name"])
                 st.success(f"Promoted {ref} — now auto-routable.")
                 st.rerun()
