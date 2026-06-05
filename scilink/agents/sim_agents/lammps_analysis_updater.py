@@ -1,4 +1,11 @@
 # scilink/agents/sim_agents/lammps_analysis_updater.py
+"""BENCHMARK BASELINE — legacy helper for the LAMMPS analysis agent.
+
+Retained only as a baseline for the old-vs-new MD comparison in the
+benchmark suite; NOT on the live path. Used solely by the baseline
+``LAMMPSAnalysisAgent`` to refine a failed analysis script. The live path
+uses the engine-neutral ``RunCritic``.
+"""
 
 import os
 import re

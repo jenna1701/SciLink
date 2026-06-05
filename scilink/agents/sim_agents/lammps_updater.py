@@ -1,4 +1,12 @@
 # scilink/agents/sim_agents/lammps_updater.py
+"""BENCHMARK BASELINE — legacy LAMMPS runtime-error updater.
+
+Retained only as a baseline for the old-vs-new MD comparison in the
+benchmark suite; NOT on the live path. The live runtime-fix capability is
+the engine-neutral ``RunCritic`` (``scilink.agents.sim_agents.critics``).
+Only the legacy ``LAMMPSOrchestrator`` (itself a baseline) and the benchmark
+harness reference this module.
+"""
 
 import os
 import re

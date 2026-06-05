@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ...auth import (
     get_internal_proxy_key,
@@ -323,6 +323,84 @@ def _format_syntax_issues(issues: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+# Heuristics for the generic snapshot fallback.
+_SNAPSHOT_TAIL_LINES = 80
+_SNAPSHOT_MAX_FILE_BYTES = 256_000
+_SNAPSHOT_MAX_FILES = 40
+_SNAPSHOT_SNIFF_BYTES = 8192
+
+
+def _looks_like_text(path: Path) -> bool:
+    """Whether a file should be tailed into the generic snapshot.
+
+    Engine-neutral: classifies by content, not by suffix, so any textual log
+    is surfaced (``log.lammps``, ``OUTCAR``, ``stdout``) while binaries
+    (restart files, trajectories, ``.h5``) are skipped. A file is text if it
+    is under the size cap and its leading bytes contain no NUL byte.
+    """
+    try:
+        if path.stat().st_size > _SNAPSHOT_MAX_FILE_BYTES:
+            return False
+        with open(path, "rb") as fh:
+            return b"\x00" not in fh.read(_SNAPSHOT_SNIFF_BYTES)
+    except OSError:
+        return False
+
+
+def _generic_snapshot(output_dir: str) -> Dict[str, Any]:
+    """Build an engine-neutral snapshot of a run directory.
+
+    Lists the directory's files and tails the text/log-like ones so a critic
+    can read real output even when the active skill registers no engine
+    ``snapshot_run`` parser (the prose-only case). The skill's
+    ``interpretation`` prose tells the LLM what to look for in this content;
+    this function only surfaces it. No engine names or filenames are assumed.
+
+    Args:
+        output_dir: Path to the run directory.
+
+    Returns:
+        A dict with a ``files`` listing (name + size) and a ``file_tails``
+        mapping of filename to its last lines, or an ``error`` if the
+        directory is unreadable.
+    """
+    out = Path(output_dir)
+    if not out.exists():
+        return {"error": f"output_dir does not exist: {output_dir}"}
+
+    files: List[Dict[str, Any]] = []
+    tails: Dict[str, str] = {}
+    try:
+        entries = sorted(p for p in out.iterdir() if p.is_file())
+    except OSError as e:
+        return {"error": f"could not list {output_dir}: {e}"}
+
+    for path in entries[:_SNAPSHOT_MAX_FILES]:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        files.append({"name": path.name, "size_bytes": size})
+        try:
+            if _looks_like_text(path):
+                text = path.read_text(errors="replace")
+                lines = text.splitlines()
+                tails[path.name] = "\n".join(lines[-_SNAPSHOT_TAIL_LINES:])
+        except OSError:
+            continue
+
+    return {
+        "snapshot_kind": "generic",
+        "note": (
+            "No engine-specific output parser was registered for the active "
+            "skill; this is a generic directory snapshot. Read the file "
+            "tails below using the interpretation guidance for this engine."
+        ),
+        "files": files,
+        "file_tails": tails,
+    }
+
+
 def _snapshot_run_outputs(output_dir: str, skill: Optional[str]) -> Dict[str, Any]:
     """Parse a finished run's output files into a structured snapshot.
 
@@ -332,38 +410,29 @@ def _snapshot_run_outputs(output_dir: str, skill: Optional[str]) -> Dict[str, An
     ``scilink/skills/periodic_dft/vasp/vasp_output.py``) and owns its own
     output shape; this function delegates without inspecting the result.
 
+    When no skill is active or the active skill registers no
+    ``snapshot_run`` callable, falls back to :func:`_generic_snapshot` — a
+    file listing plus text/log tails — so the critic always receives real
+    output to assess rather than only a note.
+
     Args:
         output_dir: Path to the directory containing run output files.
         skill: Name of the active skill bundle whose parser should be
             invoked.
 
     Returns:
-        The parser's structured snapshot. Returns a dict with a
-        ``"note"`` field when no skill is active or the active skill
-        does not register a ``snapshot_run`` callable, so callers can
-        hand the snapshot to the LLM uniformly without branching on
-        availability.
+        The skill parser's structured snapshot, or a generic directory
+        snapshot when no parser is available.
     """
     if not skill:
-        return {
-            "note": (
-                "No active skill — output parsing is dispatched through "
-                "the skill bundle's snapshot_run tool. Activate a skill "
-                "before calling assess()."
-            ),
-        }
+        return _generic_snapshot(output_dir)
     from ...skills._shared._registry import get_tool_function
     try:
         parser = get_tool_function(
             _SNAPSHOT_TOOL_NAME, active_skills=[skill]
         )
-    except LookupError as e:
-        return {
-            "note": (
-                f"Skill '{skill}' does not expose a '{_SNAPSHOT_TOOL_NAME}' "
-                f"tool; the run snapshot is unavailable. ({e})"
-            ),
-        }
+    except LookupError:
+        return _generic_snapshot(output_dir)
     return parser(output_dir)
 
 

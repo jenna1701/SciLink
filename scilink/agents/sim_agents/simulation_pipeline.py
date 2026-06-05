@@ -58,6 +58,7 @@ def _generate_inputs(
     api_key: Optional[str],
     base_url: Optional[str],
     model_name: str,
+    force_field_files: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Generate inputs for ``scale``, returning a normalized result.
 
@@ -115,15 +116,18 @@ def _generate_inputs(
         )
         result = agent.generate_simulation(
             structure_file=structure_file, research_goal=request, runner=software,
+            force_field_files=force_field_files,
         )
         # Normalize the MD agent's single script_path into the common
-        # input_files map so the pipeline stays engine-neutral downstream.
-        if "input_files" not in result:
-            script_path = result.get("script_path")
-            if script_path and Path(script_path).exists():
-                result["input_files"] = {
-                    Path(script_path).name: Path(script_path).read_text()
-                }
+        # input_files map so the pipeline stays engine-neutral downstream,
+        # and record the entry script so the refinement loop knows what to run.
+        script_path = result.get("script_path")
+        if "input_files" not in result and script_path and Path(script_path).exists():
+            result["input_files"] = {
+                Path(script_path).name: Path(script_path).read_text()
+            }
+        if script_path:
+            result["entry_file"] = Path(script_path).name
         result.setdefault("status", "success")
         return result
 
@@ -150,6 +154,12 @@ def run_complete_workflow(
     max_refinement_cycles: int = 4,
     script_timeout: int = 300,
     validate: bool = True,
+    executor: "Executor | None" = None,
+    run_command: Optional[str] = None,
+    autonomy: str = "autonomous",
+    max_run_cycles: int = 3,
+    structure_file: Optional[str] = None,
+    force_field_files: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Run the full structure → inputs → validation pipeline for any scale.
 
@@ -173,6 +183,24 @@ def run_complete_workflow(
         script_timeout: Timeout for executing generated structure scripts.
         validate: When True, run the pre-run InputValidator on the generated
             inputs (skipped for non-LLM methods, which are expert-defined).
+        executor: Optional execution backend. When provided, the workflow runs
+            the generated inputs and refines them to convergence via the
+            engine-neutral refinement loop. When ``None`` (the default, used
+            for DFT), the workflow stops after generation + validation and the
+            user runs the calculation externally.
+        run_command: Command template the executor runs, with ``{script}``
+            filled from each phase's entry file (e.g. ``"lmp -in {script}"``).
+            User/config — required when ``executor`` is provided. The engine
+            binary lives here, never in this module.
+        autonomy: Autonomy level for the refinement loop (``"co-pilot"`` /
+            ``"autopilot"`` / ``"autonomous"``); selects the built-in policy.
+        max_run_cycles: Maximum run → assess → fix cycles per phase.
+        structure_file: Optional path to an already-built structure. When
+            provided, structure generation is skipped and this file is used
+            directly — for callers that already have a structure and only want
+            input generation + (optional) execution.
+        force_field_files: Optional mapping of force-field filename to contents,
+            forwarded to MD input generation.
 
     Returns:
         A workflow-result dict with ``final_status``, ``scale``, ``engine``,
@@ -191,26 +219,35 @@ def run_complete_workflow(
     }
 
     # ── Step 1: structure generation + validation (scale-agnostic) ──
-    from .structure_pipeline import StructurePipeline
-    structure = StructurePipeline(
-        api_key=api_key, base_url=base_url, mp_api_key=mp_api_key,
-        generator_model=model_name, validator_model=model_name,
-        output_dir=output_dir, max_refinement_cycles=max_refinement_cycles,
-        script_timeout=script_timeout,
-    )
-    # Reuse the structure orchestrator's resolved credentials downstream.
-    api_key = structure.api_key
-    base_url = structure.base_url
+    # Skipped when the caller supplies an already-built structure.
+    if structure_file is not None:
+        structure_path = structure_file
+        result["structure_generation"] = {
+            "status": "skipped",
+            "message": "caller-supplied structure",
+            "final_structure_path": structure_file,
+        }
+    else:
+        from .structure_pipeline import StructurePipeline
+        structure = StructurePipeline(
+            api_key=api_key, base_url=base_url, mp_api_key=mp_api_key,
+            generator_model=model_name, validator_model=model_name,
+            output_dir=output_dir, max_refinement_cycles=max_refinement_cycles,
+            script_timeout=script_timeout,
+        )
+        # Reuse the structure pipeline's resolved credentials downstream.
+        api_key = structure.api_key
+        base_url = structure.base_url
 
-    structure_result = structure.generate_and_validate(
-        user_request, structure_class=structure_class,
-    )
-    result["structure_generation"] = structure_result
-    if structure_result.get("status") != "success":
-        result["final_status"] = "failed_structure_generation"
-        return result
-    result["steps_completed"].append("structure_generation")
-    structure_path = structure_result["final_structure_path"]
+        structure_result = structure.generate_and_validate(
+            user_request, structure_class=structure_class,
+        )
+        result["structure_generation"] = structure_result
+        if structure_result.get("status") != "success":
+            result["final_status"] = "failed_structure_generation"
+            return result
+        result["steps_completed"].append("structure_generation")
+        structure_path = structure_result["final_structure_path"]
 
     # ── Step 2: input generation (routed to the scale's foundation agent) ──
     try:
@@ -218,7 +255,7 @@ def run_complete_workflow(
             scale=scale, software=software, method=method,
             structure_file=structure_path, request=user_request,
             output_dir=output_dir, api_key=api_key, base_url=base_url,
-            model_name=model_name,
+            model_name=model_name, force_field_files=force_field_files,
         )
     except Exception as e:
         result["final_status"] = "failed_input_generation"
@@ -251,8 +288,95 @@ def run_complete_workflow(
                   if method != "llm" else "validation disabled by caller")
         result["input_validation"] = {"status": "skipped", "message": reason}
 
-    result["final_status"] = "success"
+    # ── Step 4: supervised execution + refinement (only when an executor is
+    # supplied; DFT's default executor=None stops here and runs externally) ──
+    if executor is None:
+        result["final_status"] = "success"
+        return result
+
+    if not run_command:
+        result["refinement"] = {
+            "status": "skipped",
+            "message": "executor provided without a run_command template",
+        }
+        result["final_status"] = "success"
+        return result
+
+    from .refinement import RefinementContext, policy_for, run_refinement
+    from .critics import RunCritic
+
+    phases = _collect_phases(gen_result, output_dir, run_command)
+    ctx = RefinementContext(
+        research_goal=user_request, scale=scale, engine=software,
+        skill=software, domain=scale, autonomy=autonomy,
+        max_cycles=max_run_cycles,
+    )
+    run_critic = RunCritic(
+        api_key=api_key, base_url=base_url, model_name=model_name,
+    )
+    refinement = run_refinement(
+        phases, executor, run_critic, policy_for(autonomy), ctx,
+        pre_run_verdict=result.get("input_validation"),
+    )
+    result["refinement"] = refinement
+    result["steps_completed"].append("refinement")
+    result["final_status"] = (
+        "success" if refinement.get("status") == "success"
+        else f"refinement_{refinement.get('status', 'failed')}"
+    )
     return result
+
+
+def _collect_phases(
+    gen_result: Dict[str, Any], run_dir: str, run_command_template: str
+) -> list:
+    """Build refinement ``Phase`` objects from a generation result.
+
+    Reads only the normalized phase fields a foundation agent emits
+    (``phases``, or an ``entry_file`` + ``input_files`` for single-phase
+    engines), so no engine-specific keys appear here. The run command is the
+    caller-provided template with ``{script}`` filled from each phase's entry
+    file, so the engine binary is never assembled in this module.
+
+    Args:
+        gen_result: The input-generation result.
+        run_dir: Directory the phases execute in (shared across phases so
+            staged runs can read each other's restart files).
+        run_command_template: Command template with an optional ``{script}``
+            placeholder for the per-phase entry file.
+
+    Returns:
+        A list of ``Phase`` objects in execution order.
+    """
+    from .refinement import Phase
+
+    phases_spec = gen_result.get("phases")
+    if not phases_spec:
+        entry = gen_result.get("entry_file")
+        input_files = gen_result.get("input_files") or {}
+        if entry is None and len(input_files) == 1:
+            entry = next(iter(input_files))
+        phases_spec = [{
+            "name": "production",
+            "input_files": input_files,
+            "entry_file": entry,
+        }]
+
+    phases = []
+    for spec in phases_spec:
+        entry = spec.get("entry_file") or ""
+        cmd = (
+            run_command_template.format(script=entry)
+            if "{script}" in run_command_template
+            else run_command_template
+        )
+        phases.append(Phase(
+            name=spec.get("name", "run"),
+            input_files=spec.get("input_files") or {},
+            run_command=cmd,
+            run_dir=str(run_dir),
+        ))
+    return phases
 
 
 def _collect_input_files(gen_result: Dict[str, Any]) -> Dict[str, str]:
