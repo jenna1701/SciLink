@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import os
 import streamlit as st
 
 from scilink.skills.loader import list_all_skills
@@ -71,6 +72,15 @@ def _load_skill_file(agent, uploaded_file) -> None:
         st.error(f"Failed to register {uploaded_file.name}: {e}")
 
 
+def _render_skill_markdown(domain: str, name: str) -> None:
+    """Render a discoverable skill's markdown (built-in / user / graduated)."""
+    from scilink.skills.loader import _resolve_skill_path
+    try:
+        st.markdown(_resolve_skill_path(name, domain).read_text())
+    except Exception as e:
+        st.warning(f"Could not load skill: {e}")
+
+
 def _render_available_skills(agent) -> None:
     """Show built-in and custom skills."""
     st.subheader("Available Skills")
@@ -84,7 +94,10 @@ def _render_available_skills(agent) -> None:
             label = domain.replace("_", " ").title()
             with st.expander(f"{label} ({len(names)})", expanded=False):
                 for name in names:
-                    st.markdown(f"- `{name}`")
+                    nc, vc = st.columns([3, 1])
+                    nc.markdown(f"`{name}`")
+                    with vc.popover("view", use_container_width=True):
+                        _render_skill_markdown(domain, name)
     else:
         st.caption("No built-in skills found.")
 
@@ -109,13 +122,34 @@ def _render_memory_section() -> None:
     """
     from scilink.skills._shared import _memory
 
+    from scilink.skills import loader
+
     st.subheader("Persistent Memory")
     st.caption(
         "Graduated and auto-distilled skills stored under `~/.scilink` — they "
         "survive sessions and upgrades. Provisional skills (auto-distilled from "
-        "hard fits the agent had to solve from scratch — currently curve fitting) "
+        "hard problems the agent had to solve from scratch) "
         "are held out of auto-routing until you promote them."
     )
+
+    # Master on/off switch (opt-in; off by default). When off, persistent memory
+    # is inert: nothing is staged and graduated skills are not loaded into runs.
+    cur = loader.memory_enabled()
+    new = st.toggle(
+        "Enable persistent memory", value=cur, key="mem_enabled_toggle",
+        help=("Off (default): inert — nothing is staged and graduated skills are "
+              "not loaded into runs. On: auto-staging + reuse of promoted skills."),
+    )
+    if new != cur:
+        loader.set_memory_enabled(new)
+        st.rerun()
+    if os.environ.get("SCILINK_MEMORY", "").strip():
+        st.caption("⚠️ `SCILINK_MEMORY` env var is set and overrides this toggle.")
+    if not new:
+        st.info("Persistent memory is **OFF** (inert). Turn it on to capture "
+                "hard-won solutions, your feedback, and error fixes — and to load "
+                "promoted skills into runs. Existing items below are kept and can "
+                "still be reviewed.")
 
     try:
         rows = _memory.list_memory()
@@ -144,13 +178,16 @@ def _render_staged_section() -> None:
     """Staged raw T=2 solutions — distill into skills (upgrade an existing skill,
     or consolidate N of a technique into a new one)."""
     from scilink.skills._shared import _staging, _memory
+    from scilink.skills import loader
+    mem_on = loader.memory_enabled()
 
     st.markdown("---")
-    st.markdown("**Staged T=2 solutions**")
+    st.markdown("**Staged knowledge** — solved-from-scratch solutions, your feedback & error fixes")
     st.caption(
-        "Hard problems the agent solved from scratch (T=2). Upgrade an existing "
-        "skill from one, or consolidate several of the same technique into a new "
-        "skill. Both use the active session's model."
+        "Hard problems the agent solved only after rebuilding its approach from "
+        "scratch — plus your feedback and recurring error fixes. Upgrade an "
+        "existing skill from one, or consolidate several of the same technique "
+        "into a new skill. Both use the active session's model."
     )
 
     groups = {}
@@ -171,10 +208,11 @@ def _render_staged_section() -> None:
         with st.expander(f"`{domain}/{technique}` — {len(recs)} staged", expanded=False):
             for r in recs:
                 metric = r.get("r_squared") or r.get("quality_score")
+                prov = _staging.PROVENANCE_LABELS.get(r.get("provenance", "t2_solution"), r.get("provenance", ""))
                 meta_col, view_col = st.columns([3, 1])
                 meta_col.caption(
-                    f"id={r['id']} · session={r.get('session','?')}"
-                    + (f" · metric={metric}" if metric is not None else "")
+                    f"id={r['id']} · {prov} · session={r.get('session','?')}"
+                    + (f" · {_staging.metric_label(r)}" if _staging.metric_label(r) else "")
                 )
                 with view_col.popover("View", use_container_width=True):
                     _render_staged_record(r)
@@ -194,7 +232,11 @@ def _render_staged_section() -> None:
                     sid = recs[0]["id"]
                     # Upgrade mutates an existing skill in place, so preview first:
                     # build the merged skill, show a diff, and apply only on confirm.
-                    if st.button("Preview upgrade", key=f"up::{domain}/{technique}"):
+                    if st.button("Preview upgrade", key=f"up::{domain}/{technique}",
+                                 disabled=not mem_on,
+                                 help=(None if mem_on else
+                                       "Persistent memory is off — turn it on to distill "
+                                       "staged solutions into skills.")):
                         from scilink.agents.exp_agents.instruct import (
                             KNOWLEDGE_TO_SKILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
                         td, tn = tgt.split("/", 1)
@@ -218,13 +260,18 @@ def _render_staged_section() -> None:
                 # is exempt — that's the upgrade@1 path on the left.
                 need = _staging.consolidate_min_n()
                 ready = len(recs) >= need
+                if not mem_on:
+                    con_help = ("Persistent memory is off — turn it on to distill "
+                                "staged solutions into skills.")
+                elif not ready:
+                    con_help = (f"Accumulating {len(recs)}/{need} — consolidation into a "
+                                f"new skill unlocks once {need} solutions of this technique "
+                                f"are staged (set SCILINK_CONSOLIDATE_N to change; "
+                                f"`scilink memory consolidate` can force it).")
+                else:
+                    con_help = None
                 if st.button("Consolidate → new skill", key=f"con::{domain}/{technique}",
-                             disabled=not ready,
-                             help=(None if ready else
-                                   f"Accumulating {len(recs)}/{need} — consolidation into a "
-                                   f"new skill unlocks once {need} solutions of this technique "
-                                   f"are staged (set SCILINK_CONSOLIDATE_N to change; "
-                                   f"`scilink memory consolidate` can force it).")):
+                             disabled=(not ready) or (not mem_on), help=con_help):
                     from scilink.agents.exp_agents.instruct import (
                         T2_CONSOLIDATION_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
                     res = _staging.consolidate_technique(
@@ -288,9 +335,11 @@ def _render_staged_record(r: dict) -> None:
 
 
 def _render_memory_row(_memory, r, *, provisional: bool) -> None:
+    from scilink.skills._shared import _staging
     ref = f"{r['domain']}/{r['name']}"
     badge = "🟡 provisional" if provisional else "✅ promoted"
-    r2 = f" · R²={r['r_squared']}" if r.get("r_squared") is not None else ""
+    _m = _staging.metric_label(r)
+    r2 = f" · {_m}" if _m else ""
     with st.expander(f"{badge} · `{ref}`{r2}", expanded=False):
         if r.get("description"):
             st.markdown(f"_{r['description']}_")
@@ -302,9 +351,15 @@ def _render_memory_row(_memory, r, *, provisional: bool) -> None:
         except Exception as e:
             st.warning(f"Could not render skill: {e}")
 
+        from scilink.skills import loader
+        mem_on = loader.memory_enabled()
         c1, c2, _ = st.columns([2, 2, 4])
         if provisional:
-            if c1.button("Promote", key=f"promote::{ref}", type="primary"):
+            if c1.button("Promote", key=f"promote::{ref}", type="primary",
+                         disabled=not mem_on,
+                         help=(None if mem_on else
+                               "Persistent memory is off — promoted skills won't load "
+                               "until you turn it on.")):
                 _memory.promote_memory(r["domain"], r["name"])
                 st.success(f"Promoted {ref} — now auto-routable.")
                 st.rerun()

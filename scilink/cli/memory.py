@@ -26,6 +26,7 @@ Staged T=2 solutions (distill_staging) subcommands:
 """
 
 import argparse
+import os
 import sys
 
 from scilink.skills._shared._memory import (
@@ -75,7 +76,29 @@ def _add_model_args(p):
                    help="API key (else taken from the conventional vendor env var)")
 
 
+def _cmd_memory_toggle(args) -> int:
+    """`scilink memory enable|disable|status` — the persistent-memory master switch."""
+    from scilink.skills import loader
+    if args.action == "status":
+        on = loader.memory_enabled()
+        env = os.environ.get("SCILINK_MEMORY", "").strip()
+        src = f"env SCILINK_MEMORY={env!r}" if env else f"config ({loader._config_path()})"
+        print(f"Persistent memory: {'ON' if on else 'OFF'}   [{src}]")
+        return 0
+    enabled = (args.action == "enable")
+    p = loader.set_memory_enabled(enabled)
+    print(f"Persistent memory {'ENABLED' if enabled else 'DISABLED'}  (saved to {p})")
+    print("  → staging + graduated-skill loading are now ACTIVE."
+          if enabled else
+          "  → inert: nothing is staged and graduated skills are not loaded into runs.")
+    if os.environ.get("SCILINK_MEMORY", "").strip():
+        print("  ⚠️  SCILINK_MEMORY env var is set and overrides this saved setting.")
+    return 0
+
+
 def _cmd_list(args) -> int:
+    from scilink.skills import loader
+    print(f"[persistent memory: {'ON' if loader.memory_enabled() else 'OFF — inert; `scilink memory enable` to use'}]\n")
     provisional = None
     if args.provisional_only:
         provisional = True
@@ -87,7 +110,8 @@ def _cmd_list(args) -> int:
         return 0
     for r in rows:
         tag = "  [provisional]" if r["provisional"] else ""
-        r2 = f"  R²={r['r_squared']}" if r.get("r_squared") is not None else ""
+        _m = _staging.metric_label(r)
+        r2 = f"  {_m}" if _m else ""
         prov = f"  ({r['provenance']})" if r.get("provenance") else ""
         print(f"{r['domain']}/{r['name']}{tag}{r2}{prov}")
         if r.get("description"):
@@ -107,6 +131,7 @@ def _cmd_show(args) -> int:
 
 
 def _cmd_promote(args) -> int:
+    _warn_memory_off()
     domain, name = _split_ref(args.ref)
     try:
         res = promote_memory(domain, name, to_domain=args.to_domain)
@@ -137,6 +162,14 @@ def _cmd_prune(args) -> int:
 def _consolidate_n() -> int:
     return _staging.consolidate_min_n()
 
+def _warn_memory_off():
+    """Distilling/promoting while memory is off produces skills that won't load
+    into runs until it's enabled — warn so the action isn't silently inert."""
+    from scilink.skills import loader
+    if not loader.memory_enabled():
+        print("⚠️  Persistent memory is OFF — this won't affect runs until you "
+              "enable it (`scilink memory enable`).")
+
 
 def _cmd_staged(args) -> int:
     groups = _staging.group_by_technique(args.domain) if args.domain else {}
@@ -163,9 +196,11 @@ def _cmd_staged(args) -> int:
             for r in recs:
                 metric = r.get("r_squared") or r.get("quality_score")
                 mtxt = f"  metric={metric}" if metric is not None else ""
-                print(f"    · id={r['id']}  session={r.get('session','?')}{mtxt}")
+                prov = _staging.PROVENANCE_LABELS.get(r.get("provenance", "t2_solution"),
+                                                      r.get("provenance", ""))
+                print(f"    · id={r['id']}  [{prov}]  session={r.get('session','?')}{mtxt}")
     if not total:
-        print("No staged T=2 solutions.")
+        print("No staged solutions.")
     else:
         # New-skill consolidation accumulates first (>= N of a technique). Upgrading an
         # existing skill from a single solution is always available.
@@ -177,6 +212,7 @@ def _cmd_staged(args) -> int:
 
 
 def _cmd_upgrade(args) -> int:
+    _warn_memory_off()
     import difflib
     from scilink.agents.exp_agents.instruct import (
         KNOWLEDGE_TO_SKILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS,
@@ -234,6 +270,7 @@ def _cmd_upgrade(args) -> int:
 
 
 def _cmd_consolidate(args) -> int:
+    _warn_memory_off()
     from scilink.agents.exp_agents.instruct import (
         T2_CONSOLIDATION_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS,
     )
@@ -274,6 +311,13 @@ def main():
     )
     sub = parser.add_subparsers(dest="action")
 
+    p_en = sub.add_parser("enable", help="Turn persistent memory ON (opt-in)")
+    p_en.set_defaults(func=_cmd_memory_toggle)
+    p_dis = sub.add_parser("disable", help="Turn persistent memory OFF (the default)")
+    p_dis.set_defaults(func=_cmd_memory_toggle)
+    p_status = sub.add_parser("status", help="Show whether persistent memory is on or off")
+    p_status.set_defaults(func=_cmd_memory_toggle)
+
     p_list = sub.add_parser("list", help="List persisted skills")
     p_list.add_argument("--domain", help="Restrict to one domain (e.g. curve_fitting)")
     p_list.add_argument("--provisional-only", action="store_true",
@@ -297,7 +341,7 @@ def main():
     p_prune.set_defaults(func=_cmd_prune)
 
     # --- staged T=2 solutions ---
-    p_staged = sub.add_parser("staged", help="List staged raw T=2 solutions by technique")
+    p_staged = sub.add_parser("staged", help="List staged knowledge (solved-from-scratch solutions, feedback, error fixes) by technique")
     p_staged.add_argument("--domain", help="Restrict to one domain")
     p_staged.set_defaults(func=_cmd_staged)
 
