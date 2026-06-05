@@ -229,5 +229,38 @@ class TestPolicies:
         assert isinstance(policy_for(""), AutonomousPolicy)
 
 
+class TestCollectPhases:
+    """The pipeline's generation-result → Phase normalization (engine-neutral)."""
+
+    def test_single_phase_from_entry_file(self):
+        from scilink.agents.sim_agents.simulation_pipeline import _collect_phases
+        gr = {"input_files": {"run.lammps": "units metal\n"}, "entry_file": "run.lammps"}
+        phases = _collect_phases(gr, "/tmp/runX", "lmp -in {script}")
+        assert len(phases) == 1
+        assert phases[0].run_command == "lmp -in run.lammps"
+        assert phases[0].run_dir == "/tmp/runX"
+
+    def test_entry_synthesized_from_lone_input_file(self):
+        from scilink.agents.sim_agents.simulation_pipeline import _collect_phases
+        p = _collect_phases({"input_files": {"in.lmp": "x"}}, "/tmp/y",
+                            "lmp -in {script}")[0]
+        assert p.run_command == "lmp -in in.lmp"
+
+    def test_explicit_multiphase_passthrough(self):
+        from scilink.agents.sim_agents.simulation_pipeline import _collect_phases
+        gr = {"phases": [
+            {"name": "equil", "input_files": {"eq.lmp": "a"}, "entry_file": "eq.lmp"},
+            {"name": "prod", "input_files": {"pr.lmp": "b"}, "entry_file": "pr.lmp"},
+        ]}
+        ps = _collect_phases(gr, "/tmp/z", "lmp -in {script}")
+        assert [p.name for p in ps] == ["equil", "prod"]
+        assert ps[1].run_command == "lmp -in pr.lmp"
+
+    def test_template_without_placeholder_used_verbatim(self):
+        from scilink.agents.sim_agents.simulation_pipeline import _collect_phases
+        gr = {"input_files": {"run.lammps": "x"}, "entry_file": "run.lammps"}
+        assert _collect_phases(gr, "/tmp/y", "run_md.sh")[0].run_command == "run_md.sh"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
