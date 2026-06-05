@@ -1,4 +1,13 @@
-# scilink/agents/sim_agents/lammps_analysis_agent.py
+# scilink/agents/sim_agents/lammps_analysis.py
+"""BENCHMARK BASELINE — legacy LAMMPS quality/analysis agent.
+
+Retained only as a baseline for the old-vs-new MD comparison in the
+benchmark suite; NOT on the live path. The live post-run quality assessment
+is the engine-neutral ``RunCritic`` (``scilink.agents.sim_agents.critics``),
+reading the engine skill's ``interpretation`` section over a generic run
+snapshot. Only the legacy ``LAMMPSOrchestrator`` (itself a baseline) and the
+benchmark harness reference this module.
+"""
 
 import os
 import re

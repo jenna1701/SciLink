@@ -496,7 +496,8 @@ def _run_preparation(
     if validation.get("valid"):
         print("\n✅ Ready for LAMMPS simulation!")
         print(f"   Use the data file and param file in your LAMMPS input script,")
-        print(f"   or pass them to the LAMMPSOrchestrator.")
+        print(f"   or pass them as force_field_files to run_complete_workflow")
+        print(f"   (scale='molecular_dynamics').")
     else:
         print("\n⚠️  Validation warnings detected. Review the output above.")
 

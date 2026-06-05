@@ -58,6 +58,7 @@ def _generate_inputs(
     api_key: Optional[str],
     base_url: Optional[str],
     model_name: str,
+    force_field_files: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Generate inputs for ``scale``, returning a normalized result.
 
@@ -115,6 +116,7 @@ def _generate_inputs(
         )
         result = agent.generate_simulation(
             structure_file=structure_file, research_goal=request, runner=software,
+            force_field_files=force_field_files,
         )
         # Normalize the MD agent's single script_path into the common
         # input_files map so the pipeline stays engine-neutral downstream,
@@ -156,6 +158,8 @@ def run_complete_workflow(
     run_command: Optional[str] = None,
     autonomy: str = "autonomous",
     max_run_cycles: int = 3,
+    structure_file: Optional[str] = None,
+    force_field_files: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Run the full structure → inputs → validation pipeline for any scale.
 
@@ -191,6 +195,12 @@ def run_complete_workflow(
         autonomy: Autonomy level for the refinement loop (``"co-pilot"`` /
             ``"autopilot"`` / ``"autonomous"``); selects the built-in policy.
         max_run_cycles: Maximum run → assess → fix cycles per phase.
+        structure_file: Optional path to an already-built structure. When
+            provided, structure generation is skipped and this file is used
+            directly — for callers that already have a structure and only want
+            input generation + (optional) execution.
+        force_field_files: Optional mapping of force-field filename to contents,
+            forwarded to MD input generation.
 
     Returns:
         A workflow-result dict with ``final_status``, ``scale``, ``engine``,
@@ -209,26 +219,35 @@ def run_complete_workflow(
     }
 
     # ── Step 1: structure generation + validation (scale-agnostic) ──
-    from .structure_pipeline import StructurePipeline
-    structure = StructurePipeline(
-        api_key=api_key, base_url=base_url, mp_api_key=mp_api_key,
-        generator_model=model_name, validator_model=model_name,
-        output_dir=output_dir, max_refinement_cycles=max_refinement_cycles,
-        script_timeout=script_timeout,
-    )
-    # Reuse the structure orchestrator's resolved credentials downstream.
-    api_key = structure.api_key
-    base_url = structure.base_url
+    # Skipped when the caller supplies an already-built structure.
+    if structure_file is not None:
+        structure_path = structure_file
+        result["structure_generation"] = {
+            "status": "skipped",
+            "message": "caller-supplied structure",
+            "final_structure_path": structure_file,
+        }
+    else:
+        from .structure_pipeline import StructurePipeline
+        structure = StructurePipeline(
+            api_key=api_key, base_url=base_url, mp_api_key=mp_api_key,
+            generator_model=model_name, validator_model=model_name,
+            output_dir=output_dir, max_refinement_cycles=max_refinement_cycles,
+            script_timeout=script_timeout,
+        )
+        # Reuse the structure pipeline's resolved credentials downstream.
+        api_key = structure.api_key
+        base_url = structure.base_url
 
-    structure_result = structure.generate_and_validate(
-        user_request, structure_class=structure_class,
-    )
-    result["structure_generation"] = structure_result
-    if structure_result.get("status") != "success":
-        result["final_status"] = "failed_structure_generation"
-        return result
-    result["steps_completed"].append("structure_generation")
-    structure_path = structure_result["final_structure_path"]
+        structure_result = structure.generate_and_validate(
+            user_request, structure_class=structure_class,
+        )
+        result["structure_generation"] = structure_result
+        if structure_result.get("status") != "success":
+            result["final_status"] = "failed_structure_generation"
+            return result
+        result["steps_completed"].append("structure_generation")
+        structure_path = structure_result["final_structure_path"]
 
     # ── Step 2: input generation (routed to the scale's foundation agent) ──
     try:
@@ -236,7 +255,7 @@ def run_complete_workflow(
             scale=scale, software=software, method=method,
             structure_file=structure_path, request=user_request,
             output_dir=output_dir, api_key=api_key, base_url=base_url,
-            model_name=model_name,
+            model_name=model_name, force_field_files=force_field_files,
         )
     except Exception as e:
         result["final_status"] = "failed_input_generation"

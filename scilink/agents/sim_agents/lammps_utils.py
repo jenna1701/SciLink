@@ -1,3 +1,12 @@
+# scilink/agents/sim_agents/lammps_utils.py
+"""BENCHMARK BASELINE — legacy VMD/LAMMPS conversion helper.
+
+Retained only as a baseline for the old-vs-new MD comparison in the
+benchmark suite; NOT on the live path. Used solely by the baseline
+``LAMMPSOrchestrator`` correction flow. The live refinement loop applies the
+critic's whole-file fixes directly and needs no conversion helper.
+"""
+
 import os
 import subprocess
 import tempfile

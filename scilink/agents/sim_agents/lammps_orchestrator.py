@@ -1,4 +1,15 @@
-# scilink/agents/sim_agents/simulation_orchestrator.py
+# scilink/agents/sim_agents/lammps_orchestrator.py
+"""BENCHMARK BASELINE — legacy LAMMPS supervised-execution loop.
+
+Retained only as a baseline for the old-vs-new MD comparison in the
+benchmark suite; NOT on the live path. The live supervised-execution
+capability is the engine-neutral refinement loop
+(``scilink.agents.sim_agents.refinement.run_refinement``), driven from
+``run_complete_workflow(scale="molecular_dynamics", executor=...)``, with
+post-run judgment by the engine-neutral ``RunCritic``. Nothing in the live
+pipeline / orchestrator / UI calls this class — only the benchmark harness
+does.
+"""
 
 import os
 import re
