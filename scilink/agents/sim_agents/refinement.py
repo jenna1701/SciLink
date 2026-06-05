@@ -1,0 +1,571 @@
+"""Engine-neutral supervised-execution (refinement) loop.
+
+A single deterministic loop that runs a simulation to convergence: execute
+the inputs, assess the finished run with the post-run critic, apply the
+critic's proposed fixes, and re-run — repeating until the result is
+acceptable, a policy stops it, or a cycle budget is exhausted. The loop is
+scale- and engine-agnostic: it instantiates the same shape for periodic DFT,
+classical MD, and ML-potential MD by swapping the executor, the critic's
+active skill, and the policy.
+
+The skeleton is source and deterministic, which is what makes a refinement
+run reproducible for benchmarking. The judgments *inside* the loop are
+delegated:
+
+* **Execution** is an :class:`Executor` — "materialize these inputs, run
+  them, hand back an output directory." The run command and binary name
+  arrive as data, so no engine name appears here.
+* **Assessment** is the post-run critic (``RunCritic.assess``), grounded in
+  the active skill's ``interpretation`` section. Its verdict consolidates
+  both the engine-error question (``run_status``) and the physical-quality
+  question (``verdict``) into one call.
+* **Continuation and interaction** are a :class:`RefinementPolicy`. The
+  three autonomy levels are three policies, so "different autonomy → different
+  feedback" falls out of policy selection rather than branching in the loop.
+
+The loop reads a normalized list of :class:`Phase` objects, so a single-stage
+DFT run and a multi-stage MD run (optimization → equilibration → production)
+flow through the same code; the quality check fires per phase.
+"""
+
+from __future__ import annotations
+
+import logging
+import subprocess
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Protocol
+
+logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Verdict ordering
+# ──────────────────────────────────────────────────────────────────────────
+
+# Post-run verdicts, best to worst. The loop and the built-in policies reason
+# about the ordinal rank rather than any engine-specific number, so no
+# universal quality metric is required (DFT cares about forces/energy, MD
+# about energy drift; both map onto this ordinal scale via the critic).
+_VERDICT_RANK = {"good": 3, "warning": 2, "poor": 1, "needs_fixes": 0}
+
+
+def _verdict_rank(verdict: Optional[Dict[str, Any]]) -> int:
+    """Return the ordinal rank of a critic verdict (higher is better)."""
+    if not verdict:
+        return 0
+    return _VERDICT_RANK.get(verdict.get("verdict", "needs_fixes"), 0)
+
+
+def _is_acceptable(verdict: Optional[Dict[str, Any]]) -> bool:
+    """Whether a verdict is good enough to stop refining a phase."""
+    return _verdict_rank(verdict) >= _VERDICT_RANK["warning"]
+
+
+class CycleDecision(Enum):
+    """Continuation decision after a finished run."""
+
+    STOP = "stop"
+    REFINE = "refine"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase
+# ──────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class Phase:
+    """One executable stage of a simulation.
+
+    A single-stage calculation (e.g. a DFT relaxation) is one phase; a staged
+    MD run is several (optimization → equilibration → production). All fields
+    are engine-neutral: ``input_files`` and ``run_command`` are produced by
+    the foundation agent / skill bundle, never assembled here.
+
+    Attributes:
+        name: Short phase label, used for logging and the result record.
+        input_files: Mapping of filename to file contents to materialize in
+            the run directory before execution.
+        run_command: The command the executor runs in the run directory.
+        run_dir: Directory the phase executes in (created if absent).
+    """
+
+    name: str
+    input_files: Dict[str, str]
+    run_command: str
+    run_dir: str
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Critic protocol (duck-typed against RunCritic.assess)
+# ──────────────────────────────────────────────────────────────────────────
+
+class _RunCriticLike(Protocol):
+    """Structural type for the post-run critic the loop consumes.
+
+    ``RunCritic`` (``critics.py``) satisfies this; tests pass a scripted
+    fake. Returning a separate protocol keeps the loop importable without
+    pulling in the LLM-backed critic stack.
+    """
+
+    def assess(
+        self,
+        output_dir: str,
+        research_goal: str,
+        skill: Optional[str] = ...,
+        domain: Optional[str] = ...,
+        fixes_mode: str = ...,
+    ) -> Dict[str, Any]:
+        ...
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Executor contract
+# ──────────────────────────────────────────────────────────────────────────
+
+class Executor(ABC):
+    """Run a set of inputs and hand back an output directory.
+
+    The one new abstraction the refinement loop needs. Implementations cover
+    where a run happens — local subprocess, container, or HPC scheduler —
+    without the loop knowing which. An executor never decides whether a run
+    *succeeded* by parsing engine logs; that judgment belongs to the post-run
+    critic. The executor only reports how the process exited and where its
+    output landed.
+    """
+
+    @abstractmethod
+    def run(
+        self, input_files: Dict[str, str], run_command: str, run_dir: str
+    ) -> Dict[str, Any]:
+        """Materialize ``input_files`` in ``run_dir``, run ``run_command``.
+
+        Args:
+            input_files: Mapping of filename to contents to write before the
+                run.
+            run_command: Command to execute in ``run_dir``.
+            run_dir: Working directory for the run (created if absent).
+
+        Returns:
+            A dict with at least ``status`` (``"completed"`` if the process
+            ran to exit, regardless of exit code; ``"error"`` if it could not
+            be launched), ``output_dir``, and ``returncode``.
+        """
+
+
+class LocalExecutor(Executor):
+    """Run inputs as a local subprocess in the run directory.
+
+    Writes each input file, runs the command, and persists ``stdout``,
+    ``stderr``, and ``returncode`` to files in the run directory so the
+    post-run critic's snapshot can read them. It does not interpret the
+    output — a non-zero exit code is reported, not judged.
+
+    Attributes:
+        timeout: Per-run wall-clock limit in seconds.
+    """
+
+    # Files the executor writes alongside the run so the snapshot can surface
+    # them to the critic. Engine-neutral names.
+    STDOUT_FILE = "run_stdout.log"
+    STDERR_FILE = "run_stderr.log"
+    RETURNCODE_FILE = "run_returncode.txt"
+
+    def __init__(self, timeout: int = 3600):
+        self.timeout = timeout
+
+    def run(
+        self, input_files: Dict[str, str], run_command: str, run_dir: str
+    ) -> Dict[str, Any]:
+        run_path = Path(run_dir)
+        run_path.mkdir(parents=True, exist_ok=True)
+
+        for name, contents in (input_files or {}).items():
+            (run_path / name).write_text(contents)
+
+        logger.info("LocalExecutor: running %r in %s", run_command, run_dir)
+        try:
+            proc = subprocess.run(
+                run_command,
+                shell=True,
+                cwd=str(run_path),
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            (run_path / self.STDERR_FILE).write_text(
+                f"Timed out after {self.timeout}s\n{e}"
+            )
+            (run_path / self.RETURNCODE_FILE).write_text("timeout")
+            return {
+                "status": "error",
+                "output_dir": str(run_path),
+                "returncode": None,
+                "error": f"Run timed out after {self.timeout}s",
+            }
+        except (OSError, FileNotFoundError) as e:
+            (run_path / self.STDERR_FILE).write_text(str(e))
+            (run_path / self.RETURNCODE_FILE).write_text("launch_error")
+            return {
+                "status": "error",
+                "output_dir": str(run_path),
+                "returncode": None,
+                "error": f"Could not launch run command: {e}",
+            }
+
+        (run_path / self.STDOUT_FILE).write_text(proc.stdout or "")
+        (run_path / self.STDERR_FILE).write_text(proc.stderr or "")
+        (run_path / self.RETURNCODE_FILE).write_text(str(proc.returncode))
+        return {
+            "status": "completed",
+            "output_dir": str(run_path),
+            "returncode": proc.returncode,
+        }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Refinement context
+# ──────────────────────────────────────────────────────────────────────────
+
+# Signature of the human-feedback handle the policies may call. Given a
+# prompt and a context payload, it returns the human's response string. The
+# orchestrator injects its existing prompt mechanism; headless callers pass
+# None and the policies proceed without consulting a human.
+InteractFn = Callable[[str, Dict[str, Any]], str]
+
+
+@dataclass
+class RefinementContext:
+    """Shared state threaded through a refinement run.
+
+    Carries the routing identity (scale/engine/skill/domain), the research
+    goal the critic judges against, the autonomy level, the cycle budget, the
+    running history, and the optional human-feedback handle. The policy — not
+    the loop — decides whether to call :attr:`interact`, so autonomy lives in
+    one place and reuses the caller's existing interaction machinery.
+
+    Attributes:
+        research_goal: What the user is trying to compute; passed to the
+            critic on every assessment.
+        scale: Simulation scale (e.g. ``"molecular_dynamics"``).
+        engine: Engine within the scale (e.g. ``"lammps"``).
+        skill: Skill bundle name for the critic (defaults to ``engine``).
+        domain: Skill subdirectory (defaults to ``scale``).
+        autonomy: Autonomy level label (``"co-pilot"`` / ``"autopilot"`` /
+            ``"autonomous"``).
+        max_cycles: Maximum refine cycles per phase.
+        cycle: Refine cycles spent on the current phase (loop-managed).
+        history: Per-cycle records appended by :meth:`record`.
+        interact: Optional human-feedback handle; ``None`` for headless runs.
+    """
+
+    research_goal: str
+    scale: Optional[str] = None
+    engine: Optional[str] = None
+    skill: Optional[str] = None
+    domain: Optional[str] = None
+    autonomy: str = "autonomous"
+    max_cycles: int = 3
+    cycle: int = 0
+    history: List[Dict[str, Any]] = field(default_factory=list)
+    interact: Optional[InteractFn] = None
+
+    def record(
+        self,
+        phase: Phase,
+        result: Dict[str, Any],
+        verdict: Dict[str, Any],
+    ) -> None:
+        """Append a record of one finished cycle to :attr:`history`."""
+        self.history.append({
+            "phase": phase.name,
+            "cycle": self.cycle,
+            "run_status": verdict.get("run_status"),
+            "verdict": verdict.get("verdict"),
+            "returncode": result.get("returncode"),
+            "had_fixes": bool(verdict.get("suggested_fixes")),
+        })
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Policies — the autonomy levels
+# ──────────────────────────────────────────────────────────────────────────
+
+class RefinementPolicy(ABC):
+    """The two decisions a refinement loop delegates to autonomy.
+
+    A refinement run makes exactly two kinds of decision: whether to accept a
+    proposed set of inputs (the pre-run inputs and each proposed fix share
+    this gate), and whether a finished run should stop or refine. Each
+    autonomy level is one concrete policy.
+    """
+
+    @abstractmethod
+    def approve_change(
+        self,
+        proposed_inputs: Optional[Dict[str, str]],
+        verdict: Optional[Dict[str, Any]],
+        ctx: RefinementContext,
+    ) -> Optional[Dict[str, str]]:
+        """Gate a proposed input set.
+
+        Used at the pre-run gate (``verdict`` from the input validator) and
+        after each fix (``verdict`` from the run critic). Returns the inputs
+        to run (possibly edited), or ``None`` to abort/stop.
+        """
+
+    @abstractmethod
+    def after_run(
+        self,
+        result: Dict[str, Any],
+        verdict: Dict[str, Any],
+        ctx: RefinementContext,
+    ) -> CycleDecision:
+        """Given a finished run and its verdict, stop or refine."""
+
+
+class AutonomousPolicy(RefinementPolicy):
+    """Run end to end without consulting a human.
+
+    Applies the critic's proposed fixes as-is and refines until the verdict
+    is acceptable or the cycle budget is spent. Never calls ``interact``.
+    """
+
+    def approve_change(self, proposed_inputs, verdict, ctx):
+        return proposed_inputs
+
+    def after_run(self, result, verdict, ctx):
+        if _is_acceptable(verdict):
+            return CycleDecision.STOP
+        if not verdict.get("suggested_fixes"):
+            # Nothing actionable to apply — stop rather than spin.
+            return CycleDecision.STOP
+        return CycleDecision.REFINE
+
+
+class AutopilotPolicy(RefinementPolicy):
+    """Lead with reasonable defaults, surfacing only risky changes.
+
+    Applies fixes automatically, but if a human-feedback handle is present it
+    surfaces low-confidence pre-run changes for a one-line confirmation.
+    Refines while the result is below acceptable and improving; stops when it
+    converges or stalls.
+    """
+
+    def approve_change(self, proposed_inputs, verdict, ctx):
+        if proposed_inputs is None:
+            return None
+        # Surface only genuinely risky pre-run changes, and only when a human
+        # is attached. A "fails" pre-run verdict is the risky case.
+        if (
+            ctx.interact is not None
+            and verdict is not None
+            and verdict.get("validation_status") == "fails"
+        ):
+            answer = ctx.interact(
+                "Pre-run validation flagged the inputs as failing. Apply the "
+                "proposed changes and run anyway?",
+                {"verdict": verdict, "proposed_inputs": proposed_inputs},
+            )
+            if _is_negative(answer):
+                return None
+        return proposed_inputs
+
+    def after_run(self, result, verdict, ctx):
+        if _is_acceptable(verdict):
+            return CycleDecision.STOP
+        if not verdict.get("suggested_fixes"):
+            return CycleDecision.STOP
+        # Stop if the last cycle did not improve the verdict (stalled).
+        if _stalled(ctx):
+            return CycleDecision.STOP
+        return CycleDecision.REFINE
+
+
+class CoPilotPolicy(RefinementPolicy):
+    """Human leads; the loop asks before each input change and continuation.
+
+    Requires a human-feedback handle to be useful. Without one (``interact``
+    is ``None``) it degrades to applying fixes and stopping as soon as the
+    result is acceptable, so a co-pilot policy never blocks a headless run.
+    """
+
+    def approve_change(self, proposed_inputs, verdict, ctx):
+        if proposed_inputs is None or ctx.interact is None:
+            return proposed_inputs
+        answer = ctx.interact(
+            "Apply these proposed input changes and run?",
+            {"verdict": verdict, "proposed_inputs": proposed_inputs},
+        )
+        return None if _is_negative(answer) else proposed_inputs
+
+    def after_run(self, result, verdict, ctx):
+        if ctx.interact is None:
+            return (
+                CycleDecision.STOP
+                if _is_acceptable(verdict) or not verdict.get("suggested_fixes")
+                else CycleDecision.REFINE
+            )
+        if not verdict.get("suggested_fixes"):
+            return CycleDecision.STOP
+        answer = ctx.interact(
+            f"Run finished with verdict={verdict.get('verdict')!r}. "
+            "Refine and re-run? (yes to refine, no to stop)",
+            {"verdict": verdict, "result": result},
+        )
+        return CycleDecision.REFINE if _is_affirmative(answer) else CycleDecision.STOP
+
+
+# Autonomy-label → policy. The loop reads the session's existing autonomy
+# level and uses the matching built-in policy rather than reinventing
+# autonomy. Labels match SimulationMode values.
+_POLICIES = {
+    "co-pilot": CoPilotPolicy,
+    "autopilot": AutopilotPolicy,
+    "autonomous": AutonomousPolicy,
+}
+
+
+def policy_for(autonomy: str) -> RefinementPolicy:
+    """Return the built-in policy for an autonomy label (default autonomous)."""
+    return _POLICIES.get((autonomy or "").strip().lower(), AutonomousPolicy)()
+
+
+def _is_negative(answer: Optional[str]) -> bool:
+    return (answer or "").strip().lower() in {"n", "no", "abort", "stop", "cancel"}
+
+
+def _is_affirmative(answer: Optional[str]) -> bool:
+    return (answer or "").strip().lower() in {"y", "yes", "ok", "go", "refine"}
+
+
+def _stalled(ctx: RefinementContext) -> bool:
+    """Whether the last two cycles of the current phase did not improve."""
+    if len(ctx.history) < 2:
+        return False
+    last, prev = ctx.history[-1], ctx.history[-2]
+    if last.get("phase") != prev.get("phase"):
+        return False
+    rank = _VERDICT_RANK.get
+    return rank(last.get("verdict"), 0) <= rank(prev.get("verdict"), 0)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# The loop
+# ──────────────────────────────────────────────────────────────────────────
+
+def run_refinement(
+    phases: List[Phase],
+    executor: Executor,
+    run_critic: _RunCriticLike,
+    policy: RefinementPolicy,
+    ctx: RefinementContext,
+    pre_run_verdict: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Drive a simulation to convergence: run → assess → fix → re-run.
+
+    Iterates the phases in order; within each phase, runs the executor,
+    assesses the output with the critic, and — when the policy says to refine
+    — applies the critic's whole-file fixes and re-runs, up to the context's
+    cycle budget. The pre-run gate runs once on the first phase's inputs,
+    reusing ``pre_run_verdict`` (the input validator's report) so no second
+    validation call is made.
+
+    Args:
+        phases: Ordered phases to execute (one for DFT, several for staged MD).
+        executor: How to run a phase's inputs.
+        run_critic: Post-run critic exposing ``assess(...)``.
+        policy: Autonomy policy gating changes and continuation.
+        ctx: Shared refinement state (goal, routing, budget, history).
+        pre_run_verdict: Optional input-validator report for the pre-run gate.
+
+    Returns:
+        A dict with ``status`` (``"success"``, ``"aborted"``, or
+        ``"failed"``), ``phases`` (per-phase final verdict + cycles), and the
+        full ``history``.
+    """
+    if not phases:
+        return {"status": "failed", "error": "no phases to run", "phases": [],
+                "history": ctx.history}
+
+    # ── Pre-run gate (1): accept the generated inputs before the first run ──
+    gated = policy.approve_change(phases[0].input_files, pre_run_verdict, ctx)
+    if gated is None:
+        return {"status": "aborted", "reason": "pre-run inputs rejected",
+                "phases": [], "history": ctx.history}
+    phases[0].input_files = gated
+
+    phase_results: List[Dict[str, Any]] = []
+
+    for phase in phases:
+        ctx.cycle = 0
+        inputs = phase.input_files
+        last_verdict: Dict[str, Any] = {}
+        phase_status = "failed"
+
+        while ctx.cycle < ctx.max_cycles:
+            result = executor.run(inputs, phase.run_command, phase.run_dir)
+
+            if result.get("status") == "error":
+                # Could not launch — still assess (the critic reads the
+                # persisted stderr) so a fix can be proposed, but treat a
+                # launch failure as a needs_fixes verdict if the critic errors.
+                logger.warning(
+                    "Executor could not launch phase %s: %s",
+                    phase.name, result.get("error"),
+                )
+
+            verdict = run_critic.assess(
+                output_dir=result.get("output_dir", phase.run_dir),
+                research_goal=ctx.research_goal,
+                skill=ctx.skill,
+                domain=ctx.domain,
+            )
+            last_verdict = verdict
+            ctx.record(phase, result, verdict)
+
+            decision = policy.after_run(result, verdict, ctx)
+            if decision == CycleDecision.STOP:
+                phase_status = "success" if _is_acceptable(verdict) else "stopped"
+                break
+
+            fixes = verdict.get("suggested_fixes")
+            if not fixes:
+                phase_status = "success" if _is_acceptable(verdict) else "stopped"
+                break
+
+            approved = policy.approve_change(fixes, verdict, ctx)
+            if approved is None:
+                phase_status = "aborted"
+                break
+            inputs = approved
+            ctx.cycle += 1
+        else:
+            # Budget exhausted without an acceptable verdict.
+            phase_status = "exhausted"
+
+        phase_results.append({
+            "phase": phase.name,
+            "status": phase_status,
+            "cycles": ctx.cycle + 1,
+            "verdict": last_verdict.get("verdict"),
+            "run_status": last_verdict.get("run_status"),
+        })
+
+        # A phase that aborted or could not reach an acceptable verdict stops
+        # the chain — later phases depend on this one's output (restart files).
+        if phase_status in ("aborted", "exhausted", "failed"):
+            return {
+                "status": "aborted" if phase_status == "aborted" else "failed",
+                "phases": phase_results,
+                "history": ctx.history,
+            }
+
+    return {
+        "status": "success",
+        "phases": phase_results,
+        "history": ctx.history,
+    }
