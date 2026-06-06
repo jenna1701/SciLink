@@ -235,6 +235,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         auxiliary_data: Optional[Union[str, List[str]]] = None,
         auxiliary_label: Optional[Union[str, List[str]]] = None,
         skill: Optional[str] = None,
+        skill_hint: Optional[Union[str, List[str]]] = None,
         prior_knowledge: Optional[List[Dict[str, Any]]] = None,
         prior_analysis_paths: Optional[List[str]] = None,
         # Opt-in: force verbatim reuse of the prior locked analysis script
@@ -429,6 +430,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             **aux_state,
             # Domain skill
             **skill_state,
+            # Non-binding skill suggestion from the orchestrator (the agent's
+            # auto-selector treats it as a prior; agent has final authority).
+            "skill_hint": skill_hint,
             # Prior knowledge
             "prior_knowledge": prior_knowledge or [],
             "prior_analysis_paths": prior_analysis_paths or [],
@@ -483,6 +487,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             safety_settings=self.safety_settings,
             parse_fn=self._parse_llm_response,
             store_fn=self._store_analysis_images,
+            load_skills_fn=self._load_skills_to_state,
             image_to_bytes_fn=image_to_thumbnail_bytes,
             montage_fn=create_image_montage,
             executor=self.executor,
@@ -1084,6 +1089,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             safety_settings=self.safety_settings,
             parse_fn=self._parse_llm_response,
             store_fn=self._store_analysis_images,
+            load_skills_fn=self._load_skills_to_state,
             image_to_bytes_fn=image_to_thumbnail_bytes,
             montage_fn=create_image_montage,
             executor=self.executor,
