@@ -548,11 +548,11 @@ class MDSimulationAgent(SimulationAgent):
                        if self.tools_module else None)
         if placeholder and var:
             block += (
-                f"- Write ONE script for the whole sweep: put the literal token "
-                f"{placeholder} everywhere the {var} value appears (e.g. in the "
-                f"velocity and fix commands), and use literal values for "
-                f"everything else. Each run is produced by substituting one "
-                f"value for {placeholder}.\n"
+                f"- Write ONE script for the whole sweep: use the literal token "
+                f"{placeholder} in place of every {var} value the script sets or "
+                f"references, and use literal values for everything else. Each "
+                f"run is produced by substituting one value for {placeholder}, so "
+                f"the placeholder must appear wherever a {var} value would.\n"
             )
         return block
 
