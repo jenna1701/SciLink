@@ -443,5 +443,71 @@ class TestCollectStages:
         assert combine.phases[0].run_command == "python wham.py"
 
 
+class TestSweepGeneration:
+    """Parallel-sweep generation: expansion + fan-out assembly (offline)."""
+
+    def test_expand_parameter_sweep_substitutes_placeholder(self):
+        from scilink.skills.molecular_dynamics.lammps.lammps import (
+            expand_parameter_sweep, SWEEP_PLACEHOLDER,
+        )
+        base = (f"velocity all create {SWEEP_PLACEHOLDER} 12345\n"
+                f"fix 1 all nvt temp {SWEEP_PLACEHOLDER} {SWEEP_PLACEHOLDER} 0.1\n")
+        members = expand_parameter_sweep(base, "temperature", [300, 400, 500])
+        assert [m["name"] for m in members] == [
+            "temperature_300", "temperature_400", "temperature_500"]
+        # The placeholder is gone and the value is substituted everywhere.
+        assert SWEEP_PLACEHOLDER not in members[1]["script"]
+        assert members[1]["script"].count("400") == 3
+        assert "300" not in members[1]["script"]
+
+    def test_sweep_member_name_is_safe(self):
+        from scilink.skills.molecular_dynamics.lammps.lammps import sweep_member_name
+        assert sweep_member_name("temperature", 300) == "temperature_300"
+        assert sweep_member_name("rest center", 1.5) == "restcenter_1.5"
+
+    def test_assemble_fanout_stage_makes_self_contained_members(self):
+        from scilink.agents.sim_agents.md_simulation_agent import (
+            _assemble_fanout_stage,
+        )
+        members = [{"name": "temperature_300", "script": "S300"},
+                   {"name": "temperature_400", "script": "S400"}]
+        shared = {"system.data": "DATA", "ff.params": "FF"}
+        stages = _assemble_fanout_stage(members, "run.lammps", shared)
+        assert len(stages) == 1
+        st = stages[0]
+        assert st["name"] == "production" and st["parallel"] is True
+        m0 = st["members"][0]
+        # Every member carries the shared files plus its own script.
+        assert m0["input_files"]["system.data"] == "DATA"
+        assert m0["input_files"]["ff.params"] == "FF"
+        assert m0["input_files"]["run.lammps"] == "S300"
+        assert m0["entry_file"] == "run.lammps"
+        # Members are independent: editing one's map must not touch the other's.
+        assert st["members"][1]["input_files"]["run.lammps"] == "S400"
+
+    def test_sweep_expansion_feeds_collect_stages(self):
+        # End-to-end of the deterministic half: expand → assemble → normalize
+        # into Stage objects with isolated run dirs (no agent, no LLM).
+        from scilink.skills.molecular_dynamics.lammps.lammps import (
+            expand_parameter_sweep, SWEEP_PLACEHOLDER,
+        )
+        from scilink.agents.sim_agents.md_simulation_agent import (
+            _assemble_fanout_stage,
+        )
+        from scilink.agents.sim_agents.simulation_pipeline import _collect_stages
+
+        base = f"fix 1 all nvt temp {SWEEP_PLACEHOLDER} {SWEEP_PLACEHOLDER} 0.1\n"
+        members = expand_parameter_sweep(base, "temperature", [300, 400])
+        stages_spec = _assemble_fanout_stage(
+            members, "run.lammps", {"system.data": "DATA"})
+        stages = _collect_stages({"stages": stages_spec}, "/tmp/base",
+                                 "lmp -in {script}")
+        assert len(stages) == 1 and stages[0].parallel is True
+        assert {p.run_dir for p in stages[0].phases} == {
+            "/tmp/base/production/temperature_300",
+            "/tmp/base/production/temperature_400"}
+        assert all(p.run_command == "lmp -in run.lammps" for p in stages[0].phases)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

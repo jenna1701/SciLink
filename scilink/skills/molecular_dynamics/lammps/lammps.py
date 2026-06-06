@@ -732,6 +732,54 @@ def substitute_variables(
     return script
 
 
+SWEEP_PLACEHOLDER = "__SWEEP__"
+
+
+def sweep_member_name(var_name: str, value: Any) -> str:
+    """Build a filesystem- and LAMMPS-safe member name for one sweep value.
+
+    Example: ``("temperature", 300)`` → ``"temperature_300"``. Used to name a
+    fan-out member's run directory and result record, so a temperature sweep or
+    umbrella window set is self-describing.
+    """
+    var = re.sub(r"[^A-Za-z0-9]+", "", str(var_name)) or "sweep"
+    val = re.sub(r"[^A-Za-z0-9.+-]+", "_", str(value)).strip("_") or "0"
+    return f"{var}_{val}"
+
+
+def expand_parameter_sweep(
+    base_script: str,
+    var_name: str,
+    values: List[Any],
+    placeholder: str = SWEEP_PLACEHOLDER,
+) -> List[Dict[str, str]]:
+    """Expand one parameterized base script into a fan-out of member scripts.
+
+    The base script carries ``placeholder`` everywhere the swept quantity
+    appears (e.g. a temperature in ``velocity create`` and ``fix nvt``, or a
+    restraint center in ``fix spring``); each member is produced by replacing
+    the placeholder with one value. This is the engine-idiomatic way to author
+    a temperature sweep or the windows of an umbrella-sampling run: write the
+    physics once, vary one number. Deterministic — no LLM call per member.
+
+    Args:
+        base_script: The parameterized script containing ``placeholder``.
+        var_name: Name of the swept quantity (used to name members).
+        values: The values to sweep over, one member each.
+        placeholder: Token in ``base_script`` to replace with each value.
+
+    Returns:
+        A list of ``{"name", "script"}`` dicts, one per value, in order.
+    """
+    members: List[Dict[str, str]] = []
+    for value in values:
+        members.append({
+            "name": sweep_member_name(var_name, value),
+            "script": base_script.replace(placeholder, str(value)),
+        })
+    return members
+
+
 # ─── Force Field Integration ─────────────────────────────────────────
 
 _FF_STYLE_COMMANDS = {

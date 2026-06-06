@@ -21,6 +21,39 @@ except ImportError:
     pass
 
 
+def _assemble_fanout_stage(
+    members: List[Dict[str, str]],
+    entry_file: str,
+    shared_files: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    """Assemble a one-stage fan-out campaign from expanded member scripts.
+
+    Each member becomes a self-contained run: the shared files (structure data,
+    force fields) plus its own substituted script under ``entry_file``. The
+    result is the engine-neutral ``stages`` structure ``_collect_stages``
+    consumes — pure and engine-agnostic, so it is unit-testable without an
+    agent, an LLM, or an engine.
+
+    Args:
+        members: ``{"name", "script"}`` dicts from ``expand_parameter_sweep``.
+        entry_file: Filename each member's script is written under.
+        shared_files: Files every member needs (filename → contents).
+
+    Returns:
+        A single-element list holding the production fan-out stage.
+    """
+    member_specs = []
+    for member in members:
+        input_files = dict(shared_files)
+        input_files[entry_file] = member["script"]
+        member_specs.append({
+            "name": member["name"],
+            "input_files": input_files,
+            "entry_file": entry_file,
+        })
+    return [{"name": "production", "parallel": True, "members": member_specs}]
+
+
 class MDSimulationAgent(SimulationAgent):
     """
     MD-specific simulation agent.
@@ -257,6 +290,16 @@ class MDSimulationAgent(SimulationAgent):
 
         script = self._clean_and_fix(script, plan)
 
+        # Parallel-sweep campaign: the script was authored with the sweep
+        # placeholder, so expand it into one independent run per value and
+        # return a normalized fan-out campaign instead of a single script.
+        sweep = self._sweep_spec(plan)
+        if sweep:
+            return self._finalize_campaign(
+                script, sweep, structure_file, force_field_files,
+                research_goal, system_description, system_info, plan,
+            )
+
         script_path = self.working_dir / "run.lammps"
         script_path.write_text(script)
 
@@ -489,13 +532,105 @@ class MDSimulationAgent(SimulationAgent):
         vals_str = ", ".join(str(v) for v in vals[:5])
         if len(vals) > 5:
             vals_str += f"... ({len(vals)} total)"
-        return (
-            "\n## Multi-Simulation\n"
+        block = (
+            "\n## Multi-Simulation (parallel sweep)\n"
             f"- Technique: {tech}\n"
             f"- Runs: {n}\n"
             f"- Variable: {var}\n"
             f"- Values: {vals_str}\n"
         )
+        # Author the sweep as ONE parameterized script: the swept quantity is
+        # marked with the engine's placeholder and expanded into one run per
+        # value downstream. The placeholder token belongs to the engine skill,
+        # so the prompt and the expander agree on it without the agent hardcoding
+        # a token.
+        placeholder = (getattr(self.tools_module, "SWEEP_PLACEHOLDER", None)
+                       if self.tools_module else None)
+        if placeholder and var:
+            block += (
+                f"- Write ONE script for the whole sweep: put the literal token "
+                f"{placeholder} everywhere the {var} value appears (e.g. in the "
+                f"velocity and fix commands), and use literal values for "
+                f"everything else. Each run is produced by substituting one "
+                f"value for {placeholder}.\n"
+            )
+        return block
+
+    # ================================================================
+    # PARALLEL-SWEEP CAMPAIGN
+    # ================================================================
+
+    def _sweep_spec(self, plan):
+        """Return ``{var_name, values}`` if the plan calls for a parallel sweep.
+
+        A sweep needs at least two values and an engine that knows how to expand
+        one (``expand_parameter_sweep``). Otherwise ``None`` — the caller emits
+        a single simulation.
+        """
+        if not (plan.get("requires_multiple_simulations")
+                and plan.get("number_of_simulations", 1) > 1):
+            return None
+        values = plan.get("variable_values") or []
+        if len(values) < 2:
+            return None
+        if not (self.tools_module
+                and hasattr(self.tools_module, "expand_parameter_sweep")):
+            return None
+        return {"var_name": plan.get("variable_parameter") or "parameter",
+                "values": values}
+
+    def _finalize_campaign(self, base_script, sweep, structure_file,
+                           force_field_files, goal, desc, info, plan):
+        """Expand a parameterized base script into a normalized fan-out campaign.
+
+        Each member is a self-contained run: the same structure data file and
+        force-field files plus its own substituted script, so members execute
+        independently in isolated directories. The expansion itself is the
+        engine skill's (``expand_parameter_sweep``); this method only assembles
+        the engine-neutral ``stages`` structure the refinement loop consumes.
+        """
+        entry = "run.lammps"
+        shared = self._campaign_shared_files(structure_file, force_field_files)
+        members = self.tools_module.expand_parameter_sweep(
+            base_script, sweep["var_name"], sweep["values"])
+        stages = _assemble_fanout_stage(members, entry, shared)
+
+        # Validate a representative member (the placeholder is already resolved).
+        rep_files = stages[0]["members"][0]["input_files"]
+        rep_path = self.working_dir / entry
+        rep_path.write_text(rep_files[entry])
+        validation = self._validate(str(rep_path), info, plan)
+        readme = self._generate_readme(goal, desc, info, plan, str(rep_path))
+
+        return {
+            "script_path": str(rep_path),
+            "readme_path": readme,
+            "data_path": structure_file,
+            "system_info": info,
+            "simulation_parameters": plan,
+            "validation": validation,
+            "skill_used": self.skill_name,
+            "stages": stages,
+            "input_files": rep_files,
+            "entry_file": entry,
+            "is_campaign": True,
+            "campaign_kind": "parameter_sweep",
+        }
+
+    def _campaign_shared_files(self, structure_file, force_field_files):
+        """Read the files every member needs (structure data + force fields)."""
+        shared = {}
+        try:
+            shared[Path(structure_file).name] = Path(structure_file).read_text(
+                errors="replace")
+        except OSError:
+            self.logger.warning("Could not read structure file for campaign")
+        for name, path in (force_field_files or {}).items():
+            try:
+                shared[name] = Path(path).read_text(errors="replace")
+            except OSError:
+                self.logger.warning("Could not read force-field file %s", path)
+        return shared
 
     # ================================================================
     # FORCE FIELD INTEGRATION
