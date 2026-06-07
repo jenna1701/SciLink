@@ -183,9 +183,9 @@ class LAMMPSOrchestrator:
             self.logger.error(f"Failed to generate simulation: {e}")
             return self._failed_result(f"Simulation generation failed: {e}")
         
-        stages = sim_info.get("stages", [])
         stage_scripts = sim_info.get("staged_scripts", {})
-        
+        stages = list(stage_scripts.keys())
+
         if not stages or not stage_scripts:
             # Fallback to single script
             self.logger.warning("No staged scripts generated, using single script")
