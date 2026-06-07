@@ -57,23 +57,50 @@ def _mask_annotation(g):
     return excl
 
 
-def _measure_diameter(flat, cy, cx, rough_r_px, px):
-    """True diameter (nm) via local Otsu in a window (band-pass-independent)."""
-    R = int(max(rough_r_px * 2.2, 18))
-    y0, y1 = max(0, int(cy) - R), min(flat.shape[0], int(cy) + R)
-    x0, x1 = max(0, int(cx) - R), min(flat.shape[1], int(cx) + R)
-    win = gaussian(flat[y0:y1, x0:x1], 2)
-    cyl, cxl = int(cy) - y0, int(cx) - x0
-    try:
-        thr = threshold_otsu(win)
-    except ValueError:
+def _measure_diameter(flat, cy, cx, rough_r_px, px, nominal_r_px=None):
+    """Diameter (nm) via the azimuthally-averaged radial HALF-MAX (FWHM) profile.
+
+    Scale- and contrast-robust: the half-max radius is defined relative to this
+    object's own (peak - local background) contrast, so it transfers across a
+    4 um grain and a 14 nm nanoparticle alike. A windowed Otsu threshold, by
+    contrast, floats with whatever else is in the crop and systematically over-
+    or under-sizes when the object's contrast or scale differs from the global.
+    """
+    cy, cx = int(cy), int(cx)
+    # Anchor the search scale to the larger of the detected size and the nominal
+    # object size: the band-pass `rough_r` under-estimates large soft particles,
+    # so a window anchored only to it cuts off before the true edge.
+    srch_r = max(rough_r_px, nominal_r_px or 0)
+    R = int(max(srch_r * 2.2, 12))
+    y0, y1 = max(0, cy - R), min(flat.shape[0], cy + R)
+    x0, x1 = max(0, cx - R), min(flat.shape[1], cx + R)
+    win = gaussian(flat[y0:y1, x0:x1], max(1.0, rough_r_px * 0.06))
+    cyl, cxl = cy - y0, cx - x0
+    yy, xx = np.ogrid[:win.shape[0], :win.shape[1]]
+    rr = np.sqrt((yy - cyl) ** 2 + (xx - cxl) ** 2).astype(int)
+    nr = int(rr.max()) + 1
+    if nr < 4:
         return None
-    m = binary_closing(win > thr, disk(3))
-    lab = label(m)
-    if cyl >= m.shape[0] or cxl >= m.shape[1] or lab[cyl, cxl] == 0:
+    prof = ndi.mean(win, labels=rr, index=np.arange(nr))   # radial profile
+    core = max(1, int(rough_r_px * 0.3))
+    peak = prof[:core].mean()
+    outer = prof[min(nr - 1, int(rough_r_px * 1.3)):]
+    bg = np.median(outer) if outer.size else prof[-3:].mean()
+    if peak - bg < 1e-9:
         return None
-    area = (lab == lab[cyl, cxl]).sum()
-    return 2.0 * np.sqrt(area / np.pi) * px
+    # Edge = radius of STEEPEST radial descent (max-gradient inflection), not a
+    # fixed-fraction threshold: this finds the true boundary independent of edge
+    # sharpness — a half-max level under-sizes soft-edged particles and an Otsu
+    # threshold floats with the crop. Object is bright in `flat`, so the profile
+    # decreases outward and the edge is the most-negative gradient.
+    prof_s = ndi.gaussian_filter1d(prof, max(1.0, srch_r * 0.08))
+    lo = max(1, int(srch_r * 0.25))
+    hi = min(nr - 1, int(srch_r * 2.0))
+    if hi - lo < 3:
+        return None
+    grad = np.diff(prof_s[lo:hi + 1])
+    r_edge = lo + int(np.argmin(grad))
+    return 2.0 * float(r_edge) * px
 
 
 def _detect_polarity(n, excl, radius_px, p):
@@ -118,7 +145,8 @@ def _collect(lab, flat, bp, bg_mean, bg_std, radius_px, px, p, H, W):
         if bp_snr < p["snr_min"]:
             continue
         cy, cx = r.centroid
-        d_meas = _measure_diameter(flat, cy, cx, r.equivalent_diameter / 2, px)
+        d_meas = _measure_diameter(flat, cy, cx, r.equivalent_diameter / 2, px,
+                                   nominal_r_px=radius_px)
         d_nm = d_meas if d_meas else d_eq_nm
         border = cx < radius_px or cy < radius_px or cx > W - radius_px or cy > H - radius_px
         R = int(r.equivalent_diameter / 2)
@@ -195,14 +223,18 @@ TOOL_SPEC = ToolSpec(
                "pixel_size_nm, polarity='auto', params=None) -> dict"),
     agents=["image_analysis"],
     when_to_use=(
-        "Use to DETECT / COUNT / SIZE discrete particles or objects (nanoparticles, "
-        "droplets, grains, pores, proteins) when global thresholding/watershed/SAM "
-        "over-detects on a speckled/noisy background or under-detects low-contrast "
-        "objects. The object diameter is known from the objective/calibration; this "
-        "uses it to set a scale-matched band-pass that rejects both fine noise and "
-        "large-scale background. Pair it with a per-object step (e.g. "
-        "fourier_reflection_map or a local FFT on each returned bbox) when a "
-        "per-object property such as lattice orientation is also required."
+        "Use to DETECT / COUNT / SIZE DISCRETE, DISPERSED particles/objects on a "
+        "background (nanoparticles, droplets, pores, protein assemblies) when global "
+        "thresholding/watershed/SAM over-detects on a speckled/noisy background or "
+        "under-detects low-contrast objects. The object diameter is known from the "
+        "objective/calibration; this uses it to set a scale-matched band-pass that "
+        "rejects both fine noise and large-scale background. Pair it with a "
+        "per-object step (e.g. fourier_reflection_map or a local FFT on each "
+        "returned bbox) when a per-object property such as lattice orientation is "
+        "also required. NOT for SPACE-FILLING, boundary-delineated regions "
+        "(polycrystalline grains, tessellated cells) — those have no background "
+        "between objects and a blob detector under-detects them; use the "
+        "boundary-segmentation route (watershed on the grain-boundary map) instead."
     ),
     parameters={
         "object_diameter_nm": {"type": "number", "description":
