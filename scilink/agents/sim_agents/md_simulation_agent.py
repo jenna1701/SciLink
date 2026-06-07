@@ -54,6 +54,41 @@ def _assemble_fanout_stage(
     return [{"name": "production", "parallel": True, "members": member_specs}]
 
 
+def _assemble_sequential_stages(
+    steps: List[Dict[str, str]],
+    shared_files: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    """Assemble an ordered sequential campaign from staged step scripts.
+
+    Each step becomes one sequential stage. The stages share a run directory
+    (``_collect_stages`` does not isolate sequential steps), so a stage's
+    restart files are available to the next — the optimization → equilibration
+    → production chain. Every stage carries the shared files (structure data,
+    force fields) plus its own script under its ``entry_file``. The result is
+    the engine-neutral ``stages`` structure ``_collect_stages`` consumes — pure
+    and engine-agnostic, so it is unit-testable without an agent, an LLM, or an
+    engine.
+
+    Args:
+        steps: Ordered ``{"name", "entry_file", "script"}`` dicts, one per
+            phase, in execution order.
+        shared_files: Files every stage needs (filename → contents).
+
+    Returns:
+        A list of sequential stage specs in execution order.
+    """
+    specs = []
+    for step in steps:
+        input_files = dict(shared_files)
+        input_files[step["entry_file"]] = step["script"]
+        specs.append({
+            "name": step["name"],
+            "input_files": input_files,
+            "entry_file": step["entry_file"],
+        })
+    return specs
+
+
 class MDSimulationAgent(SimulationAgent):
     """
     MD-specific simulation agent.
@@ -707,19 +742,33 @@ class MDSimulationAgent(SimulationAgent):
             stages = {"production": full_script}
 
         stage_scripts = {}
+        steps = []
         for name, content in stages.items():
             if not isinstance(content, str):
                 continue
             content = self._clean_and_fix(content, plan)
-            path = self.working_dir / f"run_{name}.lammps"
+            entry = f"run_{name}.lammps"
+            path = self.working_dir / entry
             path.write_text(content)
             stage_scripts[name] = str(path)
+            steps.append({"name": name, "entry_file": entry, "script": content})
+
+        shared = self._campaign_shared_files(
+            structure_file, kw.get("force_field_files"))
+        stage_specs = _assemble_sequential_stages(steps, shared)
 
         result.update(
             staged_scripts=stage_scripts,
-            stages=list(stage_scripts.keys()),
+            stages=stage_specs,
             is_staged=True,
+            is_campaign=True,
+            campaign_kind="staged",
         )
+        # Representative phase for back-compat consumers that read a single
+        # input set (the pipeline's input_files normalization, etc.).
+        if stage_specs:
+            result["input_files"] = stage_specs[0]["input_files"]
+            result["entry_file"] = stage_specs[0]["entry_file"]
         return result
 
     # ================================================================

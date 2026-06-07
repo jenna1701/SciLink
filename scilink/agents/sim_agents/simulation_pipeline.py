@@ -59,6 +59,7 @@ def _generate_inputs(
     base_url: Optional[str],
     model_name: str,
     force_field_files: Optional[Dict[str, str]] = None,
+    staged: bool = False,
 ) -> Dict[str, Any]:
     """Generate inputs for ``scale``, returning a normalized result.
 
@@ -114,7 +115,13 @@ def _generate_inputs(
             working_dir=output_dir,
             api_key=api_key, base_url=base_url, model_name=model_name,
         )
-        result = agent.generate_simulation(
+        # Staged generation emits an optimization → equilibration → production
+        # chain as a normalized sequential campaign; one-shot generation emits a
+        # single phase (or a parallel sweep when the plan calls for one). Both
+        # return the same normalized result shape the pipeline consumes.
+        gen = (agent.generate_staged_simulation if staged
+               else agent.generate_simulation)
+        result = gen(
             structure_file=structure_file, research_goal=request, runner=software,
             force_field_files=force_field_files,
         )
@@ -160,6 +167,7 @@ def run_complete_workflow(
     max_run_cycles: int = 3,
     structure_file: Optional[str] = None,
     force_field_files: Optional[Dict[str, str]] = None,
+    staged: bool = False,
 ) -> Dict[str, Any]:
     """Run the full structure → inputs → validation pipeline for any scale.
 
@@ -201,6 +209,10 @@ def run_complete_workflow(
             input generation + (optional) execution.
         force_field_files: Optional mapping of force-field filename to contents,
             forwarded to MD input generation.
+        staged: When True, MD generation emits a multi-phase (optimization →
+            equilibration → production) sequential campaign instead of a single
+            run, so the refinement loop runs the per-phase loop over a restart-
+            chained sequence. MD only; ignored by other scales.
 
     Returns:
         A workflow-result dict with ``final_status``, ``scale``, ``engine``,
@@ -256,6 +268,7 @@ def run_complete_workflow(
             structure_file=structure_path, request=user_request,
             output_dir=output_dir, api_key=api_key, base_url=base_url,
             model_name=model_name, force_field_files=force_field_files,
+            staged=staged,
         )
     except Exception as e:
         result["final_status"] = "failed_input_generation"

@@ -509,5 +509,59 @@ class TestSweepGeneration:
         assert all(p.run_command == "lmp -in run.lammps" for p in stages[0].phases)
 
 
+class TestStagedGeneration:
+    """Sequential multi-phase generation: sequential stage assembly (offline)."""
+
+    def test_assemble_sequential_stages_makes_self_contained_stages(self):
+        from scilink.agents.sim_agents.md_simulation_agent import (
+            _assemble_sequential_stages,
+        )
+        steps = [
+            {"name": "equilibration", "entry_file": "run_equilibration.lammps",
+             "script": "EQUIL"},
+            {"name": "production", "entry_file": "run_production.lammps",
+             "script": "PROD"},
+        ]
+        shared = {"system.data": "DATA", "ff.params": "FF"}
+        specs = _assemble_sequential_stages(steps, shared)
+        assert [s["name"] for s in specs] == ["equilibration", "production"]
+        s0 = specs[0]
+        # Each stage carries the shared files plus its own script — and is a
+        # plain sequential step (no parallel / members).
+        assert s0["input_files"]["system.data"] == "DATA"
+        assert s0["input_files"]["ff.params"] == "FF"
+        assert s0["input_files"]["run_equilibration.lammps"] == "EQUIL"
+        assert s0["entry_file"] == "run_equilibration.lammps"
+        assert "parallel" not in s0 and "members" not in s0
+        # Stages are independent dicts; one stage's script doesn't leak into another.
+        assert specs[1]["input_files"]["run_production.lammps"] == "PROD"
+        assert "run_equilibration.lammps" not in specs[1]["input_files"]
+
+    def test_sequential_assembly_feeds_collect_stages(self):
+        # End-to-end of the deterministic half: assemble → normalize into
+        # sequential Stage objects sharing the base run dir (no agent, no LLM).
+        from scilink.agents.sim_agents.md_simulation_agent import (
+            _assemble_sequential_stages,
+        )
+        from scilink.agents.sim_agents.simulation_pipeline import _collect_stages
+
+        steps = [
+            {"name": "equilibration", "entry_file": "run_equilibration.lammps",
+             "script": "EQUIL"},
+            {"name": "production", "entry_file": "run_production.lammps",
+             "script": "PROD"},
+        ]
+        specs = _assemble_sequential_stages(steps, {"system.data": "DATA"})
+        stages = _collect_stages({"stages": specs}, "/tmp/base", "lmp -in {script}")
+        # Two sequential stages, one phase each, all sharing the base run dir so
+        # restart files chain optimization → equilibration → production.
+        assert len(stages) == 2
+        assert [st.name for st in stages] == ["equilibration", "production"]
+        assert all(st.parallel is False and len(st.phases) == 1 for st in stages)
+        assert {st.phases[0].run_dir for st in stages} == {"/tmp/base"}
+        assert stages[0].phases[0].run_command == "lmp -in run_equilibration.lammps"
+        assert stages[1].phases[0].run_command == "lmp -in run_production.lammps"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
