@@ -200,13 +200,34 @@ goal you picked above:
   specific multiple** (e.g. "the N=2 satellite"). Which reflection is the
   true fundamental is ill-posed from a 1-D PSD (the strongest peak is
   often a harmonic), so anchoring on it and looking for "2× the
-  fundamental" will MISS a genuinely strong superstructure that sits at a
-  different multiple. Trust σ: map the strongest satellite, whatever its
-  N. Name the structure (vacancy-/charge-ordered superstructure,
-  antiphase modulation, moiré) as **consistent with** the observation,
-  using domain context. If `strongest_satellite_d_nm` is None (no
-  satellite clears the σ/null floor), report **no resolvable
-  superstructure** — do not manufacture one.
+  fundamental" will MISS a genuinely strong superstructure at a different
+  multiple. Trust σ: map the strongest satellite, whatever its N.
+
+  Then report on the satellite's **origin honestly — three outcomes, and
+  do NOT force a binary real/not-real verdict** (the origin frequently
+  cannot be settled from one frame; over-claiming and over-dismissing are
+  equally wrong):
+  - `strongest_satellite_d_nm is None` → **no resolvable superstructure**
+    (do not manufacture one).
+  - mapped satellite localizes to a **compact domain** with
+    `spot_snr_domain ≫ spot_snr_bulk` → report a **(likely real) ordered
+    superstructure** — name it (vacancy-/charge-ordered, antiphase, moiré)
+    as *consistent with* the data using domain context, with its spacing
+    and where it lives.
+  - mapped satellite is significant but its amplitude **traces a thin
+    interface/edge line** (high aspect ratio, low phase coherence, or a
+    `spot_snr_domain` that is not from a compact region) → report it as a
+    **candidate of ambiguous origin**: state the satellite IS present and
+    where it concentrates, that this is consistent with **either** a
+    surface-/interface-nucleated ordered phase **OR** an interface edge
+    artifact, and name the specific diagnostic that is concerning. Do
+    **NOT** discard it as "just an edge artifact" (don't throw out a real
+    reflection) and do **NOT** upgrade it to a confirmed superstructure.
+    Say what would disambiguate — e.g. the same reflection measured in a
+    region away from the interface, a tilt or defocus series, a dose
+    series, or another movie frame.
+  Never resolve this by silently switching to a hand-picked "fundamental":
+  report the satellite you actually found, with calibrated uncertainty.
 
 ## analysis
 
@@ -457,22 +478,27 @@ candidate feature clearly above the bulk reference. The amplitude map
 must not simply trace image edges/the interface line (edge artifact);
 confirm against the phase-randomized null.
 
-**Check the conclusion against `fourier_reflection_map`'s OWN output, not
-against how well-argued it sounds** (this is the criterion that catches a
-rigorous-looking but wrong negative):
-- A "no resolvable superstructure" conclusion is VALID ONLY IF
-  `strongest_satellite_d_nm is None`. If the tool returned a
-  `strongest_satellite_d_nm` (a satellite cleared the σ floor) but the
-  claim is negative, that is a **failure** — the conclusion contradicts
-  the tool's own numbers. Do not accept a null that was reached by
-  ignoring or explaining-away a flagged satellite.
-- The mapped target must be **`strongest_satellite_d_nm`** (strongest
-  satellite by σ). **Reject any analysis that searched for a specific
-  multiple (e.g. "the N=2 satellite of the fundamental") and dismissed a
-  higher-σ satellite to get there** — picking the fundamental and a
-  fixed N is ill-posed and is the exact path to a false negative.
-- A *positive* superstructure claim is valid only with
-  `spot_snr_domain ≫ spot_snr_bulk` for the mapped satellite.
-Frame quality_criteria this way — as checks against the returned
-`reflections` / `strongest_satellite_d_nm` / `spot_snr_*` values — so a
-self-consistent but evidence-contradicting argument cannot score well.
+**Check the conclusion against `fourier_reflection_map`'s OWN output, and
+allow calibrated uncertainty.** A satellite's *origin* (genuine ordering
+vs. interface/edge artifact) often cannot be settled from a single frame,
+so an honest **"candidate of ambiguous origin"** report is a CORRECT
+outcome — not a hedge to mark down. Score honest, calibrated reporting at
+the top; penalize over-reach in EITHER direction, judged against the
+returned `reflections` / `strongest_satellite_d_nm` / `spot_snr_*` /
+amplitude-shape values rather than how well-argued the prose is:
+- **False null** — a "no resolvable superstructure" claim is valid ONLY IF
+  `strongest_satellite_d_nm is None`. If the tool returned a satellite but
+  the claim is absence, that **fails** (do not accept a null that
+  explained-away a flagged satellite, nor one reached by hunting "the N=2
+  of a hand-picked fundamental").
+- **Over-confident positive** — a *confirmed* "ordered superstructure"
+  claim needs `spot_snr_domain ≫ spot_snr_bulk` AND a **compact, non-edge**
+  localization. A satellite whose amplitude traces a thin interface line
+  must NOT be reported as a confirmed superstructure.
+- **Over-confident dismissal** — equally, a significant satellite must NOT
+  be thrown out as "just an edge artifact / nothing here." When its origin
+  is uncertain (interface-tracing amplitude, low phase coherence), the
+  required output is the **ambiguous report**: the satellite is present +
+  where it concentrates + both hypotheses (interface-nucleated ordering vs.
+  edge artifact) + what further data would disambiguate. Accept that as a
+  high-quality result.

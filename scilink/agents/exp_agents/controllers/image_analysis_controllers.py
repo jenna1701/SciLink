@@ -1978,7 +1978,8 @@ Examine each analysis result carefully. Look at:
     "selected_index": <0, 1, 2, etc., or null if ALL are unacceptable>,
     "acceptable": true/false,
     "reasoning": "detailed explanation of your choice or why all are unacceptable",
-    "issues_with_selected": "any remaining concerns with the chosen result, or null if none"
+    "issues_with_selected": "any remaining concerns with the chosen result, or null if none",
+    "score_explanation": "ONE concise sentence a downstream human or agent can read to understand WHY the selected result's quality score is low or zero. Distinguish the two very different cases: (a) it is the best of several genuinely flawed attempts — name the dominant flaw (e.g. 'over-detection: ~99 objects vs ~20 visible'); or (b) its score is MISSING because automated verification could not run (API error), so the low number is NOT a quality judgment and the result may be fine. State which."
 }}
 
 IMPORTANT: If one result is clearly better than others (better feature detection, fewer false positives,
@@ -2759,6 +2760,7 @@ Return JSON:
                 + skill_sections["validation"]
             )
 
+        self._last_verify_error = None
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,
@@ -2774,6 +2776,13 @@ Return JSON:
             return result_parsed
 
         except Exception as e:
+            # A transient API/network error (e.g. Bedrock ServiceUnavailable)
+            # means the quality score is UNKNOWN, not zero. Record it so the
+            # caller can tell the judge this attempt's score is missing-due-to-
+            # error rather than a genuine low-quality verdict — otherwise a good
+            # result gets a fabricated 0.00 that craters the metric and misleads
+            # the judge.
+            self._last_verify_error = str(e)
             self.logger.error(f"      LLM verification failed: {e}")
             return None
 
@@ -3292,7 +3301,16 @@ Return JSON with:
                         )
 
                         if verification is None:
-                            self.logger.warning("   Verification failed, skipping")
+                            # Distinguish an API/transient failure (score
+                            # unknown) from a real negative verdict: tag the
+                            # attempt so the judge isn't misled by a fake 0.0.
+                            _verr = getattr(self, "_last_verify_error", None)
+                            if _verr and all_attempts:
+                                all_attempts[-1]["verification_error"] = _verr
+                            self.logger.warning(
+                                "   Verification failed, skipping"
+                                + (f" (API error: {_verr})" if _verr else "")
+                            )
                             break
 
                         # Extract score first
@@ -3638,7 +3656,16 @@ Return JSON with:
                     state["locked_analysis_config"] = original_config
 
         # --- Judge: select best from all attempts if still below threshold ---
-        if best_score < quality_threshold and len(all_attempts) > 1:
+        # Also invoke the judge when an attempt's score is unreliable because its
+        # verification failed with a transient API error (a fabricated 0.0): the
+        # judge — given the error context — should adjudicate on the actual
+        # result/visualization rather than trusting the missing score.
+        _verify_errored = any(
+            a.get("verification_error") for a in all_attempts
+        )
+        if best_score < quality_threshold and (
+            len(all_attempts) > 1 or _verify_errored
+        ):
             self.logger.info(
                 "No result approved after all attempts - calling judge..."
             )
@@ -3648,6 +3675,7 @@ Return JSON with:
                     "verification": a.get("verification", {}),
                     "config": a.get("config", {}),
                     "score": a.get("score", 0),
+                    "verification_error": a.get("verification_error"),
                 }
                 for a in all_attempts
             ]
@@ -3670,6 +3698,12 @@ Return JSON with:
                     best_result["judge_reasoning"] = judge_result[
                         "reasoning"
                     ][:500]
+                # Concise, downstream-readable reason the selected best carries a
+                # low/zero score (best-of-flawed vs. score-missing-from-API-error).
+                if judge_result.get("score_explanation"):
+                    best_result["score_explanation"] = judge_result[
+                        "score_explanation"
+                    ][:400]
 
         # --- Summarize plan history ---
         multiple_attempts = len(all_attempts) > 1
@@ -3702,9 +3736,11 @@ Return JSON with:
 
         # --- Return best available result ---
         if best_result:
+            _expl = best_result.get("score_explanation")
             best_result["quality_warning"] = (
                 f"Quality score = {best_score:.2f} below threshold "
                 f"{quality_threshold}"
+                + (f". {_expl}" if _expl else "")
             )
             best_result["attempted_pipelines"] = [
                 a["pipeline"] for a in all_attempts
@@ -3843,6 +3879,9 @@ Return JSON with:
             "script_errors": script_errors or [],
             "judge_reasoning": (
                 (judge_result or {}).get("reasoning")
+            ),
+            "score_explanation": (
+                (judge_result or {}).get("score_explanation")
             ),
         }
 
@@ -4740,10 +4779,25 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                 else "  (no specific issues listed)"
             )
 
+            # If verification could not run (transient API error), the score is
+            # MISSING, not low — tell the judge so it weighs the visualization
+            # and physical plausibility instead of trusting a fabricated 0.00.
+            verr = attempt.get("verification_error")
+            if verr:
+                score_line = (
+                    "Quality score = UNAVAILABLE (automated verification could "
+                    f"not run — API error: {verr}). Do NOT treat this as a low "
+                    "score; judge this attempt on its visualization and physical "
+                    "plausibility alone."
+                )
+                assessment = "(no assessment — verification did not complete)"
+            else:
+                score_line = f"Quality score = {score:.2f}"
+
             summary = f"""
     **Attempt {i + 1}:**
     - Pipeline: {pipeline}
-    - Quality score = {score:.2f}
+    - {score_line}
     - Assessment: {assessment}
     - Issues ({len(issues)} found):
     {issues_str}

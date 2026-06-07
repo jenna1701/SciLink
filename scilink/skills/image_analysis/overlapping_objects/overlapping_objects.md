@@ -24,7 +24,25 @@ fringes) silently under-counts the population.
 ## planning
 
 ### foundational
-**Check first whether the problem actually needs instance segmentation.**
+**For DETECTION / COUNTING / SIZING of discrete particles, reach first for
+the registered `scale_matched_blob_detect` tool** — especially when global
+Otsu / watershed / SAM **over-detect on a speckled or noisy background** or
+**under-detect low-contrast objects**. Those methods are *scale-blind*: they
+threshold or split without using the known object size, so they fragment
+fine texture (over-detection) or miss faint objects (under-detection), and
+tuning the threshold up/down just trades one failure for the other. The tool
+instead uses a **band-pass sized from the object diameter** (rejecting BOTH
+finer noise and large-scale background in one step), auto-selects intensity
+**polarity** (objects darker OR brighter than background — don't assume
+bright), masks burned-in **scale-bar/annotation** regions, and measures each
+diameter on the original image. Pass `object_diameter_nm` (from the
+objective/calibration) and `pixel_size_nm`; it returns positions, calibrated
+diameters, and a per-object `bbox` to crop for any per-object property step
+(see *Per-object characterization* below). Fall back to the classical/SAM
+routes below only when this does not fit (e.g. genuinely touching objects
+needing instance masks, or boundary-delineated grains).
+
+**Check next whether the problem actually needs instance segmentation.**
 Several common cases resolve with simple classical methods before
 reaching for a heavy model like SAM:
 
