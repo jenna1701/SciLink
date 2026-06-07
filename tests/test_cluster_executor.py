@@ -187,6 +187,51 @@ class TestClusterExecutorRun:
         assert sched.cancelled == ["12345"]
         assert (run_dir / _RC).read_text() == "timeout"
 
+    def test_connect_factory_builds_profile_and_connects(self, monkeypatch):
+        # The factory assembles the profile, opens the connection, and forwards
+        # executor kwargs — without any real SSH.
+        import scilink.hpc.connection as conn_mod
+        captured = {}
+
+        class FakeHPCConn:
+            def __init__(self, profile):
+                captured["profile"] = profile
+
+            def connect(self, password="", key_passphrase=""):
+                captured["password"] = password
+                captured["passphrase"] = key_passphrase
+
+        monkeypatch.setattr(conn_mod, "HPCConnection", FakeHPCConn)
+        ex = ClusterExecutor.connect(
+            hostname="deception.pnl.gov", username="alle927", password="secret",
+            resources={"account": "ACC"}, remote_root="/scratch",
+            poll_interval=5,
+        )
+        assert isinstance(ex, ClusterExecutor)
+        assert captured["profile"].hostname == "deception.pnl.gov"
+        assert captured["profile"].username == "alle927"
+        assert captured["profile"].auth_method == "password"  # inferred
+        assert captured["password"] == "secret"
+        assert ex.resources == {"account": "ACC"}
+        assert ex.remote_root == "/scratch"
+        assert ex.poll_interval == 5
+
+    def test_connect_factory_infers_key_auth_without_password(self, monkeypatch):
+        import scilink.hpc.connection as conn_mod
+        captured = {}
+
+        class FakeHPCConn:
+            def __init__(self, profile):
+                captured["profile"] = profile
+
+            def connect(self, password="", key_passphrase=""):
+                pass
+
+        monkeypatch.setattr(conn_mod, "HPCConnection", FakeHPCConn)
+        ClusterExecutor.connect(hostname="h", username="u", key_path="/k")
+        assert captured["profile"].auth_method == "key"
+        assert captured["profile"].key_path == "/k"
+
     def test_uploaded_script_has_directives_and_wrapper(self, tmp_path):
         conn = FakeConn()
         sched = FakeScheduler(conn)

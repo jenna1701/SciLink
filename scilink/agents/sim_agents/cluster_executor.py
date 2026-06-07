@@ -77,6 +77,53 @@ class ClusterExecutor(Executor):
         self.timeout = timeout
         self.job_script_name = job_script_name
 
+    @classmethod
+    def connect(
+        cls,
+        *,
+        hostname: str,
+        username: str,
+        password: str = "",
+        key_path: str = "",
+        key_passphrase: str = "",
+        auth_method: Optional[str] = None,
+        proxy_jump: str = "",
+        port: int = 22,
+        **executor_kwargs: Any,
+    ) -> "ClusterExecutor":
+        """Open an HPC connection and return a ready ``ClusterExecutor``.
+
+        Convenience constructor that assembles the ``HPCProfile`` /
+        ``HPCConnection``, opens the connection, and wraps it — so a caller
+        passes one call to ``run_complete_workflow(..., executor=...)`` instead
+        of hand-assembling the connection. ``auth_method`` defaults to
+        ``"password"`` when a password is given, else ``"key"``. Remaining
+        keyword arguments (``remote_root``, ``resources``, ``setup``,
+        ``poll_interval``, ``timeout``) are forwarded to the constructor.
+
+        Args:
+            hostname: SSH host of the cluster login node.
+            username: SSH username.
+            password: Password for password auth (omit for key auth).
+            key_path: Path to a private key for key auth.
+            key_passphrase: Passphrase for an encrypted key.
+            auth_method: ``"password"`` or ``"key"``; inferred when omitted.
+            proxy_jump: Optional ``user@bastion`` jump host.
+            port: SSH port.
+
+        Returns:
+            A connected ``ClusterExecutor``.
+        """
+        from scilink.hpc.connection import HPCConnection, HPCProfile
+        method = auth_method or ("password" if password else "key")
+        profile = HPCProfile(
+            name=hostname, hostname=hostname, username=username, port=port,
+            auth_method=method, key_path=key_path, proxy_jump=proxy_jump,
+        )
+        conn = HPCConnection(profile)
+        conn.connect(password=password, key_passphrase=key_passphrase)
+        return cls(conn, **executor_kwargs)
+
     # ── internals ─────────────────────────────────────────────
 
     def _ensure_connected(self) -> None:
