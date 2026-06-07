@@ -1,5 +1,5 @@
 ---
-description: Segmentation of touching or overlapping objects (grains, particles, droplets, cells, bubbles) — separates detection from instance partitioning when binary masks merge neighbors.
+description: Detection, counting, and per-object measurement of discrete objects — touching/overlapping OR dispersed/separated (grains, particles, nanoparticles, droplets, cells, bubbles, precipitates). Separates detection from instance partitioning when masks merge neighbors, and from per-object characterization (size/shape, lattice/FFT orientation, intensity) so detection is never gated on the property being measured.
 ---
 # Overlapping / Touching Object Segmentation Skill
 
@@ -11,6 +11,15 @@ but appear merged in a binary mask — grains, particles, droplets, domains,
 cells, bubbles, etc. The key principle is to separate detection (finding
 where individual objects are) from assignment (labeling which pixels belong
 to which object).
+
+A second separation matters when the objective also asks to *characterize*
+each object (a per-object property — crystalline lattice / FFT orientation,
+fluorescence, composition, a size/shape class): **detection must not be
+gated on that property.** Detect every object by morphology/contrast first;
+measure the property per object afterward; and report the two counts
+separately (objects detected vs. objects exhibiting the property). Folding
+the property into detection (e.g. only "finding" particles that show lattice
+fringes) silently under-counts the population.
 
 ## planning
 
@@ -48,6 +57,29 @@ reaching for a heavy model like SAM:
 Only reach for SAM when objects genuinely touch or overlap AND no
 visible boundary feature delineates them — the case where classical
 approaches would merge adjacent objects into single blobs.
+
+**Per-object characterization (decoupled from detection).** When the
+objective is "detect the objects AND measure property X per object"
+(e.g. *detect the nanoparticles and FFT each to get its lattice
+orientation*), run it as two stages, never one:
+1. **Detect ALL objects** by morphology/contrast using the decision
+   tree above — independent of whether each object shows property X.
+   For small, low-contrast, dispersed particles a band-pass +
+   Laplacian-of-Gaussian blob detection (`skimage.feature.blob_log`)
+   sized to the particle radius is usually more reliable than
+   thresholding; de-duplicate detections within ~one radius.
+2. **Measure X on each detected object**, and accept the per-object
+   result only when it clears its own significance gate. For a
+   per-particle *lattice orientation*, crop each object and take a
+   windowed local FFT; report the orientation/d-spacing only when the
+   first-order spot SNR exceeds a threshold, and flag the rest as
+   "detected, property indeterminate" (off-zone / amorphous / too
+   noisy). For a lattice/superstructure question, `fourier_reflection_map`
+   (in `scilink.skills._shared.fourier_reflection`) can do the
+   per-crop detection.
+**Report N_detected and N_with_property as two separate numbers** — a
+large gap is an expected, informative result (e.g. "12 particles
+detected, 4 crystalline"), not a reason to drop the others.
 
 ### genuinely-overlapping case (no visible boundary)
 
@@ -209,7 +241,19 @@ too few large objects suggests under-segmentation.
 ## validation
 
 ### foundational
-**Object count**: Should match visual estimate within ±20%.
+**Object count — judge recall by inspecting the raw image, both ways.**
+Overlay the detections on the *original* image and check directly:
+(a) visible objects with no detection mark → under-detection;
+(b) detection marks on noise / background → over-detection. Both are
+errors; report `N_detected` against this visual estimate (≈±20%). A
+second automated detector is NOT a fix — it is just detection run again,
+with the same biases (a permissive one over-detects on noise), so it adds
+no independent ground truth. Where the population is small and
+low-contrast the count is genuinely uncertain — **report that
+uncertainty** (and the detection sensitivity used) rather than presenting
+one number as exact. (The **size distribution** check below independently
+guards over-detection: many fragments below ~1/4 the typical object area
+signal over-segmentation.)
 
 **Size distribution**: Should be unimodal or match expected physics.
 Many fragments below 1/4 of the typical object area indicate
@@ -218,3 +262,10 @@ over-segmentation artifacts.
 **Shape metrics**: Circularity and solidity should be physically
 reasonable for the object type (e.g., >0.7 for droplets/bubbles,
 variable for grains).
+
+**Per-object characterization** (when the objective measures a property
+per object): detection recall is judged on N_detected (the full
+population), not on N_with_property — if the detected count tracks only
+the objects that show the property (e.g. only the fringed particles),
+detection was wrongly coupled to the property; re-detect on morphology
+alone. Report N_detected and N_with_property separately.

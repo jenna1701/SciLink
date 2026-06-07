@@ -2054,6 +2054,31 @@ Your guidance: '''
         """
         config = state.get("locked_analysis_config", {})
         context_parts = []
+        # Authoritative calibration: when the caller supplied spatial metadata it
+        # is staged as ``metadata.json`` in the working directory (see
+        # stage_and_run). Point the generated script at it so pixel size and the
+        # z/height mapping come from real metadata rather than fabricated
+        # defaults or placeholder embedded image tags. No-op (and identical to
+        # prior behavior) when no spatial metadata is present.
+        _sysinfo = state.get("system_info") or {}
+        _spatial = (_sysinfo.get("experimental_details") or {}).get("spatial_info") \
+            if isinstance(_sysinfo, dict) else None
+        if _spatial:
+            context_parts.append(
+                "## Calibration (authoritative)\n"
+                "A `metadata.json` file is present in the working directory "
+                "(same folder as `data.npy`). Read it and use it as the "
+                "authoritative source of spatial calibration — it takes "
+                "precedence over any embedded image/TIFF tags. From "
+                "`experimental_details.spatial_info` compute the pixel size "
+                "PER AXIS (`field_of_view_x / n_cols`, `field_of_view_y / "
+                "n_rows`, honoring `field_of_view_units`) and, when "
+                "`data_range_minimum`/`data_range_maximum`/`data_range_units` "
+                "are present, map the stored pixel values to physical "
+                "height/units with that range. Do NOT assume default pixel "
+                "sizes or z-ranges. If `metadata.json` is somehow missing, fall "
+                "back to your usual reasoning."
+            )
         if state.get("literature_context"):
             context_parts.append(state["literature_context"])
         # Codegen recipe from ALL co-active skills (not just the top-ranked):
@@ -2429,7 +2454,8 @@ Your guidance: '''
                 # Sanitize the script
                 script = self._sanitize_script(script)
 
-                run = stage_and_run(self.executor, script, image_data, working_dir)
+                run = stage_and_run(self.executor, script, image_data, working_dir,
+                                    metadata=state.get("system_info"))
                 exec_result = run["exec"]
 
                 if run["status"] == "success":
@@ -2564,6 +2590,12 @@ Score: 0.0 (entirely wrong) to 1.0 (all output is correct).
 
 ### C. Relevance — does the output address what was asked?
 - Does the analysis extract the features listed in the quality criteria?
+- **Does the PRIMARY reported summary statistic and the headline figure
+  present the exact quantity the objective asks for?** If the objective
+  asks for orientation, the headline result/plot must be the orientation
+  distribution — not a tangential quantity (e.g. size) with orientation
+  merely buried in a table. Penalize when the requested quantity is
+  computed but not the one summarized/visualized.
 - Are the outputs scientifically usable for the stated objective?
 - Would a domain scientist find the results informative?
 Score: 0.0 (output is irrelevant) to 1.0 (directly answers the analysis goal).
@@ -3896,7 +3928,8 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                     working_dir = self.output_dir / f"image_{image_idx:04d}"
                     canonical_viz = working_dir / VIZ_NAME
                     patched_script = self._sanitize_script(patched_script)
-                    run = stage_and_run(self.executor, patched_script, image_data, working_dir)
+                    run = stage_and_run(self.executor, patched_script, image_data, working_dir,
+                                        metadata=state.get("system_info"))
                     exec_result = run["exec"]
 
                     if run["status"] == "success":

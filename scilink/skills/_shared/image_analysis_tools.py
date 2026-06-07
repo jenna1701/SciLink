@@ -157,9 +157,10 @@ def image_to_thumbnail_bytes(
             axes = [axes]
         for c in range(n_ch):
             ch = arr[:, :, c].astype(np.float64)
-            mn, mx = np.nanmin(ch), np.nanmax(ch)
+            finite = ch[np.isfinite(ch)]
+            mn, mx = np.percentile(finite, [0.5, 99.5]) if finite.size else (0.0, 1.0)
             if mx - mn > 1e-6:
-                ch = (ch - mn) / (mx - mn)
+                ch = np.clip((ch - mn) / (mx - mn), 0.0, 1.0)
             else:
                 ch = np.zeros_like(ch)
             axes[c].imshow(np.nan_to_num(ch, nan=0), cmap="gray", aspect="equal")
@@ -172,12 +173,21 @@ def image_to_thumbnail_bytes(
         buf.seek(0)
         return buf.getvalue()
 
-    # Normalize float arrays to uint8
+    # Normalize non-uint8 arrays (float / uint16) to uint8 for display.
+    # Use a ROBUST PERCENTILE stretch, not global min-max: this thumbnail's only
+    # job is visual inspection by the model (quantitative work uses the staged
+    # full-resolution data.npy, not this image). Global min-max renders a
+    # low-dynamic-range frame — e.g. a uint16 image whose signal spans a tiny
+    # fraction of [min, max], or any frame with a few hot/cold outlier pixels —
+    # nearly blank, hiding faint features from both the planner and the verifier.
+    # Clipping the [0.5, 99.5] percentile tails maximizes visible contrast.
+    # uint8 inputs are already display-ready and left untouched.
     if arr.dtype != np.uint8:
         arr = arr.astype(np.float64)
-        min_val, max_val = np.nanmin(arr), np.nanmax(arr)
-        if max_val - min_val > 1e-6:
-            arr = (arr - min_val) / (max_val - min_val) * 255
+        finite = arr[np.isfinite(arr)]
+        lo, hi = np.percentile(finite, [0.5, 99.5]) if finite.size else (0.0, 1.0)
+        if hi - lo > 1e-6:
+            arr = np.clip((arr - lo) / (hi - lo), 0.0, 1.0) * 255
         else:
             arr = np.zeros_like(arr)
         arr = np.nan_to_num(arr, nan=0).astype(np.uint8)

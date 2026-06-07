@@ -1,15 +1,19 @@
 ---
-description: Atomic-resolution STEM (HAADF, MAADF) image analysis — column detection, sublattice separation, lattice metrology, and defect identification on zone-axis crystalline materials.
+description: Atomic-resolution STEM/HRTEM image analysis — column detection, sublattice separation, lattice metrology, defect identification, and superlattice/satellite-reflection mapping (ordered-domain & second-phase localization) on crystalline zone-axis or lattice-fringe images.
 ---
 # STEM Atomic Resolution Image Analysis Skill
 
 ## overview
 
-Atomic-resolution STEM image analysis (HAADF, MAADF). Individual atomic
-columns are resolved as bright spots on a dark background. Applicable
-to any crystalline material viewed along a zone axis. Covers column
-detection, sublattice separation, lattice characterization, defect
-identification, and structural variation analysis.
+Atomic-resolution STEM (HAADF, MAADF) and HRTEM lattice-fringe image
+analysis. Individual atomic columns are resolved as bright spots on a
+dark background (STEM), or the crystal shows resolved lattice fringes
+(HRTEM). Applicable to any crystalline material viewed along a zone
+axis. Covers column detection, sublattice separation, lattice
+characterization, defect identification, structural variation analysis,
+and Fourier (reciprocal-space) mapping of superlattice / satellite
+reflections to localize ordered domains, second phases, and
+superstructures.
 
 ## planning
 
@@ -26,6 +30,8 @@ to detection + count):
 - measure lattice parameters / identify zone axis
 - identify vacancies / missing columns relative to an ideal lattice
 - map displacements / strain relative to an ideal lattice
+- detect & spatially map a superlattice / satellite reflection
+  (localize ordered domains, second phases, or superstructures)
 
 Each goal becomes its own focused pipeline. Follow-up goals — sublattice
 separation built on already-detected positions, displacement maps built
@@ -33,15 +39,38 @@ on an already-fit lattice — are best expressed as a separate
 `run_analysis` call with `prior_analysis_paths` pointing at this run's
 output, not appended to this plan.
 
-**Detection vs. pattern-level analysis (`run_fft_nmf_analysis`):**
+**Detection vs. pattern-level analysis:**
 inspect the image for pattern-level heterogeneity — visible textures
 or phase-like regions, disorder or defects at a scale coarser than
 individual atoms, or atomic detail that is noisy or low-contrast (where
 peak finding would be unreliable). If any of these is present, or the
-objective targets disorder / defects / phase separation,
-`run_fft_nmf_analysis` with a window size tuned to the feature scale
-is a complete pipeline by itself. Otherwise pick atom-resolved
-detection.
+objective targets disorder / defects / phase separation / "identify the
+lattice domains/phases", do a **pattern-level** analysis (next
+paragraph) rather than atom-resolved detection. Otherwise pick
+atom-resolved detection.
+
+**Pattern-level: detect reflections FIRST, then route.** For a
+crystalline lattice image, the cheap, rigorous first move for almost any
+"what domains/phases are here" question is `fourier_reflection_map`
+(no `d_nm`) — a reflection census that returns each spacing with a
+significance and flags satellites. It tells you which branch you are in:
+- a **satellite / superstructure** reflection is present (an ordered
+  domain, second phase, vacancy/charge ordering, moire) → **map that
+  reflection** with `fourier_reflection_map(image, px, d_nm=...)`; the
+  amplitude map localizes the ordered domain and `spot_snr_domain ≫
+  spot_snr_bulk` confirms it. This is sharper and more interpretable
+  than NMF and is the route the η-precipitate / vacancy-superstructure
+  class of objectives needs.
+- domains differ only in **orientation** at the *same* spacing (e.g.
+  **twins** — reflections share |k|, differ in direction), or the
+  heterogeneity is genuinely **unknown / exploratory** → use
+  `run_fft_nmf_analysis` (window-FFT + NMF), the unsupervised baseline.
+- nothing clears the significance floor → report no resolvable lattice.
+
+The two tools are complementary, not interchangeable: `fourier_reflection_map`
+is the sharp, interpretable route for a specific reflection / ordered
+phase; `run_fft_nmf_analysis` is the exploratory baseline for unknown or
+orientation-only heterogeneity.
 
 **For atom-resolved detection — choose the detector:**
 
@@ -100,9 +129,13 @@ for this when designing the step's `quality_criteria`:
 **Tool reference:** detection and refinement helpers live in
 `scilink.skills.image_analysis.atomic_stem.atom_finding` (`detect_atoms`, `detect_atoms_dcnn`,
 `refine_positions`, `find_zone_axes`, `find_missing_atoms`,
-`subtract_atoms`). Detailed parameter docs and per-tool usage are in
-the `analysis` section below — refer to it when the goal you picked
-above needs a specific tool.
+`subtract_atoms`). For the superlattice / satellite-reflection-mapping
+goal, use `fourier_reflection_map`
+(`scilink.skills._shared.fourier_reflection`) — the registered,
+reciprocal-space tool that detects reflections and maps a chosen one
+(amplitude + GPA phase), null-gated. Detailed parameter docs and
+per-tool usage are in the `analysis` section below — refer to it when
+the goal you picked above needs a specific tool.
 
 **Goal-specific guidance** — apply only the bullet that matches the
 goal you picked above:
@@ -136,7 +169,44 @@ goal you picked above:
   lattice from a prior step. Map displacements spatially; report only
   distortions exceeding the position fit uncertainty. Distinguish
   fitted-lattice residuals (local disorder) from deviations against a
-  known ideal lattice (true strain).
+  known ideal lattice (true strain). (A reciprocal-space alternative —
+  the *phase* channel of the superlattice-mapping pipeline below — gives
+  a continuous strain/displacement field without first detecting atoms;
+  prefer it when columns are too noisy to fit reliably.)
+
+- *If goal is superlattice / satellite-reflection mapping:* use the
+  registered tool `fourier_reflection_map` (see `analysis` for the call).
+  It is a reciprocal-space, atom-detection-free pipeline (STEM or HRTEM
+  lattice fringes) that already bakes in the steps and failure modes that
+  make or break this analysis, so you do **not** hand-write them:
+  detrended azimuthally-averaged radial-PSD detection with a σ
+  significance (a per-tile peak/median is fooled by single noise spikes);
+  a matched annular band-pass mapping on the **un-windowed** image
+  (a spatial window tapers the edges and biases amplitude to the centre);
+  a phase-randomized **null gate** (so noise and sharp interface edges
+  are not flagged as ordered); and a **local-FFT spot-SNR** confirmation
+  (domain ≫ bulk separates a real localized reflection from an edge
+  artifact). Recommended two-step use:
+  1. Call it once (no `d_nm`) to **detect** reflections — it returns each
+     `d_nm` with a σ, an `integer_multiple_of` list (this reflection is
+     N× a shorter significant one — a candidate **superstructure /
+     satellite**: ordering, antiphase, second phase, moiré), and
+     `strongest_satellite_d_nm`.
+  2. To localize a superstructure, map **`strongest_satellite_d_nm`** —
+     call again with `d_nm=that value`; inspect `amplitude_map`/
+     `domain_mask` for *where* it lives and require `spot_snr_domain ≫
+     spot_snr_bulk` before claiming it is real.
+  **Do NOT try to identify "the fundamental" first, and do NOT hunt for a
+  specific multiple** (e.g. "the N=2 satellite"). Which reflection is the
+  true fundamental is ill-posed from a 1-D PSD (the strongest peak is
+  often a harmonic), so anchoring on it and looking for "2× the
+  fundamental" will MISS a genuinely strong superstructure that sits at a
+  different multiple. Trust σ: map the strongest satellite, whatever its
+  N. Name the structure (vacancy-/charge-ordered superstructure,
+  antiphase modulation, moiré) as **consistent with** the observation,
+  using domain context. If `strongest_satellite_d_nm` is None (no
+  satellite clears the σ/null floor), report **no resolvable
+  superstructure** — do not manufacture one.
 
 ## analysis
 
@@ -275,6 +345,35 @@ Gaussian fit at expected position.
 positions spatially across the image. Only report distortions exceeding
 the position fit uncertainty.
 
+**Superlattice / satellite-reflection mapping** — use the registered
+tool `fourier_reflection_map` (reciprocal-space, atom-detection-free;
+works on STEM or HRTEM lattice fringes). It performs detection,
+matched-band-pass amplitude/phase mapping, the phase-randomized null
+gate, and the local-FFT confirmation internally, so the script only
+calls it and interprets the result. Pass the **square-pixel** size in
+nm (resample first if pixels are anisotropic).
+```
+from scilink.skills._shared.fourier_reflection import fourier_reflection_map
+
+# 1) detect: reflections + the strongest satellite (the ordering to localize)
+det = fourier_reflection_map(image, pixel_size_nm)
+for r in det["reflections"]:
+    print(r["d_nm"], r["sigma"], r["integer_multiple_of"])  # sigma = significance
+sat = det.get("strongest_satellite_d_nm")  # highest-sigma satellite, or None
+if not sat:
+    print("no resolvable superstructure")  # -> report it; do not map a fundamental
+
+# 2) localize the superstructure: map the strongest satellite (NOT a chosen N)
+res = fourier_reflection_map(image, pixel_size_nm, d_nm=sat)
+np.save("superlattice_amplitude.npy", res["amplitude_map"])   # where it lives
+np.save("superlattice_domain.npy", res["domain_mask"])        # null-gated segmentation
+real = res["spot_snr_domain"] > 3 * res["spot_snr_bulk"]      # confirm vs edge artifact
+# res["phase_map"] is the GPA displacement/strain channel of the same reflection.
+```
+Default (no `d_nm`) maps the strongest reflection — deliberately NOT a
+superstructure, so the tool does not presume one exists. Only call a
+satellite "real" when `spot_snr_domain ≫ spot_snr_bulk`.
+
 ## interpretation
 
 ### foundational
@@ -300,6 +399,17 @@ available.
 **Vacancy concentration:** In pristine crystals, typically 0.01-1%.
 Above 5-10% usually indicates detection or fitting error, unless the
 sample was intentionally modified (irradiation, beam damage, quenching).
+
+**Superlattice / satellite reflections:** A reflection at a rational
+multiple/fraction of the fundamental (≈2×, ½, ⅓ …) indicates a
+**superstructure** — ordering (oxygen/cation-vacancy, charge/orbital),
+an antiphase modulation, or a distinct second phase. Where its amplitude
+map is localized tells you *where* the ordered domains are (e.g. confined
+to a surface/interface band vs. bulk-wide). State the structural
+mechanism (e.g. "≈2× fundamental ⇒ vacancy-ordered superstructure") as
+**consistent with** the observation — the measurement proves a localized
+reflection at d = N×fundamental exists, not the specific chemistry. The
+phase channel of the same reflection is a displacement/strain field (GPA).
 
 ## validation
 
@@ -339,3 +449,30 @@ intensities between clusters.
 displacement from ideal lattice should be small (<0.3× lattice
 spacing). Large systematic displacements indicate fitting errors, not
 real strain.
+
+**Superlattice mapping** (when the step targets a satellite reflection):
+the reflection must clear the significance floor — a detrended radial-PSD
+peak well above the residual baseline AND a local-FFT spot SNR in the
+candidate feature clearly above the bulk reference. The amplitude map
+must not simply trace image edges/the interface line (edge artifact);
+confirm against the phase-randomized null.
+
+**Check the conclusion against `fourier_reflection_map`'s OWN output, not
+against how well-argued it sounds** (this is the criterion that catches a
+rigorous-looking but wrong negative):
+- A "no resolvable superstructure" conclusion is VALID ONLY IF
+  `strongest_satellite_d_nm is None`. If the tool returned a
+  `strongest_satellite_d_nm` (a satellite cleared the σ floor) but the
+  claim is negative, that is a **failure** — the conclusion contradicts
+  the tool's own numbers. Do not accept a null that was reached by
+  ignoring or explaining-away a flagged satellite.
+- The mapped target must be **`strongest_satellite_d_nm`** (strongest
+  satellite by σ). **Reject any analysis that searched for a specific
+  multiple (e.g. "the N=2 satellite of the fundamental") and dismissed a
+  higher-σ satellite to get there** — picking the fundamental and a
+  fixed N is ill-posed and is the exact path to a false negative.
+- A *positive* superstructure claim is valid only with
+  `spot_snr_domain ≫ spot_snr_bulk` for the mapped satellite.
+Frame quality_criteria this way — as checks against the returned
+`reflections` / `strongest_satellite_d_nm` / `spot_snr_*` values — so a
+self-consistent but evidence-contradicting argument cannot score well.
