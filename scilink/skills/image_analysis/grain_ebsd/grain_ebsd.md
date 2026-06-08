@@ -14,11 +14,15 @@ input types:
 - **grayscale channeling / BSE** image (grains by intensity contrast) →
   `mode="gray"`. (`mode="auto"` chooses by channel variance.)
 
-> **MANDATORY TOOL.** Use `grain_analysis` (imported below). Do NOT hand-roll
-> grain segmentation or use a discrete-object/blob detector — those cannot
-> express grain-boundary topology, twin-boundary straightness, or IPF texture,
-> which are the actual deliverables here. The whole segmentation+metrology step
-> is a single `grain_analysis(...)` call; the rest is plotting/reporting.
+> **PREFERRED TOOL.** Use `grain_analysis` (imported below) for the core
+> segmentation + size distribution + straight-boundary fraction + texture — it
+> gives solid, hole-free grain labels a discrete-object/blob detector cannot.
+> You ARE free to compute **additional task-specific metrics on its outputs**
+> (e.g. ASTM grain-size number G from `res["grain_diameters"]`/areas, shape
+> descriptors) and to tune `boundary_sensitivity` — that is expected, not a
+> deviation. Reach for a custom pipeline only if the tool genuinely cannot
+> express the deliverable. Compute the segmentation once via `grain_analysis`;
+> add derived metrics on top.
 
 ## planning
 
@@ -91,11 +95,22 @@ fractions + dominant component.
 
 ## interpretation
 
-- **Twin-boundary fraction** = straight boundary length / total boundary length,
-  a proxy for coherent annealing (Sigma3) twins, which are atomically flat and
-  render as straight lines. It is a **proxy**, not a misorientation measurement
-  — report it as such; a value near 1 means a strongly twinned, well-annealed
-  microstructure.
+- **Twin-boundary fraction is a STRAIGHT-boundary fraction, and only a valid twin
+  proxy when the *regular* grain boundaries are CURVED** (the usual recrystallized
+  case: curved general boundaries + atomically-flat straight Σ3 twins → the
+  straight fraction ≈ twin fraction). **It false-positives whenever the grain
+  boundaries are themselves straight** — idealized / synthetic polygonal
+  tessellations, columnar or strongly faceted grains — where it can read ~0.9
+  with NO twins present. So, before reporting it as a twin fraction, CHECK the
+  microstructure:
+  - If the boundary network is mostly straight polygon edges, OR there are no
+    visible straight *intragranular* lamellae / paired parallel twin lines,
+    **report twin fraction ≈ 0 with the explicit caveat** "no twins resolvable
+    by straight-boundary morphology here" — do NOT report the raw straight
+    fraction as a twin fraction.
+  - Only report a high twin fraction when you can SEE straight twins against a
+    curved-boundary background. It is a morphological proxy, never a
+    misorientation measurement.
 - **IPF texture**: `<001>`=red, `<101>`=green, `<111>`=blue (Z direction). A
   dominant pole with high area fraction indicates a preferred orientation /
   texture component; near-equal fractions indicate a random texture.
@@ -114,7 +129,14 @@ fractions + dominant component.
   tiny fragments ⇒ lower it (or stronger pre-smoothing).
 - **Size distribution**: physically plausible, right-skewed for annealed
   microstructures; a spike of sub-resolution fragments ⇒ over-segmentation.
-- **Twin fraction sanity**: should sit in [0,1]; the straight-segment detector is
-  validated to read ~1 for straight boundaries and ~0 for smoothly curved ones.
+- **Twin fraction sanity**: the straight-segment detector reads ~1 for straight
+  boundaries and ~0 for curved ones BY DESIGN — so a high value only means
+  "boundaries are straight," NOT "twins exist." A high straight fraction in a
+  polygonal/idealized microstructure, or with no visible intragranular twin
+  lines, is a FALSE POSITIVE → report ~0 with the caveat (see interpretation).
+  Cross-check against what you actually see in the image before reporting twins.
+- **Derived metrics** (e.g. ASTM G): compute from the tool's per-grain
+  diameters/areas; for ASTM E112, convert mean grain area to **mm²** first
+  (G = -6.6438·log2(mean_area_mm²) - 3.293); sanity-bound G to ~0-14.
 - **Texture**: pole fractions sum to ~1; a claimed dominant component should be
   visible as a colour cluster in the IPF map.
