@@ -24,31 +24,34 @@ fringes) silently under-counts the population.
 ## planning
 
 ### foundational
-**For DETECTION / COUNTING / SIZING of discrete particles, reach first for
-the registered `scale_matched_blob_detect` tool** — especially when global
-Otsu / watershed / SAM **over-detect on a speckled or noisy background** or
-**under-detect low-contrast objects**. Those methods are *scale-blind*: they
-threshold or split without using the known object size, so they fragment
-fine texture (over-detection) or miss faint objects (under-detection), and
-tuning the threshold up/down just trades one failure for the other. Two complementary scale-matched detectors are registered; **pick by the
-packing/contrast of the field** (you can see the image — choose, don't guess):
-- **`scale_matched_blob_detect`** (band-pass + watershed) — for **SPARSE /
-  well-separated** particles on a **noisy/speckled** background; its band-pass
-  SNR gate gives strong **speckle rejection** (fixes over-detection).
-- **`log_blob_detect`** (scale-space LoG / `blob_log`) — for **DENSELY-PACKED
-  or FAINT** small cores (ferritin, dense monolayers), where a region-growing
-  detector merges touching cores and under-counts.
+**Detect particles with the method that fits the image — choose by packing and
+contrast (you can see it).** For **densely-packed or faint small cores**
+(ferritin, dense monolayers), `skimage.feature.blob_log` (scale-space LoG) sized
+to the core radius is excellent and is usually the right first choice — it finds
+each core as its own maximum without merging. For **well-separated** objects,
+Otsu + connected components. For **touching** objects, SAM.
 
-Both take `object_diameter_nm` (from the objective/calibration) + `pixel_size_nm`,
-auto-select intensity **polarity**, mask burned-in **scale-bar/annotation**
-regions, measure each diameter on the original image, and return per-object
-`bbox` for a per-object property step (see *Per-object characterization*). **Their
-sensitivity knobs are exposed and meant to be tuned** — if the overlay shows
-under- or over-detection, re-run with the adjusted `params` the spec describes
-(e.g. `threshold_rel` / `k_thresh` / `snr_min`) until it matches the image; the
-right sensitivity is image-specific. Fall back to the classical/SAM routes below
-only when neither fits (genuinely touching objects needing instance masks, or
-space-filling boundary-delineated grains).
+Two registered tools **add value in specific FAILURE MODES — reach for them when
+your own detection mis-fires, not by default** (do not route a case to a tool
+that `blob_log`/Otsu already handle well):
+- **`scale_matched_blob_detect`** — use when detection **OVER-detects on a
+  speckled / noisy background**: its scale-matched band-pass + band-pass-SNR gate
+  reject the fine texture that watershed/Otsu/`blob_log` fragment into false
+  particles (the case where naive thresholding craters). Best for SPARSE
+  particles on a grainy background.
+- **`log_blob_detect`** — a convenience wrapper around `blob_log` that adds
+  scale-bar/annotation masking + calibrated diameter measurement; equivalent to
+  calling `blob_log` yourself, so use either for the dense/faint case.
+
+Both take `object_diameter_nm` + `pixel_size_nm`, auto-select **polarity**, and
+return per-object `bbox` for a per-object property step. **Their sensitivity
+knobs are exposed and meant to be tuned** — if the overlay shows under/over-
+detection, re-run with adjusted `params` (`threshold_rel` / `k_thresh` /
+`snr_min`) until it matches the image. **A dense field on a speckled background
+is the hard gap** (band-pass merges, plain `blob_log` over-detects the speckle):
+there, prefer `blob_log`/`log_blob_detect` with a raised `threshold_rel` (or a
+light pre-smoothing), and verify the overlay. Use SAM / boundary routes below
+only for genuinely touching objects or space-filling grains.
 
 **Check next whether the problem actually needs instance segmentation.**
 Several common cases resolve with simple classical methods before
