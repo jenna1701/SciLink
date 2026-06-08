@@ -231,7 +231,7 @@ TOOL_SPEC = ToolSpec(
         "the objective/calibration. Pair with a per-object step (fourier_reflection_"
         "map or a local FFT on each returned bbox) for a per-object property. "
         "Choose the RIGHT detector: for DENSELY-PACKED or FAINT small cores (e.g. "
-        "ferritin, dense monolayers) this merges/under-counts — use log_blob_detect "
+        "a crowded field of small cores) this merges/under-counts — use log_blob_detect "
         "(scale-space LoG) instead. For SPACE-FILLING grains (polycrystalline, "
         "tessellated cells) use boundary segmentation. For genuinely touching "
         "objects needing instance masks, use run_sam_analysis."

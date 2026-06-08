@@ -4,7 +4,7 @@ The companion to ``scale_matched_blob_detect``: where the band-pass + watershed
 detector excels at sparse/medium particles on a noisy background, it *merges*
 densely-packed touching cores (a distance transform of a dense cluster is one
 plateau) and its precision gates reject faint cores — it caps out well below the
-true count on a dense low-contrast field (e.g. ferritin cores).
+true count on a dense, low-contrast field of small cores.
 
 This tool instead uses ``skimage.feature.blob_log`` — a multi-scale Laplacian-of-
 Gaussian that finds EACH particle as its own scale-space maximum, so densely-
@@ -115,8 +115,8 @@ TOOL_SPEC = ToolSpec(
     agents=["image_analysis"],
     when_to_use=(
         "Use to DETECT / COUNT / SIZE small particles that are DENSELY PACKED "
-        "and/or FAINT (low contrast) — e.g. ferritin cores, dense nanoparticle "
-        "monolayers, closely-spaced dark cores — where a region-growing detector "
+        "and/or FAINT (low contrast) — closely-spaced small cores on a crowded "
+        "field — where a region-growing detector "
         "(scale_matched_blob_detect, watershed, SAM) merges touching cores and "
         "under-counts. Reach for scale_matched_blob_detect instead when particles "
         "are SPARSE/well-separated on a speckled background (it adds stronger "
@@ -129,10 +129,10 @@ TOOL_SPEC = ToolSpec(
         "pixel_size_nm": {"type": "number", "description": "nm per pixel (calibration)."},
         "polarity": {"type": "string", "description":
             "SET THIS from the image — you can see whether the particles are darker "
-            "('dark', e.g. ferritin/AuNP cores) or brighter ('bright') than the "
-            "background. 'auto' is only a fallback and can MIS-PICK on dense fields "
-            "where both the dark cores and the bright gaps between them are strong "
-            "features (e.g. ferritin), so prefer setting it explicitly."},
+            "('dark') or brighter ('bright') than the background. 'auto' is only a "
+            "fallback and can mis-pick on dense fields where both the objects and "
+            "the gaps between them are strong features, so prefer setting it "
+            "explicitly."},
         "params": {"type": "object", "description":
             "Tunable knobs — ADJUST these from what you see in the result vs the "
             "image; the defaults are a starting point, not a fixed answer: "
@@ -150,7 +150,7 @@ TOOL_SPEC = ToolSpec(
     returns=(
         "dict with 'n_detected', 'n_interior', 'polarity_used', 'annotation_masked', "
         "'diameters_nm' and 'diameter_median/mean/std_nm', and 'objects' (list of "
-        "{cy, cx, diameter_nm, contrast_snr, border, bbox=(y0,x0,y1,x1)}). If none: 'note'."
+        "{cy, cx, diameter_nm, border, bbox=(y0,x0,y1,x1)}). If none: 'note'."
     ),
     example=(
         "res = log_blob_detect(image, object_diameter_nm=7.0, pixel_size_nm=0.11)\n"

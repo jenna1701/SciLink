@@ -25,11 +25,14 @@ fringes) silently under-counts the population.
 
 ### foundational
 **Detect particles with the method that fits the image — choose by packing and
-contrast (you can see it).** For **densely-packed or faint small cores**
-(ferritin, dense monolayers), `skimage.feature.blob_log` (scale-space LoG) sized
-to the core radius is excellent and is usually the right first choice — it finds
-each core as its own maximum without merging. For **well-separated** objects,
-Otsu + connected components. For **touching** objects, SAM.
+contrast (you can see it).** For **densely-packed or faint small cores**,
+`skimage.feature.blob_log` (scale-space LoG) sized to the core radius is
+excellent and is usually the right first choice — it finds each core as its own
+maximum without merging. Whichever you use, **set the polarity from the image**
+(dark vs. bright objects) and **tune the detection threshold from the overlay**
+(blob_log over-detects at a default threshold; raise it until the count matches
+what you see). For **well-separated** objects, Otsu + connected components. For
+**touching** objects, SAM.
 
 Two registered tools **add value in specific FAILURE MODES — reach for them when
 your own detection mis-fires, not by default** (do not route a case to a tool
