@@ -1032,6 +1032,15 @@ class SkillSuggestionController:
             context_parts.append(f"Metadata: {str(sysinfo)[:1500]}")
         elif isinstance(sysinfo, str) and sysinfo.strip():
             context_parts.append(f"Metadata: {sysinfo.strip()[:1500]}")
+        # The stated objective (when given) disambiguates skills that the image
+        # alone cannot — e.g. "map the strain" vs "detect atomic columns" on the
+        # same lattice image, or "count particles" vs "measure one region's
+        # geometry". It is one signal among data + metadata, not authoritative.
+        objective = state.get("analysis_objective")
+        if objective and str(objective).strip():
+            context_parts.append(
+                "Stated analysis objective (one signal among the data/metadata "
+                f"below; confirm against what the image actually shows): {str(objective).strip()[:1000]}")
         if image_bytes:
             context_parts.append({"mime_type": "image/jpeg", "data": image_bytes})
         if not context_parts:

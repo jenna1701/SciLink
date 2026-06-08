@@ -5,8 +5,10 @@ given a crystalline (S)TEM / HRTEM image, it (1) detects reflections from a
 detrended, azimuthally-averaged radial power spectrum with a significance
 (sigma), (2) classifies satellite / superstructure reflections by their ratio
 to the fundamental, (3) builds a matched annular band-pass at a chosen
-reflection and maps WHERE it lives (amplitude) plus its displacement/strain
-field (phase = GPA), (4) gates the map against a phase-randomized null, and
+reflection and maps WHERE it lives (amplitude) plus a raw displacement-phase
+view (the Bragg phase — UNREFERENCED, an exploratory displacement view, NOT a
+quantitative strain tensor; use the ``gpa_strain`` tool for referenced strain),
+(4) gates the map against a phase-randomized null, and
 (5) confirms a candidate domain with a local windowed-FFT spot SNR vs. bulk.
 
 These steps encode the failure modes that make ad-hoc versions wrong:
@@ -210,7 +212,9 @@ TOOL_SPEC = ToolSpec(
         "Targeted reciprocal-space mapping of ONE lattice reflection. Detects "
         "reflections from a detrended radial power spectrum, flags satellite/"
         "superstructure reflections, and maps where a chosen reflection lives "
-        "(amplitude) plus its strain field (phase, GPA), null-gated."
+        "(amplitude, null-gated) plus a raw displacement-phase view. For a "
+        "QUANTITATIVE referenced strain tensor (exx/eyy/exy/wxy), use the "
+        "gpa_strain tool instead — this tool's phase is unreferenced."
     ),
     import_line="from scilink.skills._shared.fourier_reflection import fourier_reflection_map",
     signature="fourier_reflection_map(image_array, pixel_size_nm, d_nm=None, params=None) -> dict",
@@ -219,8 +223,9 @@ TOOL_SPEC = ToolSpec(
         "Use for a SPECIFIC periodicity question on a crystalline (S)TEM / HRTEM "
         "lattice image: localizing a superlattice / satellite reflection, an "
         "ordered domain (oxygen/cation-vacancy, charge/orbital ordering, "
-        "antiphase), a second phase with a distinct spacing, or a GPA-style "
-        "strain field. This is the sharp, interpretable counterpart to the "
+        "antiphase), or a second phase with a distinct spacing. (For a "
+        "quantitative referenced strain field, use gpa_strain, not this tool's "
+        "raw phase.) This is the sharp, interpretable counterpart to the "
         "exploratory run_fft_nmf_analysis: reach for FFT-NMF when the "
         "heterogeneity is unknown ('what domains exist?'); reach for "
         "fourier_reflection_map when you can name or first detect the reflection "
@@ -272,7 +277,8 @@ TOOL_SPEC = ToolSpec(
         "strongest reflection); "
         "'mapped_is_satellite_candidate' (bool); "
         "'amplitude_map' (2D ndarray — where the mapped reflection lives); "
-        "'phase_map' (2D ndarray — displacement/strain field, GPA); "
+        "'phase_map' (2D ndarray — raw Bragg phase, an UNREFERENCED "
+        "displacement view; not a quantitative strain tensor — use gpa_strain); "
         "'domain_mask' (2D bool — null-gated ordered-domain segmentation); "
         "'domain_fraction' (float); 'null_threshold' (float); "
         "'spot_snr_domain' / 'spot_snr_bulk' (local-FFT spot SNR in the strongest "
