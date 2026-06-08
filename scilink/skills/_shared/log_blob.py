@@ -9,7 +9,8 @@ true count on a dense, low-contrast field of small cores.
 This tool instead uses ``skimage.feature.blob_log`` — a multi-scale Laplacian-of-
 Gaussian that finds EACH particle as its own scale-space maximum, so densely-
 packed and faint cores are detected individually. It is sized from the known
-object diameter, auto-selects intensity polarity, masks burned-in annotations,
+object diameter, selects intensity polarity (set explicitly, or 'auto'
+fallback), masks burned-in annotations,
 and measures each diameter on the original image (shared with the band-pass tool).
 """
 import numpy as np
