@@ -19,30 +19,45 @@ from skimage.filters import gaussian
 from .blob_detect import _norm, _mask_annotation, _measure_diameter
 
 
-def log_blob_detect(image_array, object_diameter_nm, pixel_size_nm,
-                    polarity="auto", params=None):
-    """Thin, faithful wrapper around skimage.feature.blob_log.
+def log_blob_detect(image_array, object_diameter_nm=None, pixel_size_nm=None,
+                    polarity="auto", *, min_sigma=None, max_sigma=None,
+                    num_sigma=10, threshold=None, threshold_rel=None, overlap=0.5,
+                    log_scale=False, exclude_border=False, mask_annotations=True,
+                    d_min_nm=None, d_max_nm=None):
+    """Faithful superset of skimage.feature.blob_log.
 
-    It passes `blob_log` through unchanged (its `threshold_rel` / sigma range /
-    overlap are exposed for the agent to tune), and adds ONLY the value-adds
-    `blob_log` lacks: intensity-polarity selection, scale-bar/annotation masking,
-    a loose object-scale size filter, and a calibrated diameter for each blob.
-    It deliberately does NOT add a contrast/SNR gate — that gate is what made an
-    earlier version under-detect faint cores and trail raw `blob_log`."""
+    Every native `blob_log` argument (min_sigma, max_sigma, num_sigma, threshold,
+    threshold_rel, overlap, log_scale, exclude_border) is passed STRAIGHT THROUGH
+    — with no annotation present and no extra args, this returns exactly what
+    `blob_log` would (the defaults here mirror blob_log's own). It only layers on
+    OPT-IN conveniences: derive the sigma range from a known object_diameter_nm
+    when min/max_sigma are not given; select intensity polarity (blob_log finds
+    only BRIGHT blobs, so dark objects need the image inverted — polarity='dark'
+    does that for you); mask burned-in scale bars/annotations (no-op if none);
+    report a calibrated nm diameter per blob when pixel_size_nm is given; and an
+    optional nm size filter (off by default). It adds NO contrast/SNR gate."""
     g = np.asarray(image_array, float)
     if g.ndim == 3:
         g = g[..., :3].mean(-1) if g.shape[2] in (3, 4) else g[..., 0]
     H, W = g.shape
-    px = float(pixel_size_nm)
-    radius_px = (float(object_diameter_nm) / px) / 2.0
-    sig = radius_px / np.sqrt(2.0)               # LoG sigma for the object radius
-    p = dict(sigma_lo=0.6, sigma_hi=1.6, num_sigma=5, threshold_rel=0.1,
-             overlap=0.5, d_min_nm=0.3 * object_diameter_nm,
-             d_max_nm=3.0 * object_diameter_nm)
-    p.update(params or {})
+    px = float(pixel_size_nm) if pixel_size_nm else None
+    radius_px = ((float(object_diameter_nm) / px) / 2.0
+                 if (object_diameter_nm and px) else None)
+    # sigma range: explicit pixel values win; else derive from the object size;
+    # else fall back to blob_log's own defaults (1, 50).
+    if min_sigma is None or max_sigma is None:
+        if radius_px:
+            sig = radius_px / np.sqrt(2.0)
+            min_sigma = max(1.0, sig * 0.6) if min_sigma is None else min_sigma
+            max_sigma = sig * 1.6 if max_sigma is None else max_sigma
+        else:
+            min_sigma = 1.0 if min_sigma is None else min_sigma
+            max_sigma = 50.0 if max_sigma is None else max_sigma
+    if threshold is None and threshold_rel is None:
+        threshold = 0.2                              # blob_log's own default
 
-    excl = _mask_annotation(g)
     n = _norm(g)
+    excl = _mask_annotation(g) if mask_annotations else np.zeros(g.shape, bool)
     order = [polarity] if polarity in ("bright", "dark") else ["bright", "dark"]
 
     best = None
@@ -51,23 +66,29 @@ def log_blob_detect(image_array, object_diameter_nm, pixel_size_nm,
         img = nn.copy()
         if excl.any():
             img[excl] = np.median(nn[~excl])        # blank annotation region
-        flat = nn - gaussian(nn, radius_px * 1.6)   # for calibrated sizing only
+        flat = gaussian(nn, max(1.0, min_sigma))
+        flat = nn - gaussian(nn, max_sigma * 1.6)   # for calibrated sizing / polarity
         locbg = np.median(flat[~excl]) if (~excl).any() else float(np.median(flat))
-        blobs = blob_log(img, min_sigma=max(1.0, sig * p["sigma_lo"]),
-                         max_sigma=sig * p["sigma_hi"], num_sigma=p["num_sigma"],
-                         threshold=None, threshold_rel=p["threshold_rel"],
-                         overlap=p["overlap"], exclude_border=False)
+        blobs = blob_log(img, min_sigma=min_sigma, max_sigma=max_sigma,
+                         num_sigma=num_sigma, threshold=threshold,
+                         threshold_rel=threshold_rel, overlap=overlap,
+                         log_scale=log_scale, exclude_border=exclude_border)
         objs, contrasts = [], []
         for y, x, s in blobs:
             y, x = int(y), int(x)
             if excl[y, x]:
                 continue
             r_px = s * np.sqrt(2.0)
-            d_meas = _measure_diameter(flat, y, x, r_px, px, nominal_r_px=radius_px)
-            d_nm = d_meas if d_meas else 2.0 * r_px * px
-            if d_nm < p["d_min_nm"] or d_nm > p["d_max_nm"]:
+            if px:
+                d_meas = _measure_diameter(flat, y, x, r_px, px, nominal_r_px=radius_px)
+                d_nm = d_meas if d_meas else 2.0 * r_px * px
+            else:
+                d_nm = 2.0 * r_px                    # pixels if uncalibrated
+            if (d_min_nm is not None and d_nm < d_min_nm) or \
+               (d_max_nm is not None and d_nm > d_max_nm):
                 continue
-            border = x < radius_px or y < radius_px or x > W - radius_px or y > H - radius_px
+            edge = radius_px or r_px
+            border = x < edge or y < edge or x > W - edge or y > H - edge
             R = int(r_px)
             objs.append(dict(cy=float(y), cx=float(x), diameter_nm=round(float(d_nm), 3),
                              border=bool(border),
@@ -105,14 +126,21 @@ from ._spec import ToolSpec
 TOOL_SPEC = ToolSpec(
     name="log_blob_detect",
     description=(
-        "Scale-space (Laplacian-of-Gaussian) detection of DENSE, faint, small "
-        "particles — the companion to scale_matched_blob_detect (band-pass + "
-        "watershed), which merges densely-packed cores and under-detects them. "
-        "blob_log finds each particle as its own scale-space maximum."
+        "A faithful SUPERSET of skimage.feature.blob_log (scale-space LoG blob "
+        "detection): every native blob_log argument is passed straight through, so "
+        "with no annotation present it returns exactly what blob_log would. It adds "
+        "only opt-in conveniences: sigma range derived from a known object size, "
+        "polarity handling (blob_log finds only BRIGHT blobs; polarity='dark' "
+        "inverts for dark objects), scale-bar/annotation masking, and a calibrated "
+        "diameter per blob. Good for dense, faint, small cores where region-growing "
+        "detectors merge touching particles."
     ),
     import_line="from scilink.skills._shared.log_blob import log_blob_detect",
-    signature=("log_blob_detect(image_array, object_diameter_nm, pixel_size_nm, "
-               "polarity='auto', params=None) -> dict"),
+    signature=("log_blob_detect(image_array, object_diameter_nm=None, "
+               "pixel_size_nm=None, polarity='auto', *, min_sigma=None, "
+               "max_sigma=None, num_sigma=10, threshold=None, threshold_rel=None, "
+               "overlap=0.5, log_scale=False, exclude_border=False, "
+               "mask_annotations=True, d_min_nm=None, d_max_nm=None) -> dict"),
     agents=["image_analysis"],
     when_to_use=(
         "Use to DETECT / COUNT / SIZE small particles that are DENSELY PACKED "
@@ -125,38 +153,46 @@ TOOL_SPEC = ToolSpec(
         "low-contrast cores. Returns per-object bbox for a downstream property step."
     ),
     parameters={
+        "image_array": {"type": "object", "description": "2D image (or RGB)."},
         "object_diameter_nm": {"type": "number", "description":
-            "Approximate particle diameter in nm — sets the LoG scale."},
-        "pixel_size_nm": {"type": "number", "description": "nm per pixel (calibration)."},
+            "Optional — approximate particle diameter in nm. If given (with "
+            "pixel_size_nm) it sets the sigma range; otherwise pass min_sigma/"
+            "max_sigma directly, or let it fall back to blob_log's defaults."},
+        "pixel_size_nm": {"type": "number", "description":
+            "Optional — nm/pixel. Needed only for calibrated nm diameters; without "
+            "it, diameters are returned in pixels."},
         "polarity": {"type": "string", "description":
-            "SET THIS from the image — you can see whether the particles are darker "
-            "('dark') or brighter ('bright') than the background. 'auto' is only a "
-            "fallback and can mis-pick on dense fields where both the objects and "
-            "the gaps between them are strong features, so prefer setting it "
-            "explicitly."},
-        "params": {"type": "object", "description":
-            "Tunable knobs — ADJUST these from what you see in the result vs the "
-            "image; the defaults are a starting point, not a fixed answer: "
-            "* threshold_rel (LoG sensitivity, default 0.06): LOWER it (e.g. 0.03, "
-            "0.015) if faint/dense cores are clearly MISSED; RAISE it (e.g. 0.1) if "
-            "background fluctuations are being detected as cores. * snr_min "
-            "(per-blob contrast gate, default 2.0): raise to drop low-contrast "
-            "false positives, lower to keep faint cores. * overlap (default 0.5): "
-            "lower if touching cores are being merged into one. * d_min_nm / "
-            "d_max_nm (size filter, default 0.3x/3x): tighten to a known size band. "
-            "Re-run with adjusted values until the overlay matches the image — the "
-            "'right' sensitivity is image-specific, so do not trust one default."},
+            "SET from the image: 'dark' or 'bright' objects. blob_log finds only "
+            "bright blobs, so 'dark' inverts the image for you. 'auto' is a fallback "
+            "that can mis-pick on dense fields — prefer setting it."},
+        "min_sigma": {"type": "number", "description": "blob_log arg (px) — passthrough; overrides object_diameter_nm."},
+        "max_sigma": {"type": "number", "description": "blob_log arg (px) — passthrough."},
+        "num_sigma": {"type": "number", "description": "blob_log arg (default 10)."},
+        "threshold": {"type": "number", "description": "blob_log absolute LoG threshold (default 0.2 if neither threshold nor threshold_rel set)."},
+        "threshold_rel": {"type": "number", "description":
+            "blob_log relative threshold (0-1). The main sensitivity knob: LOWER if "
+            "faint cores are missed, RAISE if noise is detected. Tune from the overlay."},
+        "overlap": {"type": "number", "description": "blob_log arg (default 0.5); lower to split touching blobs."},
+        "log_scale": {"type": "boolean", "description": "blob_log arg; helps very wide size ranges."},
+        "exclude_border": {"type": "boolean", "description": "blob_log arg."},
+        "mask_annotations": {"type": "boolean", "description":
+            "Default true — exclude a detected burned-in scale bar; no-op if none. "
+            "Set false for exact blob_log behavior."},
+        "d_min_nm": {"type": "number", "description": "Optional nm size filter (off by default)."},
+        "d_max_nm": {"type": "number", "description": "Optional nm size filter (off by default)."},
     },
-    required=["image_array", "object_diameter_nm", "pixel_size_nm"],
+    required=["image_array"],
     returns=(
         "dict with 'n_detected', 'n_interior', 'polarity_used', 'annotation_masked', "
-        "'diameters_nm' and 'diameter_median/mean/std_nm', and 'objects' (list of "
-        "{cy, cx, diameter_nm, border, bbox=(y0,x0,y1,x1)}). If none: 'note'."
+        "'diameters_nm' (px if uncalibrated) and 'diameter_median/mean/std_nm', and "
+        "'objects' (list of {cy, cx, diameter_nm, border, bbox=(y0,x0,y1,x1)}). If none: 'note'."
     ),
     example=(
-        "res = log_blob_detect(image, object_diameter_nm=7.0, pixel_size_nm=0.11)\n"
-        "print(res['n_detected'], 'median d =', res.get('diameter_median_nm'))\n"
-        "# lower threshold_rel if faint cores are missed:\n"
-        "# res = log_blob_detect(image, 7.0, 0.11, params={'threshold_rel': 0.03})"
+        "# sized from the known particle diameter, dark cores:\n"
+        "res = log_blob_detect(image, object_diameter_nm=7.0, pixel_size_nm=0.11,\n"
+        "                      polarity='dark', threshold_rel=0.3)\n"
+        "print(res['n_detected'], res.get('diameter_median_nm'))\n"
+        "# or pure passthrough (== raw blob_log): \n"
+        "# res = log_blob_detect(image, min_sigma=3, max_sigma=8, threshold=0.05)"
     ),
 )
