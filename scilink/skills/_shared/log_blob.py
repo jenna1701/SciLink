@@ -14,61 +14,54 @@ and measures each diameter on the original image (shared with the band-pass tool
 """
 import numpy as np
 from skimage.feature import blob_log
+from skimage.filters import gaussian
 from .blob_detect import _norm, _mask_annotation, _measure_diameter
-
-
-def _detect_log(n, excl, radius_px, p):
-    """blob_log on one polarity (n oriented so objects are bright)."""
-    img = n.copy()
-    if excl.any():
-        img[excl] = np.median(n[~excl])          # blank annotation region
-    sig = radius_px / np.sqrt(2.0)               # LoG sigma for the object radius
-    blobs = blob_log(img, min_sigma=max(1.0, sig * p["sigma_lo"]),
-                     max_sigma=sig * p["sigma_hi"], num_sigma=p["num_sigma"],
-                     threshold=None, threshold_rel=p["threshold_rel"],
-                     overlap=p["overlap"], exclude_border=False)
-    return blobs                                  # rows: (y, x, sigma)
 
 
 def log_blob_detect(image_array, object_diameter_nm, pixel_size_nm,
                     polarity="auto", params=None):
+    """Thin, faithful wrapper around skimage.feature.blob_log.
+
+    It passes `blob_log` through unchanged (its `threshold_rel` / sigma range /
+    overlap are exposed for the agent to tune), and adds ONLY the value-adds
+    `blob_log` lacks: intensity-polarity selection, scale-bar/annotation masking,
+    a loose object-scale size filter, and a calibrated diameter for each blob.
+    It deliberately does NOT add a contrast/SNR gate — that gate is what made an
+    earlier version under-detect faint cores and trail raw `blob_log`."""
     g = np.asarray(image_array, float)
     if g.ndim == 3:
         g = g[..., :3].mean(-1) if g.shape[2] in (3, 4) else g[..., 0]
     H, W = g.shape
     px = float(pixel_size_nm)
     radius_px = (float(object_diameter_nm) / px) / 2.0
-    p = dict(sigma_lo=0.5, sigma_hi=1.6, num_sigma=5, threshold_rel=0.06,
-             overlap=0.5, snr_min=2.0,
-             d_min_nm=0.3 * object_diameter_nm, d_max_nm=3.0 * object_diameter_nm)
+    sig = radius_px / np.sqrt(2.0)               # LoG sigma for the object radius
+    p = dict(sigma_lo=0.6, sigma_hi=1.6, num_sigma=5, threshold_rel=0.1,
+             overlap=0.5, d_min_nm=0.3 * object_diameter_nm,
+             d_max_nm=3.0 * object_diameter_nm)
     p.update(params or {})
 
     excl = _mask_annotation(g)
     n = _norm(g)
-    from skimage.filters import gaussian
-    cands = {"bright": n, "dark": 1.0 - n}
     order = [polarity] if polarity in ("bright", "dark") else ["bright", "dark"]
 
     best = None
     for pol in order:
-        nn = cands[pol]
-        flat = nn - gaussian(nn, radius_px * 1.6)
-        # local background noise for the per-blob SNR gate
-        bnoise = flat[~excl].std() + 1e-12
-        blobs = _detect_log(nn, excl, radius_px, p)
-        objs = []
-        for y, x, sig in blobs:
+        nn = n if pol == "bright" else 1.0 - n     # blob_log finds bright maxima
+        img = nn.copy()
+        if excl.any():
+            img[excl] = np.median(nn[~excl])        # blank annotation region
+        flat = nn - gaussian(nn, radius_px * 1.6)   # for calibrated sizing only
+        locbg = np.median(flat[~excl]) if (~excl).any() else float(np.median(flat))
+        blobs = blob_log(img, min_sigma=max(1.0, sig * p["sigma_lo"]),
+                         max_sigma=sig * p["sigma_hi"], num_sigma=p["num_sigma"],
+                         threshold=None, threshold_rel=p["threshold_rel"],
+                         overlap=p["overlap"], exclude_border=False)
+        objs, contrasts = [], []
+        for y, x, s in blobs:
             y, x = int(y), int(x)
             if excl[y, x]:
                 continue
-            r_px = sig * np.sqrt(2.0)
-            # per-blob contrast SNR (object is bright in `flat`)
-            yy0, yy1 = max(0, y - int(r_px)), min(H, y + int(r_px) + 1)
-            xx0, xx1 = max(0, x - int(r_px)), min(W, x + int(r_px) + 1)
-            patch = flat[yy0:yy1, xx0:xx1]
-            snr = (flat[y, x] - np.median(flat[~excl])) / bnoise
-            if snr < p["snr_min"]:
-                continue
+            r_px = s * np.sqrt(2.0)
             d_meas = _measure_diameter(flat, y, x, r_px, px, nominal_r_px=radius_px)
             d_nm = d_meas if d_meas else 2.0 * r_px * px
             if d_nm < p["d_min_nm"] or d_nm > p["d_max_nm"]:
@@ -76,12 +69,17 @@ def log_blob_detect(image_array, object_diameter_nm, pixel_size_nm,
             border = x < radius_px or y < radius_px or x > W - radius_px or y > H - radius_px
             R = int(r_px)
             objs.append(dict(cy=float(y), cx=float(x), diameter_nm=round(float(d_nm), 3),
-                             contrast_snr=round(float(snr), 1), border=bool(border),
+                             border=bool(border),
                              bbox=(max(0, y - R), max(0, x - R), min(H, y + R), min(W, x + R))))
-        score = len(objs) * (np.median([o["contrast_snr"] for o in objs]) if objs else 0.0)
-        if best is None or score > best[0]:
-            best = (score, pol, objs)
-    score, pol_used, objs = best
+            contrasts.append(float(flat[y, x] - locbg))
+        # Polarity selection (NOT a per-blob gate): the CORRECT polarity has the
+        # objects as genuinely high-contrast bright maxima, so its MEDIAN per-blob
+        # contrast is higher. Median (not a sum) is robust to the wrong polarity
+        # inflating its score by detecting many weak speckle blobs.
+        pol_score = float(np.median(contrasts)) if contrasts else -1e9
+        if best is None or pol_score > best[0]:
+            best = (pol_score, pol, objs)
+    _, pol_used, objs = best
 
     if not objs:
         return dict(n_detected=0, polarity_used=pol_used,
@@ -130,7 +128,11 @@ TOOL_SPEC = ToolSpec(
             "Approximate particle diameter in nm — sets the LoG scale."},
         "pixel_size_nm": {"type": "number", "description": "nm per pixel (calibration)."},
         "polarity": {"type": "string", "description":
-            "'auto' (default) tries dark/bright and keeps the better; or 'dark'/'bright'."},
+            "SET THIS from the image — you can see whether the particles are darker "
+            "('dark', e.g. ferritin/AuNP cores) or brighter ('bright') than the "
+            "background. 'auto' is only a fallback and can MIS-PICK on dense fields "
+            "where both the dark cores and the bright gaps between them are strong "
+            "features (e.g. ferritin), so prefer setting it explicitly."},
         "params": {"type": "object", "description":
             "Tunable knobs — ADJUST these from what you see in the result vs the "
             "image; the defaults are a starting point, not a fixed answer: "
