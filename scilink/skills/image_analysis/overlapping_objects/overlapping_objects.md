@@ -26,13 +26,15 @@ fringes) silently under-counts the population.
 ### foundational
 **Detect particles with the method that fits the image — choose by packing and
 contrast (you can see it).** For **densely-packed or faint small cores**,
-`skimage.feature.blob_log` (scale-space LoG) sized to the core radius is
-excellent and is usually the right first choice — it finds each core as its own
-maximum without merging. Whichever you use, **set the polarity from the image**
-(dark vs. bright objects) and **tune the detection threshold from the overlay**
-(blob_log over-detects at a default threshold; raise it until the count matches
-what you see). For **well-separated** objects, Otsu + connected components. For
-**touching** objects, SAM.
+scale-space LoG blob detection is the right first choice — it finds each core as
+its own maximum without merging. Use **`log_blob_detect`** for it: it is a
+faithful SUPERSET of `skimage.feature.blob_log` (passes every native arg through,
+so it equals raw `blob_log`) plus polarity handling, scale-bar masking, and
+calibrated sizing for free — so prefer it over hand-calling `blob_log`. **Set
+`polarity` from the image** (dark vs. bright objects) and **tune `threshold_rel`
+from the overlay** (LoG over-detects at a default threshold; raise it until the
+count matches what you see). For **well-separated** objects, Otsu + connected
+components. For **touching** objects, SAM.
 
 Two registered tools **add value in specific FAILURE MODES — reach for them when
 your own detection mis-fires, not by default** (do not route a case to a tool
@@ -50,12 +52,14 @@ that `blob_log`/Otsu already handle well):
   hand-calling `blob_log` to get those for free; tune `threshold_rel` and set
   `polarity` from the overlay exactly as you would with raw `blob_log`.
 
-Both take `object_diameter_nm` + `pixel_size_nm` and a `polarity` you should
-**set from the image** (dark vs. bright; `auto` is only a fallback), and return
-per-object `bbox` for a per-object property step. **Their sensitivity knobs are
-exposed and meant to be tuned** — if the overlay shows under/over-detection,
-re-run with adjusted `params` (`threshold_rel` / `k_thresh` / `snr_min`) until it
-matches the image. **A dense field on a speckled background is the hard gap**
+Both return per-object `bbox` for a per-object property step, take a `polarity`
+you should **set from the image** (dark vs. bright; `auto` is only a fallback),
+and expose their detection knobs to **tune from the overlay**: `log_blob_detect`
+takes the native `blob_log` args directly (mainly `threshold_rel`, plus
+`min_sigma`/`max_sigma` or `object_diameter_nm`+`pixel_size_nm` for the scale);
+`scale_matched_blob_detect` takes a `params` dict (`k_thresh` / `snr_min`).
+Re-run with adjusted values until the overlay matches the image. **A dense field
+on a speckled background is the hard gap**
 (band-pass merges, plain `blob_log` over-detects the speckle): there, prefer
 `blob_log`/`log_blob_detect` with a raised `threshold_rel` (or a light
 pre-smoothing), and verify the overlay. Use SAM / boundary routes below only for
