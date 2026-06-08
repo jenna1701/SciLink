@@ -36,21 +36,12 @@ from the overlay** (LoG over-detects at a default threshold; raise it until the
 count matches what you see). For **well-separated** objects, Otsu + connected
 components. For **touching** objects, SAM.
 
-Two registered tools **add value in specific FAILURE MODES — reach for them when
-your own detection mis-fires, not by default** (do not route a case to a tool
-that `blob_log`/Otsu already handle well):
-- **`scale_matched_blob_detect`** — use when detection **OVER-detects on a
-  speckled / noisy background**: its scale-matched band-pass + band-pass-SNR gate
-  reject the fine texture that watershed/Otsu/`blob_log` fragment into false
-  particles (the case where naive thresholding craters). Best for SPARSE
-  particles on a grainy background.
-- **`log_blob_detect`** — a faithful SUPERSET of `skimage.feature.blob_log`: it
-  passes every native `blob_log` arg straight through (so it equals `blob_log`
-  with no annotation present) and adds opt-in conveniences — `polarity='dark'`
-  inversion (`blob_log` finds only bright blobs), scale-bar masking, sigma-from-
-  `object_diameter_nm`, and a calibrated nm diameter per blob. Use it instead of
-  hand-calling `blob_log` to get those for free; tune `threshold_rel` and set
-  `polarity` from the overlay exactly as you would with raw `blob_log`.
+A second registered tool, **`scale_matched_blob_detect`**, addresses ONE specific
+FAILURE MODE — when detection **OVER-detects on a speckled / noisy background**:
+its scale-matched band-pass + band-pass-SNR gate reject the fine texture that
+watershed / Otsu / `blob_log` fragment into false particles. Best for SPARSE
+particles on a grainy background — reach for it **when the LoG detector
+over-detects on speckle, not by default**.
 
 Both return per-object `bbox` for a per-object property step, take a `polarity`
 you should **set from the image** (dark vs. bright; `auto` is only a fallback),
