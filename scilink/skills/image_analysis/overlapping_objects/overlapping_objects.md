@@ -42,9 +42,13 @@ that `blob_log`/Otsu already handle well):
   reject the fine texture that watershed/Otsu/`blob_log` fragment into false
   particles (the case where naive thresholding craters). Best for SPARSE
   particles on a grainy background.
-- **`log_blob_detect`** — a convenience wrapper around `blob_log` that adds
-  scale-bar/annotation masking + calibrated diameter measurement; equivalent to
-  calling `blob_log` yourself, so use either for the dense/faint case.
+- **`log_blob_detect`** — a faithful SUPERSET of `skimage.feature.blob_log`: it
+  passes every native `blob_log` arg straight through (so it equals `blob_log`
+  with no annotation present) and adds opt-in conveniences — `polarity='dark'`
+  inversion (`blob_log` finds only bright blobs), scale-bar masking, sigma-from-
+  `object_diameter_nm`, and a calibrated nm diameter per blob. Use it instead of
+  hand-calling `blob_log` to get those for free; tune `threshold_rel` and set
+  `polarity` from the overlay exactly as you would with raw `blob_log`.
 
 Both take `object_diameter_nm` + `pixel_size_nm` and a `polarity` you should
 **set from the image** (dark vs. bright; `auto` is only a fallback), and return
