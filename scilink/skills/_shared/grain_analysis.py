@@ -177,6 +177,13 @@ def grain_analysis(image, pixel_size=1.0, pixel_unit="px", mode="auto",
         skel &= ~contam
     frac, tot_len, str_len, segments = straight_boundary_fraction(
         skel, min_len_px=max(10, int(min_len_frac * min(H, W))))
+    # The straight fraction is only a TWIN proxy when there is a curved-boundary
+    # baseline to contrast straight twins against. If almost the entire boundary
+    # network is straight (idealized / polygonal / faceted / columnar grains),
+    # the straightness says nothing about twins — flag it so callers report ~0
+    # rather than the raw fraction. (Real recrystallized twinned microstructures
+    # keep curved general boundaries, so they sit below this threshold.)
+    twin_proxy_reliable = bool(frac < 0.9)
 
     n = len(grains)
     out = dict(
@@ -185,11 +192,15 @@ def grain_analysis(image, pixel_size=1.0, pixel_unit="px", mode="auto",
         grain_diameter=_describe(diam_px, pixel_size),
         grain_diameters=np.array(diam_px) * pixel_size,
         grain_area=_describe(area_px, px2),
-        twin_boundary_fraction=frac,
+        straight_boundary_fraction=frac,
+        twin_boundary_fraction=(frac if twin_proxy_reliable else 0.0),
+        twin_proxy_reliable=twin_proxy_reliable,
         boundary_length_px=tot_len, straight_length_px=str_len,
         n_straight_segments=len(segments),
-        mean_twin_segments_per_grain=len(segments) / max(n, 1),
-        label_map=ws, boundary_skeleton=skel, straight_segments=segments,
+        mean_twin_segments_per_grain=(len(segments) / max(n, 1)
+                                      if twin_proxy_reliable else 0.0),
+        label_map=ws, boundary_skeleton=skel,
+        straight_segments=(segments if twin_proxy_reliable else []),
     )
     if mode == "ipf":
         area_tot = sum(pole_area.values()) + 1e-9

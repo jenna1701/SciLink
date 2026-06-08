@@ -80,8 +80,12 @@ res = grain_analysis(
 
 n          = res["n_grains"]
 diam_um    = res["grain_diameters"]               # per-grain equiv diameter
-twin_frac  = res["twin_boundary_fraction"]        # straight-boundary fraction
-twin_per   = res["mean_twin_segments_per_grain"]
+twin_frac  = res["twin_boundary_fraction"]        # ALREADY 0 when the proxy is
+                                                  # unreliable (all-straight network)
+straight_frac = res["straight_boundary_fraction"] # raw straight-boundary fraction
+twin_reliable = res["twin_proxy_reliable"]        # False -> no curved baseline,
+                                                  # report twins ~0 (see interp.)
+twin_per   = res["mean_twin_segments_per_grain"]  # also 0 when unreliable
 if res["mode"] == "ipf":
     texture = res["texture"]                      # per-pole count/area fractions
     dominant = res["dominant_texture"]
@@ -92,6 +96,14 @@ straight segments (`res["straight_segments"]`) on the image, and plot the
 `grain_diameters` histogram. Report: n grains, equivalent-diameter stats,
 twin-boundary fraction + twin segments/grain, and (IPF) the texture pole
 fractions + dominant component.
+
+**Use the tool's twin outputs directly — do NOT run your own Hough/Canny twin
+detection.** `twin_boundary_fraction`, `mean_twin_segments_per_grain` and
+`straight_segments` are already set to 0 / empty when `twin_proxy_reliable` is
+False (an all-straight boundary network with no curved baseline), so following
+them gives the right answer (twins ≈ 0, no straight lines drawn) for idealized /
+polygonal microstructures without any extra code. If you want the raw value,
+report `straight_boundary_fraction` separately and clearly labelled as such.
 
 ## interpretation
 
