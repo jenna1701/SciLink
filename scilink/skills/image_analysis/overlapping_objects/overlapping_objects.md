@@ -30,17 +30,25 @@ Otsu / watershed / SAM **over-detect on a speckled or noisy background** or
 **under-detect low-contrast objects**. Those methods are *scale-blind*: they
 threshold or split without using the known object size, so they fragment
 fine texture (over-detection) or miss faint objects (under-detection), and
-tuning the threshold up/down just trades one failure for the other. The tool
-instead uses a **band-pass sized from the object diameter** (rejecting BOTH
-finer noise and large-scale background in one step), auto-selects intensity
-**polarity** (objects darker OR brighter than background — don't assume
-bright), masks burned-in **scale-bar/annotation** regions, and measures each
-diameter on the original image. Pass `object_diameter_nm` (from the
-objective/calibration) and `pixel_size_nm`; it returns positions, calibrated
-diameters, and a per-object `bbox` to crop for any per-object property step
-(see *Per-object characterization* below). Fall back to the classical/SAM
-routes below only when this does not fit (e.g. genuinely touching objects
-needing instance masks, or boundary-delineated grains).
+tuning the threshold up/down just trades one failure for the other. Two complementary scale-matched detectors are registered; **pick by the
+packing/contrast of the field** (you can see the image — choose, don't guess):
+- **`scale_matched_blob_detect`** (band-pass + watershed) — for **SPARSE /
+  well-separated** particles on a **noisy/speckled** background; its band-pass
+  SNR gate gives strong **speckle rejection** (fixes over-detection).
+- **`log_blob_detect`** (scale-space LoG / `blob_log`) — for **DENSELY-PACKED
+  or FAINT** small cores (ferritin, dense monolayers), where a region-growing
+  detector merges touching cores and under-counts.
+
+Both take `object_diameter_nm` (from the objective/calibration) + `pixel_size_nm`,
+auto-select intensity **polarity**, mask burned-in **scale-bar/annotation**
+regions, measure each diameter on the original image, and return per-object
+`bbox` for a per-object property step (see *Per-object characterization*). **Their
+sensitivity knobs are exposed and meant to be tuned** — if the overlay shows
+under- or over-detection, re-run with the adjusted `params` the spec describes
+(e.g. `threshold_rel` / `k_thresh` / `snr_min`) until it matches the image; the
+right sensitivity is image-specific. Fall back to the classical/SAM routes below
+only when neither fits (genuinely touching objects needing instance masks, or
+space-filling boundary-delineated grains).
 
 **Check next whether the problem actually needs instance segmentation.**
 Several common cases resolve with simple classical methods before

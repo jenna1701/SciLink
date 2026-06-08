@@ -223,18 +223,18 @@ TOOL_SPEC = ToolSpec(
                "pixel_size_nm, polarity='auto', params=None) -> dict"),
     agents=["image_analysis"],
     when_to_use=(
-        "Use to DETECT / COUNT / SIZE DISCRETE, DISPERSED particles/objects on a "
-        "background (nanoparticles, droplets, pores, protein assemblies) when global "
-        "thresholding/watershed/SAM over-detects on a speckled/noisy background or "
-        "under-detects low-contrast objects. The object diameter is known from the "
-        "objective/calibration; this uses it to set a scale-matched band-pass that "
-        "rejects both fine noise and large-scale background. Pair it with a "
-        "per-object step (e.g. fourier_reflection_map or a local FFT on each "
-        "returned bbox) when a per-object property such as lattice orientation is "
-        "also required. NOT for SPACE-FILLING, boundary-delineated regions "
-        "(polycrystalline grains, tessellated cells) — those have no background "
-        "between objects and a blob detector under-detects them; use the "
-        "boundary-segmentation route (watershed on the grain-boundary map) instead."
+        "Use to DETECT / COUNT / SIZE discrete particles that are SPARSE / "
+        "WELL-SEPARATED on a noisy or SPECKLED background (nanoparticles, droplets, "
+        "pores, protein assemblies) — its band-pass + band-pass-SNR gate give strong "
+        "SPECKLE REJECTION, fixing the over-detection that global thresholding/"
+        "watershed/SAM produce on grainy frames. The object diameter is known from "
+        "the objective/calibration. Pair with a per-object step (fourier_reflection_"
+        "map or a local FFT on each returned bbox) for a per-object property. "
+        "Choose the RIGHT detector: for DENSELY-PACKED or FAINT small cores (e.g. "
+        "ferritin, dense monolayers) this merges/under-counts — use log_blob_detect "
+        "(scale-space LoG) instead. For SPACE-FILLING grains (polycrystalline, "
+        "tessellated cells) use boundary segmentation. For genuinely touching "
+        "objects needing instance masks, use run_sam_analysis."
     ),
     parameters={
         "object_diameter_nm": {"type": "number", "description":
@@ -246,9 +246,14 @@ TOOL_SPEC = ToolSpec(
             "'auto' (default) tries dark- and bright-on-background and keeps the "
             "better; or force 'dark' / 'bright'."},
         "params": {"type": "object", "description":
-            "Optional overrides: k_thresh (band-pass threshold sigma, default 3.0), "
-            "snr_min (per-object contrast/noise gate, default 1.5), solidity_min "
-            "(default 0.8), d_min_nm / d_max_nm (size filter)."},
+            "Tunable knobs — ADJUST from the result vs the image; defaults are a "
+            "starting point: * k_thresh (band-pass threshold sigma, default 3.0) and "
+            "* snr_min (per-object band-pass-SNR gate, default 5.0): RAISE either if "
+            "speckle/noise is over-detected; LOWER if real objects are missed. "
+            "* solidity_min (default 0.8): lower for irregular objects being dropped. "
+            "* d_min_nm / d_max_nm (size filter, default 0.4x/4x the object size): "
+            "tighten to a known band. Re-run with adjusted values until the overlay "
+            "matches the image."},
     },
     required=["image_array", "object_diameter_nm", "pixel_size_nm"],
     returns=(
