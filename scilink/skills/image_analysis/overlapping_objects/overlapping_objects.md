@@ -56,6 +56,16 @@ on a speckled background is the hard gap**
 pre-smoothing), and verify the overlay. Use SAM / boundary routes below only for
 genuinely touching objects or space-filling grains.
 
+**Keep detection simple — one well-chosen detector, tuned, is almost always
+enough.** When the count looks wrong, first **tune that detector's knobs**
+(threshold, polarity, scale) and re-check the overlay; do NOT reach for a second
+detector or bolt on an aggressive post-detection "validation"/filter pass.
+Stacking detectors and over-filtering is a common way to turn a working detection
+into a failure — it frequently **zeroes out recall** (an empty/near-empty mask,
+or far fewer objects than are plainly visible). Add a second stage only when a
+single tuned detector demonstrably cannot separate real objects from artifacts,
+and verify the overlay after every change.
+
 **Check next whether the problem actually needs instance segmentation.**
 Several common cases resolve with simple classical methods before
 reaching for a heavy model like SAM:
