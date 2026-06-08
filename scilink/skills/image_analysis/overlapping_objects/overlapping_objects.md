@@ -46,15 +46,16 @@ that `blob_log`/Otsu already handle well):
   scale-bar/annotation masking + calibrated diameter measurement; equivalent to
   calling `blob_log` yourself, so use either for the dense/faint case.
 
-Both take `object_diameter_nm` + `pixel_size_nm`, auto-select **polarity**, and
-return per-object `bbox` for a per-object property step. **Their sensitivity
-knobs are exposed and meant to be tuned** — if the overlay shows under/over-
-detection, re-run with adjusted `params` (`threshold_rel` / `k_thresh` /
-`snr_min`) until it matches the image. **A dense field on a speckled background
-is the hard gap** (band-pass merges, plain `blob_log` over-detects the speckle):
-there, prefer `blob_log`/`log_blob_detect` with a raised `threshold_rel` (or a
-light pre-smoothing), and verify the overlay. Use SAM / boundary routes below
-only for genuinely touching objects or space-filling grains.
+Both take `object_diameter_nm` + `pixel_size_nm` and a `polarity` you should
+**set from the image** (dark vs. bright; `auto` is only a fallback), and return
+per-object `bbox` for a per-object property step. **Their sensitivity knobs are
+exposed and meant to be tuned** — if the overlay shows under/over-detection,
+re-run with adjusted `params` (`threshold_rel` / `k_thresh` / `snr_min`) until it
+matches the image. **A dense field on a speckled background is the hard gap**
+(band-pass merges, plain `blob_log` over-detects the speckle): there, prefer
+`blob_log`/`log_blob_detect` with a raised `threshold_rel` (or a light
+pre-smoothing), and verify the overlay. Use SAM / boundary routes below only for
+genuinely touching objects or space-filling grains.
 
 **Check next whether the problem actually needs instance segmentation.**
 Several common cases resolve with simple classical methods before
