@@ -104,6 +104,19 @@ Only reach for SAM when objects genuinely touch or overlap AND no
 visible boundary feature delineates them — the case where classical
 approaches would merge adjacent objects into single blobs.
 
+**Also crop-then-SAM in two specific regimes a single blob scale cannot
+handle:** (a) features span a **wide size range** or are densely packed within
+**distinct sub-regions** (e.g. one large feature plus many fine ones in the same
+ROI — no single blob diameter covers both); or (b) **topographically-shaded
+surface features** with a specular highlight + cast shadow (blisters, bubbles,
+pits) where a bright-blob detector keys on the saturated highlight, not the true
+object extent. In these cases define each sub-region as an ROI, **crop it,
+upscale, and run `run_sam_analysis` per crop**, remapping coordinates back; a
+single scale-matched bright-blob pass under-counts the fine population. This is
+the regime where you deliberately **switch detector family** — it is the
+explicit exception to, not a contradiction of, the "tune one detector, don't
+over-stack" guidance above (which governs the ordinary single-scale case).
+
 **Per-object characterization (decoupled from detection).** When the
 objective is "detect the objects AND measure property X per object"
 (e.g. *detect the nanoparticles and FFT each to get its lattice
