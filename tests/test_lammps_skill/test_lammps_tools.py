@@ -270,6 +270,14 @@ class TestValidateScriptValid:
         assert r["valid"] is True, f"Unexpected errors: {r['errors']}"
         assert r["boundary"] == ["p", "p", "s"]
 
+    def test_valid_create_atoms(self, script_dir):
+        # A self-contained deck builds its system in-place with create_atoms
+        # (no read_data/read_restart) — a valid, common pattern that must pass.
+        r = lammps_tools.validate_script(str(script_dir / "valid_create_atoms.lammps"))
+        assert r["valid"] is True, f"Unexpected errors: {r['errors']}"
+        assert not any("read_data" in e or "system definition" in e
+                       for e in r["errors"])
+
 
 # =====================================================================
 # validate_script — error scripts caught
