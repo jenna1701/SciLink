@@ -2589,6 +2589,22 @@ Compare the visualization against the original image.
 - For boundary/edge tasks: what fraction of visible boundaries were traced?
 - For texture/phase tasks: what fraction of the image area was correctly classified?
 - For measurement tasks: were all requested quantities extracted?
+
+**Recall check — a clean overlay is NOT proof of completeness.** Missed objects
+do not appear as errors: a faint, low-contrast, or partially-occluded target
+that was skipped just looks like background, so an overlay with no spurious
+marks can still be badly incomplete. When the objective is to detect, count, or
+segment a population ("detect all …", "statistics of …", "characterize the
+distribution of …"), actively scan the ORIGINAL image for clearly-visible
+target objects that are NOT marked in the visualization, estimate the fraction
+missed, and lower Completeness by that fraction (also list them under
+`missed_features`). Treat under-detection (missing real objects) as exactly as
+serious as over-detection (adding false ones) — do NOT score misses with a
+lighter touch than false positives. This does NOT apply to data-driven
+decompositions (NMF/PCA/ICA/FFT), which produce basis patterns rather than a
+per-object census, and it does not mean nitpicking a few small/ambiguous
+features (see below) — it means catching the case where a substantial,
+clearly-visible fraction of the population was left undetected.
 Score: 0.0 (nothing captured) to 1.0 (everything captured).
 
 ### B. Correctness — how much of the output corresponds to real structures?
