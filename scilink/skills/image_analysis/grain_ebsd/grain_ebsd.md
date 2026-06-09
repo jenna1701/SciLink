@@ -1,6 +1,6 @@
 ---
-description: "Polycrystalline GRAIN-MAP analysis — a space-filling tessellation of grains from an EBSD IPF colour map OR grayscale electron-channeling / BSE contrast. Segments the grains, reports the equivalent-diameter size distribution, the straight-grain-boundary (annealing-twin / Sigma3) fraction and twin-segment count per grain, and IPF texture (pole fractions). Use ONLY when the field is tiled by contiguous grains. NOT for discrete particles/precipitates/indents/loops on a matrix (use overlapping_objects), single-feature geometry (use region_morphometry), or atomic-lattice images (use atomic_stem)."
-technique: "EBSD (IPF), SEM channeling/ECCI/BSE grain maps, optical grain maps"
+description: "EBSD IPF-colour-MAP analysis, and the EBSD-specific extras for grain maps: per-grain crystallographic TEXTURE (cubic IPF poles) and the straight-grain-boundary (annealing-twin / Sigma3) fraction. PRIMARY use is an RGB IPF orientation map. For PLAIN grain segmentation + size distribution on a GRAYSCALE / optical / channeling micrograph, prefer overlapping_objects (it segments space-filling grains well); only use this skill on grayscale when the objective specifically asks for twin-boundary character or texture that overlapping_objects cannot express. NOT for discrete particles/precipitates/indents/loops (overlapping_objects), single-feature geometry (region_morphometry), or atomic-lattice images (atomic_stem)."
+technique: "EBSD (IPF colour maps); grain-boundary-character / texture extras for grain maps"
 ---
 # Grain / EBSD Microstructure Skill
 
@@ -14,15 +14,16 @@ input types:
 - **grayscale channeling / BSE** image (grains by intensity contrast) →
   `mode="gray"`. (`mode="auto"` chooses by channel variance.)
 
-> **PREFERRED TOOL.** Use `grain_analysis` (imported below) for the core
-> segmentation + size distribution + straight-boundary fraction + texture — it
-> gives solid, hole-free grain labels a discrete-object/blob detector cannot.
-> You ARE free to compute **additional task-specific metrics on its outputs**
-> (e.g. ASTM grain-size number G from `res["grain_diameters"]`/areas, shape
-> descriptors) and to tune `boundary_sensitivity` — that is expected, not a
-> deviation. Reach for a custom pipeline only if the tool genuinely cannot
-> express the deliverable. Compute the segmentation once via `grain_analysis`;
-> add derived metrics on top.
+> **PREFERRED TOOL.** Use `grain_analysis` (imported below) for the
+> segmentation. `res["label_map"]` is the FINAL grain map — it is hole-free and
+> already assigns intra-grain etch/channeling **speckle and texture to their
+> grain**. Do NOT re-segment it, do NOT treat bright/dark intra-grain speckle as
+> holes or separate objects, and do NOT run your own boundary/Hough/twin
+> detection — `twin_boundary_fraction` / `straight_segments` from the tool are
+> already correct (0 / empty when twins are not resolvable). You ARE free to
+> compute **derived metrics on the tool's outputs** (e.g. ASTM grain-size number
+> G from `res["grain_diameters"]`/areas) and to tune `boundary_sensitivity`.
+> Reach for a custom pipeline only if the tool genuinely fails at runtime.
 
 ## planning
 
