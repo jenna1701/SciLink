@@ -497,6 +497,8 @@ Assume user runs agent from project directory. For example, when user says "file
 **MCP OUTPUT PERSISTENCE:**
 - When an MCP tool returns generated code, protocols, or other text artifacts, call `save_file`
   to persist the output BEFORE calling any other tool.
+- Write large artifacts in chunks (`save_file` for the first chunk, `append_file` for the rest);
+  a single oversized tool argument can be truncated and lost.
 
 **BEHAVIOR:**
 - Extract ALL paths mentioned by user (papers, data, code, reports)
@@ -1466,6 +1468,38 @@ class PlanningOrchestratorAgent:
         except Exception as e:
             logging.warning(f"Auto-checkpoint failed: {e}")
 
+    @staticmethod
+    def _parse_tool_args(tool_call, finish_reason=None):
+        """Parse a tool call's JSON arguments, failing loud on bad input.
+
+        Returns (args, None) on success, or (None, error_json) when the
+        arguments string is malformed or truncated. The error_json is handed
+        back to the model as the tool result so it can recover (#270) —
+        silently substituting ``args = {}`` surfaces as a raw TypeError from
+        the tool itself, which hides the real cause and sends the model into
+        an unrecoverable retry loop.
+        """
+        try:
+            return json.loads(tool_call.function.arguments), None
+        except json.JSONDecodeError:
+            if finish_reason == "length":
+                cause = ("the arguments JSON was truncated — the response "
+                         "hit the output-token limit")
+            else:
+                cause = ("the arguments string was not valid JSON — "
+                         "typically broken escaping of quotes/newlines "
+                         "inside a large string value")
+            return None, json.dumps({
+                "status": "error",
+                "message": (
+                    f"Tool call discarded: {cause}. The tool was NOT "
+                    "executed. Do not retry with one large argument. For "
+                    "large text content, write the file in chunks: "
+                    "save_file with the first chunk, then append_file for "
+                    "each remaining chunk."
+                ),
+            })
+
     def _handle_openai_chat(self, user_input: str) -> str:
         """Handle chat with OpenAI-compatible models with manual function calling loop."""
         from openai import OpenAI
@@ -1530,13 +1564,20 @@ class PlanningOrchestratorAgent:
 
             self._print_assistant_reasoning(message.content)
 
+            finish_reason = getattr(response.choices[0], "finish_reason", None)
+
             for tool_call in message.tool_calls:
                 func_name = tool_call.function.name
-                args = json.loads(tool_call.function.arguments)
+                args, args_error = self._parse_tool_args(tool_call, finish_reason)
 
                 print(f"  🔧 Calling tool: {func_name}")
 
-                result = self.tools.execute_tool(func_name, **args)
+                if args_error is not None:
+                    print("    ⚠️ Malformed/truncated tool arguments — "
+                          "returning recovery hint to the model")
+                    result = args_error
+                else:
+                    result = self.tools.execute_tool(func_name, **args)
 
                 self.messages.append({
                     "role": "tool",
@@ -1646,17 +1687,21 @@ class PlanningOrchestratorAgent:
 
             self._print_assistant_reasoning(content)
 
+            finish_reason = getattr(response.choices[0], "finish_reason", None)
+
             # Execute each tool call
             for tool_call in tool_calls:
                 func_name = tool_call.function.name
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    args = {}
+                args, args_error = self._parse_tool_args(tool_call, finish_reason)
 
                 print(f"  🔧 Calling tool: {func_name}")
-                
-                result = self.tools.execute_tool(func_name, **args)
+
+                if args_error is not None:
+                    print("    ⚠️ Malformed/truncated tool arguments — "
+                          "returning recovery hint to the model")
+                    result = args_error
+                else:
+                    result = self.tools.execute_tool(func_name, **args)
                 
                 self.messages.append({
                     "role": "tool",

@@ -3041,9 +3041,13 @@ class OrchestratorTools:
             func=save_file,
             name="save_file",
             description=(
-                "Save text content (code, protocols, scripts, notes) to a file "
-                "in the session directory. Use this to persist generated code, "
-                "instrument protocols, or any text artifact."
+                "Save text content (protocols, notes, small scripts) to a file "
+                "in the session directory. Large content may not survive the "
+                "trip as a single tool-call argument — for anything long "
+                "(roughly >100 lines), save the first chunk with save_file and "
+                "the rest with append_file. For executable analysis/"
+                "optimization code, prefer generate_implementation_code, which "
+                "generates and persists the script itself."
             ),
             parameters={
                 "filename": {
@@ -3056,6 +3060,75 @@ class OrchestratorTools:
                 "content": {
                     "type": "string",
                     "description": "The text content to write to the file.",
+                },
+                "subfolder": {
+                    "type": "string",
+                    "description": (
+                        "Optional subfolder within the session directory, "
+                        "e.g. 'protocols' or 'scripts'. Created if it doesn't exist."
+                    ),
+                },
+            },
+            required=["filename", "content"],
+        )
+
+        # 9b. APPEND FILE
+        def append_file(filename: str, content: str, subfolder: str = ""):
+            """
+            Append text content to a file in the session directory (created
+            if it doesn't exist). Companion to save_file for chunked writes
+            of large content.
+            """
+            print(f"  ⚡ Tool: Appending to file '{filename}'...")
+
+            safe_name = Path(filename).name
+            if not safe_name:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Invalid filename.",
+                })
+
+            target_dir = self.orch.base_dir
+            if subfolder:
+                safe_sub = Path(subfolder).name
+                target_dir = target_dir / safe_sub
+            target_dir.mkdir(parents=True, exist_ok=True)
+            dest = target_dir / safe_name
+
+            try:
+                with open(dest, "a", encoding="utf-8") as f:
+                    f.write(content)
+                print(f"    💾 Appended: {dest}")
+                return json.dumps({
+                    "status": "success",
+                    "path": str(dest),
+                    "size_bytes": dest.stat().st_size,
+                })
+            except Exception as e:
+                logging.error(f"append_file failed: {e}")
+                return json.dumps({
+                    "status": "error",
+                    "message": str(e),
+                })
+
+        self._register_tool(
+            func=append_file,
+            name="append_file",
+            description=(
+                "Append text content to a file in the session directory "
+                "(created if it doesn't exist). Use together with save_file "
+                "to write large files in chunks — save_file for the first "
+                "chunk, then append_file for each subsequent chunk — keeping "
+                "every chunk small enough to pass reliably as a tool argument."
+            ),
+            parameters={
+                "filename": {
+                    "type": "string",
+                    "description": "Name of the file to append to.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The text content to append to the file.",
                 },
                 "subfolder": {
                     "type": "string",
