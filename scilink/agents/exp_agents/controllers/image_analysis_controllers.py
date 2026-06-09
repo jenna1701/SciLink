@@ -3375,6 +3375,20 @@ Return JSON with:
 
                         _cur_level = _annealing_level
 
+                        # Optional: dump each verification iteration's visualization
+                        # for inspecting the refinement/annealing trajectory. Gated by
+                        # the DUMP_ITER_VIZ env var (a target directory); off by default,
+                        # best-effort so it never affects the analysis.
+                        _dump = os.environ.get("DUMP_ITER_VIZ")
+                        if _dump and current_result and current_result.get("visualization_bytes"):
+                            try:
+                                os.makedirs(_dump, exist_ok=True)
+                                with open(os.path.join(_dump,
+                                          f"iter{verification_iter:02d}_T{_cur_level}_q{v_score:.2f}.png"), "wb") as _f:
+                                    _f.write(current_result["visualization_bytes"])
+                            except Exception:
+                                pass
+
                         verification_attempts.append({
                             "result": current_result.copy() if current_result else {},
                             "verification": verification,
