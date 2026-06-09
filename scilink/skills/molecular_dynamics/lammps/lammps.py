@@ -541,8 +541,13 @@ def validate_script(
         errors.append("Missing 'units' command")
     if "atom_style" not in commands_seen:
         errors.append("Missing 'atom_style' command")
-    if "read_data" not in commands_seen and "read_restart" not in commands_seen:
-        errors.append("Missing 'read_data' or 'read_restart'")
+    # A system can be brought in from a data/restart file or built in-deck with
+    # create_atoms (after create_box + lattice/region) — all three are valid.
+    if not commands_seen & {"read_data", "read_restart", "create_atoms"}:
+        errors.append(
+            "Missing system definition — need 'read_data', 'read_restart', "
+            "or 'create_atoms'"
+        )
     if not result["has_run"] and not result["has_minimize"]:
         errors.append("No 'run' or 'minimize' — script does nothing")
 
