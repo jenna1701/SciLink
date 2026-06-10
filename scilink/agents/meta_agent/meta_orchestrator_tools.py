@@ -446,6 +446,7 @@ class MetaOrchestratorTools:
                                     to_domain: str = None, staged: str = None,
                                     into: str = None, technique: str = None) -> str:
             from ...skills._shared import _memory, _staging
+            from ...skills.loader import list_all_skills
 
             def _llm_call(prompt: str) -> str:
                 r = self.orch.model.generate_content(contents=[prompt])
@@ -453,11 +454,23 @@ class MetaOrchestratorTools:
 
             act = (action or "list").lower()
 
+            # Curated (built-in) skills are ALREADY available and auto-selected by
+            # the domain agents — surface them so the orchestrator has the full
+            # picture and never claims "no skill exists" or proposes consolidating
+            # a NEW skill that just duplicates a curated one.
+            try:
+                curated = list_all_skills()
+            except Exception:
+                curated = {}
+
             # --- skills (graduated_skills) ---
             if act == "list":
                 rows = _memory.list_memory(provisional=True)
-                print(f"  🧠 {len(rows)} provisional skill(s) in memory.")
+                print(f"  🧠 {len(rows)} provisional skill(s); "
+                      f"{sum(len(v) for v in curated.values())} curated skill(s) "
+                      f"already available.")
                 return json.dumps({"status": "success", "action": "list",
+                                   "curated_skills": curated,
                                    "provisional_skills": rows}, default=str)
 
             if act == "list_staged":
@@ -477,10 +490,13 @@ class MetaOrchestratorTools:
                 ]
                 print(f"  🧠 {len(rows)} staged solution(s) awaiting distillation "
                       f"({sum(1 for t in techniques if t['ready_to_consolidate'])} "
-                      f"technique(s) ready to consolidate; threshold {need}).")
+                      f"technique(s) ready to consolidate; threshold {need}); "
+                      f"{sum(len(v) for v in curated.values())} curated skill(s) "
+                      f"already available.")
                 return json.dumps({"status": "success", "action": "list_staged",
                                    "consolidate_threshold": need,
                                    "techniques": techniques,
+                                   "curated_skills": curated,
                                    "staged_solutions": rows}, default=str)
 
             try:
@@ -548,13 +564,22 @@ class MetaOrchestratorTools:
                 "`staged_solutions`); skills are produced from staged solutions two "
                 "ways, both review-gated: `upgrade` merges ONE staged solution into an "
                 "EXISTING skill, or `consolidate` distills all staged solutions of a "
-                "technique into a NEW (provisional) skill. Prefer `upgrade` when a "
-                "matching skill exists. Do NOT `consolidate` a technique into a new "
-                "skill until it has accumulated enough examples — `list_staged` reports "
-                "`ready_to_consolidate` per technique against `consolidate_threshold`; "
-                "if not ready, leave it staged to accumulate. Also manages already-"
-                "distilled provisional skills. Actions: `list` (provisional skills), "
-                "`list_staged` (staged solutions, by technique), `show` a skill, "
+                "technique into a NEW (provisional) skill. "
+                "IMPORTANT — full picture first: `list`/`list_staged` also return "
+                "`curated_skills` (the built-in skills ALREADY available and "
+                "auto-applied by the domain agents). Before suggesting anything, "
+                "consult it: a run that used a curated skill was NOT 'solved from "
+                "scratch with no skill', and you must NOT `consolidate` a NEW skill "
+                "that duplicates a curated one — if a curated skill already covers the "
+                "technique, prefer `upgrade`-ing it (or just improving it) over "
+                "creating a duplicate, or leave the solution staged. "
+                "Prefer `upgrade` when a matching skill exists. Do NOT `consolidate` a "
+                "technique into a new skill until it has accumulated enough examples — "
+                "`list_staged` reports `ready_to_consolidate` per technique against "
+                "`consolidate_threshold`; if not ready, leave it staged to accumulate. "
+                "Also manages already-distilled provisional skills. Actions: `list` "
+                "(provisional + curated skills), `list_staged` (staged solutions by "
+                "technique + curated skills), `show` a skill, "
                 "`promote`/`discard` a skill, `upgrade` (needs `staged` + `into`), "
                 "`consolidate` (needs `technique`). In autopilot, ASK the user before "
                 "upgrading/consolidating/promoting/discarding; in autonomous mode, "

@@ -22,12 +22,14 @@ different markers and post-processing), so this helper only owns the part that
 was actually duplicated and fragile.
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
 
 DATA_NAME = "data.npy"
 VIZ_NAME = "visualization.png"
+META_NAME = "metadata.json"
 
 
 def script_uses_canonical_input(script: str, data_name: str = DATA_NAME) -> bool:
@@ -40,7 +42,8 @@ def script_uses_canonical_input(script: str, data_name: str = DATA_NAME) -> bool
 
 def stage_and_run(executor, script, primary_array, item_dir, *,
                   data_name: str = DATA_NAME, viz_name: str = VIZ_NAME,
-                  aux: dict = None) -> dict:
+                  aux: dict = None, metadata: dict = None,
+                  meta_name: str = META_NAME) -> dict:
     """Stage ``primary_array`` as ``data_name`` in ``item_dir`` and run ``script``
     VERBATIM there (working_dir=item_dir), then collect the canonical viz.
 
@@ -48,12 +51,24 @@ def stage_and_run(executor, script, primary_array, item_dir, *,
     the primary (e.g. weights). Returns a dict with the raw executor result, its
     stdout/status, and the located visualization path/bytes — the caller parses
     its own stdout marker and assembles its result dict.
+
+    ``metadata`` (optional) — when a non-empty dict is given, it is written to
+    ``item_dir / meta_name`` (default ``metadata.json``) so the generated script
+    can read authoritative calibration (FOV, data_range, …) from a file instead
+    of guessing. Default ``None`` is a no-op: no file is written and existing
+    single/series behavior is unchanged.
     """
     item_dir = Path(item_dir)
     item_dir.mkdir(parents=True, exist_ok=True)
     np.save(item_dir / data_name, primary_array)
     for name, arr in (aux or {}).items():
         np.save(item_dir / name, arr)
+    if metadata:
+        try:
+            with open(item_dir / meta_name, "w") as _fh:
+                json.dump(metadata, _fh, indent=2, default=str)
+        except Exception:
+            pass   # sidecar is best-effort; never block execution on it
 
     viz = item_dir / viz_name
     viz.unlink(missing_ok=True)   # clear any stale viz before the run

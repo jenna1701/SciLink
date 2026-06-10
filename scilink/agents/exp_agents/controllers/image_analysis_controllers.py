@@ -1032,6 +1032,15 @@ class SkillSuggestionController:
             context_parts.append(f"Metadata: {str(sysinfo)[:1500]}")
         elif isinstance(sysinfo, str) and sysinfo.strip():
             context_parts.append(f"Metadata: {sysinfo.strip()[:1500]}")
+        # The stated objective (when given) disambiguates skills that the image
+        # alone cannot — e.g. "map the strain" vs "detect atomic columns" on the
+        # same lattice image, or "count particles" vs "measure one region's
+        # geometry". It is one signal among data + metadata, not authoritative.
+        objective = state.get("analysis_objective")
+        if objective and str(objective).strip():
+            context_parts.append(
+                "Stated analysis objective (one signal among the data/metadata "
+                f"below; confirm against what the image actually shows): {str(objective).strip()[:1000]}")
         if image_bytes:
             context_parts.append({"mime_type": "image/jpeg", "data": image_bytes})
         if not context_parts:
@@ -1978,7 +1987,8 @@ Examine each analysis result carefully. Look at:
     "selected_index": <0, 1, 2, etc., or null if ALL are unacceptable>,
     "acceptable": true/false,
     "reasoning": "detailed explanation of your choice or why all are unacceptable",
-    "issues_with_selected": "any remaining concerns with the chosen result, or null if none"
+    "issues_with_selected": "any remaining concerns with the chosen result, or null if none",
+    "score_explanation": "ONE concise sentence a downstream human or agent can read to understand WHY the selected result's quality score is low or zero. Distinguish the two very different cases: (a) it is the best of several genuinely flawed attempts — name the dominant flaw (e.g. 'over-detection: ~99 objects vs ~20 visible'); or (b) its score is MISSING because automated verification could not run (API error), so the low number is NOT a quality judgment and the result may be fine. State which."
 }}
 
 IMPORTANT: If one result is clearly better than others (better feature detection, fewer false positives,
@@ -2054,6 +2064,31 @@ Your guidance: '''
         """
         config = state.get("locked_analysis_config", {})
         context_parts = []
+        # Authoritative calibration: when the caller supplied spatial metadata it
+        # is staged as ``metadata.json`` in the working directory (see
+        # stage_and_run). Point the generated script at it so pixel size and the
+        # z/height mapping come from real metadata rather than fabricated
+        # defaults or placeholder embedded image tags. No-op (and identical to
+        # prior behavior) when no spatial metadata is present.
+        _sysinfo = state.get("system_info") or {}
+        _spatial = (_sysinfo.get("experimental_details") or {}).get("spatial_info") \
+            if isinstance(_sysinfo, dict) else None
+        if _spatial:
+            context_parts.append(
+                "## Calibration (authoritative)\n"
+                "A `metadata.json` file is present in the working directory "
+                "(same folder as `data.npy`). Read it and use it as the "
+                "authoritative source of spatial calibration — it takes "
+                "precedence over any embedded image/TIFF tags. From "
+                "`experimental_details.spatial_info` compute the pixel size "
+                "PER AXIS (`field_of_view_x / n_cols`, `field_of_view_y / "
+                "n_rows`, honoring `field_of_view_units`) and, when "
+                "`data_range_minimum`/`data_range_maximum`/`data_range_units` "
+                "are present, map the stored pixel values to physical "
+                "height/units with that range. Do NOT assume default pixel "
+                "sizes or z-ranges. If `metadata.json` is somehow missing, fall "
+                "back to your usual reasoning."
+            )
         if state.get("literature_context"):
             context_parts.append(state["literature_context"])
         # Codegen recipe from ALL co-active skills (not just the top-ranked):
@@ -2429,7 +2464,8 @@ Your guidance: '''
                 # Sanitize the script
                 script = self._sanitize_script(script)
 
-                run = stage_and_run(self.executor, script, image_data, working_dir)
+                run = stage_and_run(self.executor, script, image_data, working_dir,
+                                    metadata=state.get("system_info"))
                 exec_result = run["exec"]
 
                 if run["status"] == "success":
@@ -2553,6 +2589,22 @@ Compare the visualization against the original image.
 - For boundary/edge tasks: what fraction of visible boundaries were traced?
 - For texture/phase tasks: what fraction of the image area was correctly classified?
 - For measurement tasks: were all requested quantities extracted?
+
+**Recall check — a clean overlay is NOT proof of completeness.** Missed objects
+do not appear as errors: a faint, low-contrast, or partially-occluded target
+that was skipped just looks like background, so an overlay with no spurious
+marks can still be badly incomplete. When the objective is to detect, count, or
+segment a population ("detect all …", "statistics of …", "characterize the
+distribution of …"), actively scan the ORIGINAL image for clearly-visible
+target objects that are NOT marked in the visualization, estimate the fraction
+missed, and lower Completeness by that fraction (also list them under
+`missed_features`). Treat under-detection (missing real objects) as exactly as
+serious as over-detection (adding false ones) — do NOT score misses with a
+lighter touch than false positives. This does NOT apply to data-driven
+decompositions (NMF/PCA/ICA/FFT), which produce basis patterns rather than a
+per-object census, and it does not mean nitpicking a few small/ambiguous
+features (see below) — it means catching the case where a substantial,
+clearly-visible fraction of the population was left undetected.
 Score: 0.0 (nothing captured) to 1.0 (everything captured).
 
 ### B. Correctness — how much of the output corresponds to real structures?
@@ -2564,6 +2616,12 @@ Score: 0.0 (entirely wrong) to 1.0 (all output is correct).
 
 ### C. Relevance — does the output address what was asked?
 - Does the analysis extract the features listed in the quality criteria?
+- **Does the PRIMARY reported summary statistic and the headline figure
+  present the exact quantity the objective asks for?** If the objective
+  asks for orientation, the headline result/plot must be the orientation
+  distribution — not a tangential quantity (e.g. size) with orientation
+  merely buried in a table. Penalize when the requested quantity is
+  computed but not the one summarized/visualized.
 - Are the outputs scientifically usable for the stated objective?
 - Would a domain scientist find the results informative?
 Score: 0.0 (output is irrelevant) to 1.0 (directly answers the analysis goal).
@@ -2727,6 +2785,7 @@ Return JSON:
                 + skill_sections["validation"]
             )
 
+        self._last_verify_error = None
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,
@@ -2742,6 +2801,13 @@ Return JSON:
             return result_parsed
 
         except Exception as e:
+            # A transient API/network error (e.g. Bedrock ServiceUnavailable)
+            # means the quality score is UNKNOWN, not zero. Record it so the
+            # caller can tell the judge this attempt's score is missing-due-to-
+            # error rather than a genuine low-quality verdict — otherwise a good
+            # result gets a fabricated 0.00 that craters the metric and misleads
+            # the judge.
+            self._last_verify_error = str(e)
             self.logger.error(f"      LLM verification failed: {e}")
             return None
 
@@ -3260,7 +3326,16 @@ Return JSON with:
                         )
 
                         if verification is None:
-                            self.logger.warning("   Verification failed, skipping")
+                            # Distinguish an API/transient failure (score
+                            # unknown) from a real negative verdict: tag the
+                            # attempt so the judge isn't misled by a fake 0.0.
+                            _verr = getattr(self, "_last_verify_error", None)
+                            if _verr and all_attempts:
+                                all_attempts[-1]["verification_error"] = _verr
+                            self.logger.warning(
+                                "   Verification failed, skipping"
+                                + (f" (API error: {_verr})" if _verr else "")
+                            )
                             break
 
                         # Extract score first
@@ -3315,6 +3390,20 @@ Return JSON with:
                             _stall_count = 0
 
                         _cur_level = _annealing_level
+
+                        # Optional: dump each verification iteration's visualization
+                        # for inspecting the refinement/annealing trajectory. Gated by
+                        # the DUMP_ITER_VIZ env var (a target directory); off by default,
+                        # best-effort so it never affects the analysis.
+                        _dump = os.environ.get("DUMP_ITER_VIZ")
+                        if _dump and current_result and current_result.get("visualization_bytes"):
+                            try:
+                                os.makedirs(_dump, exist_ok=True)
+                                with open(os.path.join(_dump,
+                                          f"iter{verification_iter:02d}_T{_cur_level}_q{v_score:.2f}.png"), "wb") as _f:
+                                    _f.write(current_result["visualization_bytes"])
+                            except Exception:
+                                pass
 
                         verification_attempts.append({
                             "result": current_result.copy() if current_result else {},
@@ -3606,7 +3695,16 @@ Return JSON with:
                     state["locked_analysis_config"] = original_config
 
         # --- Judge: select best from all attempts if still below threshold ---
-        if best_score < quality_threshold and len(all_attempts) > 1:
+        # Also invoke the judge when an attempt's score is unreliable because its
+        # verification failed with a transient API error (a fabricated 0.0): the
+        # judge — given the error context — should adjudicate on the actual
+        # result/visualization rather than trusting the missing score.
+        _verify_errored = any(
+            a.get("verification_error") for a in all_attempts
+        )
+        if best_score < quality_threshold and (
+            len(all_attempts) > 1 or _verify_errored
+        ):
             self.logger.info(
                 "No result approved after all attempts - calling judge..."
             )
@@ -3616,6 +3714,7 @@ Return JSON with:
                     "verification": a.get("verification", {}),
                     "config": a.get("config", {}),
                     "score": a.get("score", 0),
+                    "verification_error": a.get("verification_error"),
                 }
                 for a in all_attempts
             ]
@@ -3638,6 +3737,12 @@ Return JSON with:
                     best_result["judge_reasoning"] = judge_result[
                         "reasoning"
                     ][:500]
+                # Concise, downstream-readable reason the selected best carries a
+                # low/zero score (best-of-flawed vs. score-missing-from-API-error).
+                if judge_result.get("score_explanation"):
+                    best_result["score_explanation"] = judge_result[
+                        "score_explanation"
+                    ][:400]
 
         # --- Summarize plan history ---
         multiple_attempts = len(all_attempts) > 1
@@ -3670,9 +3775,11 @@ Return JSON with:
 
         # --- Return best available result ---
         if best_result:
+            _expl = best_result.get("score_explanation")
             best_result["quality_warning"] = (
                 f"Quality score = {best_score:.2f} below threshold "
                 f"{quality_threshold}"
+                + (f". {_expl}" if _expl else "")
             )
             best_result["attempted_pipelines"] = [
                 a["pipeline"] for a in all_attempts
@@ -3812,6 +3919,9 @@ Return JSON with:
             "judge_reasoning": (
                 (judge_result or {}).get("reasoning")
             ),
+            "score_explanation": (
+                (judge_result or {}).get("score_explanation")
+            ),
         }
 
     USER_FEEDBACK_SCRIPT_PROMPT = '''You have a working image analysis script and user feedback requesting changes.
@@ -3896,7 +4006,8 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                     working_dir = self.output_dir / f"image_{image_idx:04d}"
                     canonical_viz = working_dir / VIZ_NAME
                     patched_script = self._sanitize_script(patched_script)
-                    run = stage_and_run(self.executor, patched_script, image_data, working_dir)
+                    run = stage_and_run(self.executor, patched_script, image_data, working_dir,
+                                        metadata=state.get("system_info"))
                     exec_result = run["exec"]
 
                     if run["status"] == "success":
@@ -4707,10 +4818,25 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                 else "  (no specific issues listed)"
             )
 
+            # If verification could not run (transient API error), the score is
+            # MISSING, not low — tell the judge so it weighs the visualization
+            # and physical plausibility instead of trusting a fabricated 0.00.
+            verr = attempt.get("verification_error")
+            if verr:
+                score_line = (
+                    "Quality score = UNAVAILABLE (automated verification could "
+                    f"not run — API error: {verr}). Do NOT treat this as a low "
+                    "score; judge this attempt on its visualization and physical "
+                    "plausibility alone."
+                )
+                assessment = "(no assessment — verification did not complete)"
+            else:
+                score_line = f"Quality score = {score:.2f}"
+
             summary = f"""
     **Attempt {i + 1}:**
     - Pipeline: {pipeline}
-    - Quality score = {score:.2f}
+    - {score_line}
     - Assessment: {assessment}
     - Issues ({len(issues)} found):
     {issues_str}
