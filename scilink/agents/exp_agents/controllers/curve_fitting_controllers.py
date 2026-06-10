@@ -876,7 +876,9 @@ class CurveFittingSkillSuggestionController:
             context_parts.append(f"Data statistics: {stats}")
         plot_bytes = state.get("original_plot_bytes")
         if plot_bytes:
-            context_parts.append({"mime_type": "image/jpeg", "data": plot_bytes})
+            # plot_fn renders PNG; declare it correctly (Bedrock's converse
+            # API validates the declared type and rejects a mismatch).
+            context_parts.append({"mime_type": "image/png", "data": plot_bytes})
         if not context_parts:
             return state
 
