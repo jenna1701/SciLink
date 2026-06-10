@@ -25,13 +25,19 @@ import json
 import logging
 import os
 import base64
+import copy
 import re
+import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
-from .._locked_exec import stage_and_run, script_uses_canonical_input, DATA_NAME, VIZ_NAME
+from .._locked_exec import (
+    stage_and_run, script_uses_canonical_input,
+    DATA_NAME, VIZ_NAME, CANDIDATES_DIR_NAME,
+)
 from ....utils.codegen_parse import parse_codegen_response
 
 
@@ -2405,7 +2411,12 @@ Your guidance: '''
         # Per-image working directory: the locked script runs VERBATIM here with the
         # image staged as the canonical DATA_NAME and the viz written canonically —
         # no per-image source rewriting, no cross-item glob hazard.
+        # Best-of-N anchor attempts nest under _candidates/cand_NN so concurrent
+        # attempts never share a working dir.
         working_dir = self.output_dir / f"image_{image_idx:04d}"
+        candidate_subdir = state.get("_candidate_subdir")
+        if candidate_subdir:
+            working_dir = working_dir / candidate_subdir
         working_dir.mkdir(parents=True, exist_ok=True)
         output_prefix = f"image_{image_idx:04d}"
 
@@ -2785,7 +2796,7 @@ Return JSON:
                 + skill_sections["validation"]
             )
 
-        self._last_verify_error = None
+        state["_last_verify_error"] = None
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,
@@ -2806,8 +2817,9 @@ Return JSON:
             # caller can tell the judge this attempt's score is missing-due-to-
             # error rather than a genuine low-quality verdict — otherwise a good
             # result gets a fabricated 0.00 that craters the metric and misleads
-            # the judge.
-            self._last_verify_error = str(e)
+            # the judge. Kept in state (not on self) so concurrent best-of-N
+            # anchor attempts don't misattribute each other's errors.
+            state["_last_verify_error"] = str(e)
             self.logger.error(f"      LLM verification failed: {e}")
             return None
 
@@ -3329,7 +3341,7 @@ Return JSON with:
                             # Distinguish an API/transient failure (score
                             # unknown) from a real negative verdict: tag the
                             # attempt so the judge isn't misled by a fake 0.0.
-                            _verr = getattr(self, "_last_verify_error", None)
+                            _verr = state.get("_last_verify_error")
                             if _verr and all_attempts:
                                 all_attempts[-1]["verification_error"] = _verr
                             self.logger.warning(
@@ -3398,6 +3410,9 @@ Return JSON with:
                         _dump = os.environ.get("DUMP_ITER_VIZ")
                         if _dump and current_result and current_result.get("visualization_bytes"):
                             try:
+                                # Namespace per best-of-N candidate so concurrent
+                                # anchor attempts don't overwrite each other's dumps.
+                                _dump = os.path.join(_dump, state.get("_candidate_tag", ""))
                                 os.makedirs(_dump, exist_ok=True)
                                 with open(os.path.join(_dump,
                                           f"iter{verification_iter:02d}_T{_cur_level}_q{v_score:.2f}.png"), "wb") as _f:
@@ -3609,10 +3624,14 @@ Return JSON with:
                     f"{quality_threshold})"
                 )
 
-                # In CO_PILOT mode, show anchor result and ask for approval
+                # In CO_PILOT mode, show anchor result and ask for approval.
+                # Suppressed inside best-of-N candidate attempts: interactive
+                # prompts from N worker threads would interleave; the judge
+                # selects automatically and feedback applies to the winner.
                 if (
                     _is_anchor
                     and self.enable_human_feedback
+                    and not state.get("_suppress_human_feedback")
                     and best_result.get("visualization_bytes")
                 ):
                     user_feedback = self._get_user_feedback_on_result(
@@ -3651,7 +3670,11 @@ Return JSON with:
             })
 
         # --- Human feedback for poor quality (if enabled) ---
-        if self.enable_human_feedback and _is_anchor:
+        if (
+            self.enable_human_feedback
+            and _is_anchor
+            and not state.get("_suppress_human_feedback")
+        ):
             feedback_result = self._get_human_feedback_for_poor_quality(
                 state, best_result, all_attempts
             )
@@ -3810,6 +3833,313 @@ Return JSON with:
                 "extracted_features": {},
                 "quality_metrics": {},
             }
+
+    # Total image-byte budget for the best-of-N judge call (original image +
+    # N candidate visualizations); per-image cap is derived from it.
+    _JUDGE_TOTAL_IMAGE_BUDGET_BYTES = int(12 * 1024 * 1024)
+
+    def _execute_and_verify_best_of_n(
+        self,
+        state: dict,
+        image_data: np.ndarray,
+        data_path: str,
+        image_name: str,
+        image_idx: int,
+        is_regime_anchor: bool = False,
+        reuse_script: Optional[str] = None,
+        reuse_source: Optional[str] = None,
+    ) -> dict:
+        """Run N independent anchor analyses in parallel and keep the best.
+
+        Each attempt is a full ``_execute_and_verify`` run (codegen +
+        verification loop) in its own working subdir with its own copy of the
+        locked config; attempts differ only by sampling randomness. Failed or
+        unapproved attempts are gated out, then a multimodal LLM judge compares
+        the survivors' visualizations against the original image and selects
+        the winner, whose (possibly QC-refined) config is propagated back into
+        ``state`` for the regime.
+
+        ``n_candidates == 1`` and the #172 ``reuse_script`` fast path bypass
+        the fan-out entirely (byte-identical to a direct call).
+        """
+        n = max(1, int(state.get("n_candidates") or 1))
+        if state.get("auxiliary_items") and n > 1:
+            self.logger.info(
+                "Auxiliary data operands present - best-of-N disabled for "
+                "this run (auxiliary staging is not concurrency-safe yet)."
+            )
+            n = 1
+        if n == 1 or reuse_script:
+            return self._execute_and_verify(
+                state=state, image_data=image_data, data_path=data_path,
+                image_name=image_name, image_idx=image_idx,
+                is_regime_anchor=is_regime_anchor,
+                reuse_script=reuse_script, reuse_source=reuse_source,
+            )
+
+        self.logger.info(
+            f"Best-of-{n}: launching {n} independent anchor analyses in parallel"
+        )
+        image_config = state.get("locked_analysis_config", {})
+
+        def _run_candidate(i: int) -> tuple:
+            # Shallow-copy state per attempt (cheap; shared fields are
+            # read-only) but deep-copy the locked config: the QC loop refines
+            # it in place per attempt and the winner's refinement must win.
+            job_state = dict(state)
+            job_state["locked_analysis_config"] = copy.deepcopy(image_config)
+            job_state["_candidate_tag"] = f"cand_{i:02d}"
+            job_state["_candidate_subdir"] = (
+                f"{CANDIDATES_DIR_NAME}/cand_{i:02d}"
+            )
+            job_state["_suppress_human_feedback"] = True
+            result = self._execute_and_verify(
+                state=job_state, image_data=image_data, data_path=data_path,
+                image_name=image_name, image_idx=image_idx,
+                is_regime_anchor=is_regime_anchor,
+            )
+            return result, job_state
+
+        candidates = []
+        with ThreadPoolExecutor(max_workers=min(n, 6)) as pool:
+            future_to_attempt = {
+                pool.submit(_run_candidate, i): i for i in range(n)
+            }
+            done_count = 0
+            for future in as_completed(future_to_attempt):
+                attempt = future_to_attempt[future]
+                done_count += 1
+                try:
+                    result, job_state = future.result()
+                except Exception as exc:
+                    self.logger.error(
+                        f"Candidate {attempt} raised: {exc}"
+                    )
+                    result = {
+                        "index": image_idx,
+                        "name": image_name,
+                        "success": False,
+                        "error": str(exc),
+                        "extracted_features": {},
+                        "quality_metrics": {},
+                    }
+                    job_state = {}
+                qh = result.get("quality_history") or {}
+                candidates.append({
+                    "attempt": attempt,
+                    "result": result,
+                    "config_after": job_state.get(
+                        "locked_analysis_config", image_config
+                    ),
+                    "score": qh.get("final_score", 0.0) or 0.0,
+                    "approved": bool(qh.get("approved", False)),
+                    "success": bool(result.get("success", False)),
+                    "iterations": len(qh.get("verification_iterations", [])),
+                    "visualization_path": result.get("visualization_path"),
+                })
+                self.logger.info(
+                    f"Candidate {attempt} finished ({done_count}/{n}): "
+                    f"score={candidates[-1]['score']:.2f}, "
+                    f"approved={candidates[-1]['approved']}, "
+                    f"iterations={candidates[-1]['iterations']}"
+                )
+        candidates.sort(key=lambda c: c["attempt"])
+
+        # --- Selection ---
+        judge_info = None
+        survivors = [c for c in candidates if c["success"] and c["approved"]]
+        if len(survivors) >= 2:
+            judge_info = self._select_best_anchor_candidate(state, survivors)
+            winner = survivors[judge_info["selected_index"]]
+        elif len(survivors) == 1:
+            winner = survivors[0]
+            judge_info = {
+                "reasoning": "Only one candidate passed the quality gate.",
+                "fallback": False,
+            }
+        else:
+            successful = [c for c in candidates if c["success"]]
+            if successful:
+                # Same semantics as a single below-threshold run: keep the
+                # best-scoring result, which already carries quality_warning.
+                winner = max(successful, key=lambda c: c["score"])
+                judge_info = {
+                    "reasoning": (
+                        "No candidate passed the quality gate; kept the "
+                        "highest-scoring result."
+                    ),
+                    "fallback": True,
+                }
+            else:
+                self.logger.error(f"All {n} candidates failed")
+                return candidates[0]["result"]
+
+        self.logger.info(
+            f"Best-of-{n}: selected candidate {winner['attempt']} "
+            f"(score={winner['score']:.2f}) - "
+            f"{judge_info['reasoning'][:120]}"
+        )
+
+        # Winner's (possibly QC-refined) config becomes the regime's config;
+        # the caller's existing propagation distributes it.
+        state["locked_analysis_config"] = winner["config_after"]
+
+        result = winner["result"]
+        self._promote_candidate_artifacts(result, image_idx, winner["attempt"])
+        # Keep the winner's table entry consistent with the promoted path.
+        winner["visualization_path"] = result.get("visualization_path")
+
+        result["anchor_candidates"] = [
+            {
+                "attempt": c["attempt"],
+                "score": c["score"],
+                "approved": c["approved"],
+                "success": c["success"],
+                "iterations": c["iterations"],
+                "visualization_path": c["visualization_path"],
+                "selected": c is winner,
+            }
+            for c in candidates
+        ]
+        result["anchor_judge"] = {
+            "reasoning": judge_info.get("reasoning", ""),
+            "fallback": bool(judge_info.get("fallback", False)),
+        }
+        return result
+
+    def _promote_candidate_artifacts(
+        self, result: dict, image_idx: int, attempt: int
+    ) -> None:
+        """Copy the winning attempt's files up into the canonical per-image dir.
+
+        Everything downstream (feature tables, Tier-2 file listings,
+        prior_analysis_paths, the orchestrator's viz search) expects artifacts
+        directly under ``image_NNNN/``; loser attempts stay under
+        ``_candidates/`` for audit.
+        """
+        image_dir = self.output_dir / f"image_{image_idx:04d}"
+        cand_dir = image_dir / CANDIDATES_DIR_NAME / f"cand_{attempt:02d}"
+        if not cand_dir.is_dir():
+            return
+        try:
+            for src in cand_dir.iterdir():
+                dest = image_dir / src.name
+                if src.is_dir():
+                    shutil.copytree(src, dest, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(src, dest)
+            viz_path = result.get("visualization_path")
+            if viz_path:
+                promoted = image_dir / Path(viz_path).name
+                if promoted.exists():
+                    result["visualization_path"] = str(promoted)
+        except Exception as e:
+            self.logger.warning(
+                f"Could not promote winning candidate artifacts: {e}"
+            )
+
+    def _select_best_anchor_candidate(
+        self, state: dict, candidates: List[dict]
+    ) -> dict:
+        """LLM judge: compare finished candidate results, pick the best.
+
+        Returns ``{"selected_index": <index into candidates>, "reasoning": str,
+        "fallback": bool}``. Any judge failure falls back to the highest
+        verification score.
+        """
+        from ..instruct import IMAGE_ANALYSIS_BEST_OF_N_SELECTION_PROMPT
+
+        def _fallback(reason: str) -> dict:
+            best = max(
+                range(len(candidates)), key=lambda i: candidates[i]["score"]
+            )
+            self.logger.warning(
+                f"Best-of-N judge fallback ({reason}); using highest "
+                f"verification score (candidate {candidates[best]['attempt']})."
+            )
+            return {
+                "selected_index": best,
+                "reasoning": (
+                    "judge unavailable - fell back to highest verification "
+                    "score"
+                ),
+                "fallback": True,
+            }
+
+        blocks = []
+        for i, c in enumerate(candidates):
+            r = c["result"]
+            qh = r.get("quality_history") or {}
+            iters = qh.get("verification_iterations", [])
+            max_anneal = max(
+                (it.get("annealing_level", 0) or 0 for it in iters), default=0
+            )
+            last_issues = ""
+            if iters:
+                last_issues = str(iters[-1].get("issues", ""))[:300]
+            features = json.dumps(
+                r.get("extracted_features", {}), default=str
+            )[:600]
+            metrics = json.dumps(
+                r.get("quality_metrics", {}), default=str
+            )[:300]
+            blocks.append(
+                f"### Candidate {i}\n"
+                f"  Verification score (advisory): {c['score']:.2f} "
+                f"(approved: {c['approved']})\n"
+                f"  Verification iterations: {c['iterations']} "
+                f"(max annealing level: {max_anneal})\n"
+                f"  Analysis type: {r.get('analysis_type', 'unknown')}\n"
+                f"  Extracted features (truncated): {features}\n"
+                f"  Quality metrics: {metrics}\n"
+                + (f"  Last verification issues: {last_issues}\n"
+                   if last_issues else "")
+            )
+
+        prompt_text = IMAGE_ANALYSIS_BEST_OF_N_SELECTION_PROMPT.format(
+            num_candidates=len(candidates),
+            candidates_formatted="\n".join(blocks),
+        )
+
+        prompt_parts: List[Any] = [prompt_text]
+        per_image_cap = min(
+            _VERIFICATION_IMAGE_CAP_BYTES,
+            self._JUDGE_TOTAL_IMAGE_BUDGET_BYTES // (len(candidates) + 1),
+        )
+        original_bytes = state.get("original_image_bytes")
+        if original_bytes:
+            prompt_parts.append("\n**ORIGINAL IMAGE:**")
+            fit, mime = _fit_image_under_api_cap(
+                original_bytes, cap=per_image_cap
+            )
+            prompt_parts.append({"mime_type": mime, "data": fit})
+        for i, c in enumerate(candidates):
+            viz = c["result"].get("visualization_bytes")
+            if not viz:
+                return _fallback(f"candidate {i} has no visualization bytes")
+            prompt_parts.append(f"\n**Candidate {i} visualization:**")
+            fit, mime = _fit_image_under_api_cap(viz, cap=per_image_cap)
+            prompt_parts.append({"mime_type": mime, "data": fit})
+
+        try:
+            response = self.model.generate_content(
+                contents=prompt_parts,
+                generation_config=self.generation_config,
+                safety_settings=self.safety_settings,
+            )
+            parsed, error = self._parse(response)
+            if error or not parsed:
+                return _fallback(f"parse failed: {error}")
+            idx = parsed.get("selected_index")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(candidates):
+                return _fallback(f"invalid selected_index {idx!r}")
+            return {
+                "selected_index": idx,
+                "reasoning": parsed.get("reasoning", ""),
+                "fallback": False,
+            }
+        except Exception as e:
+            return _fallback(str(e))
 
     def _log_verification_issues(self, verification: dict) -> None:
         """Log verification issues in a readable format."""
@@ -4578,7 +4908,7 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                         image_data
                     )
 
-                result = self._execute_and_verify(
+                result = self._execute_and_verify_best_of_n(
                     state=state, image_data=image_data, data_path=data_path,
                     image_name=image_name, image_idx=idx,
                     is_regime_anchor=(idx != 0 and idx in first_in_regime),
@@ -4694,6 +5024,19 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
 
         state["series_results"] = series_results
         state["flagged_images"] = flagged_images
+
+        # Best-of-N: per-anchor candidate tables (index -> table) for the
+        # final result dict.
+        anchor_candidate_tables = {
+            r["index"]: {
+                "candidates": r["anchor_candidates"],
+                "judge": r.get("anchor_judge", {}),
+            }
+            for r in series_results
+            if r.get("anchor_candidates")
+        }
+        if anchor_candidate_tables:
+            state["anchor_candidates"] = anchor_candidate_tables
 
         if is_single and series_results and series_results[0]["success"]:
             first_result = series_results[0]

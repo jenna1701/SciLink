@@ -30,6 +30,10 @@ import numpy as np
 DATA_NAME = "data.npy"
 VIZ_NAME = "visualization.png"
 META_NAME = "metadata.json"
+# Best-of-N anchor attempts run in per-attempt subdirs under this directory
+# (inside the per-image working dir); winner files are promoted up, losers
+# stay for audit. Consumers that walk output trees skip it by this name.
+CANDIDATES_DIR_NAME = "_candidates"
 
 
 def script_uses_canonical_input(script: str, data_name: str = DATA_NAME) -> bool:
