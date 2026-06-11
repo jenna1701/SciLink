@@ -3280,6 +3280,12 @@ Each candidate's verification score was assigned by an LLM during its own run â€
 these scores are NOISY and not calibrated across runs. Treat them as advisory
 only, and override them whenever the visual evidence disagrees.
 
+A candidate that declined or reported the target as absent/unresolvable while
+the target is visibly present in the original image is an INCOMPLETE
+deliverable â€” it must not win over a candidate that actually delivered,
+regardless of scores. Credit a null result only when the original image
+confirms the target is genuinely absent.
+
 Mild tiebreakers, in order: fewer verification iterations / lower annealing
 level (the result stayed closer to the planned approach); simpler output.
 

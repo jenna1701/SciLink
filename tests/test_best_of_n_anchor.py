@@ -66,7 +66,8 @@ def _controller(tmp_path, model=None,
 
 
 def _canned_result(score: float, approved: bool, success: bool = True,
-                   tag: str = "", iterations: int = 1) -> dict:
+                   tag: str = "", iterations: int = 1,
+                   result_type: str = "delivered") -> dict:
     return {
         "index": 0,
         "name": "image_0000",
@@ -81,7 +82,8 @@ def _canned_result(score: float, approved: bool, success: bool = True,
             "final_score": score,
             "approved": approved,
             "verification_iterations": [
-                {"score": score, "annealing_level": 0, "issues": []}
+                {"score": score, "annealing_level": 0, "issues": [],
+                 "result_type": result_type}
             ] * iterations,
         },
     }
@@ -608,6 +610,44 @@ def test_escalation_failed_first_fans_out(tmp_path):
     _stub_execute(c, {
         "cand_00": _canned_result(0.0, False, success=False, tag="cand_00"),
         "cand_01": _canned_result(0.85, True, tag="cand_01"),
+        "cand_02": _canned_result(0.80, True, tag="cand_02"),
+    }, seen)
+
+    result = _run(c, _esc_state(3))
+
+    assert len(seen) == 3
+    assert result["anchor_judge"]["escalated"] is True
+
+
+def test_escalation_decline_never_fast_accepts(tmp_path):
+    # #289 interaction: a rigorous null/decline scores high and converges
+    # fast — both fast-accept criteria are biased toward it. It must always
+    # escalate so the judge compares it against delivered attempts.
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _controller(tmp_path, model)
+    seen = []
+    _stub_execute(c, {
+        "cand_00": _canned_result(0.95, True, tag="cand_00",
+                                  result_type="null_decline"),
+        "cand_01": _canned_result(0.85, True, tag="cand_01"),
+        "cand_02": _canned_result(0.80, True, tag="cand_02"),
+    }, seen)
+
+    result = _run(c, _esc_state(3))
+
+    assert len(seen) == 3
+    assert result["anchor_judge"]["escalated"] is True
+
+
+def test_escalation_below_calibrated_margin_fans_out(tmp_path):
+    # Margin is 0.15 (calibrated live): 0.82 approved in 2 iters — the exact
+    # shape of the one real miss observed — must escalate.
+    model = _judge_model('{"selected_index": 1, "reasoning": "ok"}')
+    c = _controller(tmp_path, model)
+    seen = []
+    _stub_execute(c, {
+        "cand_00": _canned_result(0.82, True, tag="cand_00", iterations=2),
+        "cand_01": _canned_result(0.86, True, tag="cand_01"),
         "cand_02": _canned_result(0.80, True, tag="cand_02"),
     }, seen)
 

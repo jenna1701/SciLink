@@ -2647,6 +2647,9 @@ Score: 0.0 (output is irrelevant) to 1.0 (directly answers the analysis goal).
 ### Important:
 - Score against what you SEE in the images, not against what would be ideal.
 - Be honest: estimate counts and compute the ratios. Do not default to 0.5 when uncertain — make your best estimate from the images.
+- Classify the result: `result_type` is "null_decline" when the analysis
+  reports the target as absent/unresolvable/not detectable instead of
+  extracting the requested quantities; otherwise "delivered".
 
 ---
 
@@ -2688,6 +2691,7 @@ Return JSON:
     "relevance": 0.0-1.0,
     "quality_score": 0.0-1.0,
     "is_acceptable": true/false,
+    "result_type": "delivered" | "null_decline",
     "issues_found": [
         {{
             "location": "where in the image",
@@ -3430,6 +3434,7 @@ Return JSON with:
 
                         verification_history.append({
                             "quality_score": v_score,
+                            "result_type": verification.get("result_type"),
                             "config_used": state.get("locked_analysis_config", {}),
                             "issues_found": verification.get("issues_found", []),
                             "overall_assessment": verification.get(
@@ -4110,12 +4115,28 @@ Return JSON with:
         return result
 
     # Escalation fast-accept gate: attempt 0 is accepted without fan-out when
-    # it passed verification with margin and converged quickly. Tunable from
-    # the anchor_candidates tables collected in production runs.
-    ESCALATION_SCORE_MARGIN = 0.1
+    # it passed verification with margin and converged quickly. Margin 0.15
+    # calibrated on 12 live fixed-3 runs (8 real TEM/OM/AFM benchmark images
+    # + 4 synthetic ground-truth runs): every fast-fire at score >= 0.85 was
+    # cost-free vs the full 3-way judge; the single fire below 0.85 (0.82)
+    # was the only real miss.
+    ESCALATION_SCORE_MARGIN = 0.15
     ESCALATION_MAX_FAST_ITERS = 2
 
     def _candidate_fast_accept(self, c: dict) -> bool:
+        # Never fast-accept a null/decline (#289): the verifier scores
+        # rigorous nulls high (no visible errors to deduct) and they converge
+        # fast, so both fast-accept criteria are biased toward them. A decline
+        # always escalates so the judge can compare it against attempts that
+        # actually delivered. Absent result_type (older verifier output) is
+        # treated as delivered.
+        iters = (
+            (c["result"].get("quality_history") or {})
+            .get("verification_iterations") or []
+        )
+        result_type = (iters[-1].get("result_type") if iters else None)
+        if result_type == "null_decline":
+            return False
         return (
             c["success"]
             and c["approved"]
@@ -4437,6 +4458,7 @@ Return JSON with:
             "verification_iterations": [
                 {
                     "score": entry["quality_score"],
+                    "result_type": entry.get("result_type"),
                     "annealing_level": entry.get("annealing_level", 0),
                     "issues": [
                         {
