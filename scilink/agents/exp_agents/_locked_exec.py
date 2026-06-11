@@ -23,6 +23,7 @@ was actually duplicated and fragile.
 """
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +35,28 @@ META_NAME = "metadata.json"
 # (inside the per-image working dir); winner files are promoted up, losers
 # stay for audit. Consumers that walk output trees skip it by this name.
 CANDIDATES_DIR_NAME = "_candidates"
+
+
+def atomic_np_save(path, arr) -> None:
+    """np.save with atomic publication: unique sibling temp + os.replace.
+
+    Concurrent writers of identical content (best-of-N attempts staging the
+    same auxiliary operand) become race-free: each writes its own temp file
+    and the rename is atomic, so readers never see a torn file. The temp name
+    ends in ``.npy`` so np.save appends nothing.
+    """
+    import threading
+
+    path = Path(path)
+    tmp = path.with_name(
+        f"{path.name}.{os.getpid()}_{threading.get_ident()}.tmp.npy"
+    )
+    try:
+        np.save(tmp, arr)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def script_uses_canonical_input(script: str, data_name: str = DATA_NAME) -> bool:
