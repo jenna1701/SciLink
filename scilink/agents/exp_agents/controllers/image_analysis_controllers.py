@@ -36,7 +36,7 @@ import numpy as np
 
 from .._locked_exec import (
     stage_and_run, script_uses_canonical_input,
-    DATA_NAME, VIZ_NAME, CANDIDATES_DIR_NAME,
+    DATA_NAME, VIZ_NAME, CANDIDATES_DIR_NAME, atomic_np_save,
 )
 from ....utils.codegen_parse import parse_codegen_response
 
@@ -2209,7 +2209,8 @@ Your guidance: '''
             if aligned:
                 safe = _sanitize_aux_name(label, j)
                 aux_path = Path(data_path).parent / f"temp_auxiliary_{safe}.npy"
-                np.save(aux_path, arr)
+                # Atomic: best-of-N attempts stage this concurrently.
+                atomic_np_save(aux_path, arr)
                 operand_lines.append(
                     f"- \"{label}\": `{aux_path}` — a co-registered array of shape "
                     f"{tuple(arr.shape)} (same H×W as the primary image)."
@@ -3861,14 +3862,15 @@ Return JSON with:
 
         ``n_candidates == 1`` and the #172 ``reuse_script`` fast path bypass
         the fan-out entirely (byte-identical to a direct call).
+
+        With ``candidate_escalation`` set (the orchestrator's auto-default
+        path), attempt 0 runs alone first and is fast-accepted when strong
+        (``_candidate_fast_accept``); the remaining attempts launch only when
+        it is weak. In CO_PILOT/AUTOPILOT a join-approval prompt lets the
+        user accept the judge's pick, override it, or demand the remaining
+        attempts after a fast-accept.
         """
         n = max(1, int(state.get("n_candidates") or 1))
-        if state.get("auxiliary_items") and n > 1:
-            self.logger.info(
-                "Auxiliary data operands present - best-of-N disabled for "
-                "this run (auxiliary staging is not concurrency-safe yet)."
-            )
-            n = 1
         if n == 1 or reuse_script:
             return self._execute_and_verify(
                 state=state, image_data=image_data, data_path=data_path,
@@ -3877,9 +3879,7 @@ Return JSON with:
                 reuse_script=reuse_script, reuse_source=reuse_source,
             )
 
-        self.logger.info(
-            f"Best-of-{n}: launching {n} independent anchor analyses in parallel"
-        )
+        escalation = bool(state.get("candidate_escalation"))
         image_config = state.get("locked_analysis_config", {})
 
         def _run_candidate(i: int) -> tuple:
@@ -3901,77 +3901,147 @@ Return JSON with:
             return result, job_state
 
         candidates = []
-        with ThreadPoolExecutor(max_workers=min(n, 6)) as pool:
-            future_to_attempt = {
-                pool.submit(_run_candidate, i): i for i in range(n)
-            }
-            done_count = 0
-            for future in as_completed(future_to_attempt):
-                attempt = future_to_attempt[future]
-                done_count += 1
-                try:
-                    result, job_state = future.result()
-                except Exception as exc:
-                    self.logger.error(
-                        f"Candidate {attempt} raised: {exc}"
-                    )
-                    result = {
-                        "index": image_idx,
-                        "name": image_name,
-                        "success": False,
-                        "error": str(exc),
-                        "extracted_features": {},
-                        "quality_metrics": {},
-                    }
-                    job_state = {}
-                qh = result.get("quality_history") or {}
-                candidates.append({
-                    "attempt": attempt,
-                    "result": result,
-                    "config_after": job_state.get(
-                        "locked_analysis_config", image_config
-                    ),
-                    "score": qh.get("final_score", 0.0) or 0.0,
-                    "approved": bool(qh.get("approved", False)),
-                    "success": bool(result.get("success", False)),
-                    "iterations": len(qh.get("verification_iterations", [])),
-                    "visualization_path": result.get("visualization_path"),
-                })
-                self.logger.info(
-                    f"Candidate {attempt} finished ({done_count}/{n}): "
-                    f"score={candidates[-1]['score']:.2f}, "
-                    f"approved={candidates[-1]['approved']}, "
-                    f"iterations={candidates[-1]['iterations']}"
-                )
-        candidates.sort(key=lambda c: c["attempt"])
 
-        # --- Selection ---
-        judge_info = None
-        survivors = [c for c in candidates if c["success"] and c["approved"]]
-        if len(survivors) >= 2:
-            judge_info = self._select_best_anchor_candidate(state, survivors)
-            winner = survivors[judge_info["selected_index"]]
-        elif len(survivors) == 1:
-            winner = survivors[0]
-            judge_info = {
-                "reasoning": "Only one candidate passed the quality gate.",
-                "fallback": False,
-            }
-        else:
+        def _run_attempts(indices) -> None:
+            indices = list(indices)
+            with ThreadPoolExecutor(max_workers=min(len(indices), 6)) as pool:
+                future_to_attempt = {
+                    pool.submit(_run_candidate, i): i for i in indices
+                }
+                done_count = 0
+                for future in as_completed(future_to_attempt):
+                    attempt = future_to_attempt[future]
+                    done_count += 1
+                    try:
+                        result, job_state = future.result()
+                    except Exception as exc:
+                        self.logger.error(
+                            f"Candidate {attempt} raised: {exc}"
+                        )
+                        result = {
+                            "index": image_idx,
+                            "name": image_name,
+                            "success": False,
+                            "error": str(exc),
+                            "extracted_features": {},
+                            "quality_metrics": {},
+                        }
+                        job_state = {}
+                    qh = result.get("quality_history") or {}
+                    candidates.append({
+                        "attempt": attempt,
+                        "result": result,
+                        "config_after": job_state.get(
+                            "locked_analysis_config", image_config
+                        ),
+                        "score": qh.get("final_score", 0.0) or 0.0,
+                        "approved": bool(qh.get("approved", False)),
+                        "success": bool(result.get("success", False)),
+                        "iterations": len(qh.get("verification_iterations", [])),
+                        "visualization_path": result.get("visualization_path"),
+                    })
+                    self.logger.info(
+                        f"Candidate {attempt} finished "
+                        f"({done_count}/{len(indices)}): "
+                        f"score={candidates[-1]['score']:.2f}, "
+                        f"approved={candidates[-1]['approved']}, "
+                        f"iterations={candidates[-1]['iterations']}"
+                    )
+                    # Persist a JSON-safe snapshot of the attempt's numbers
+                    # into its candidate dir: loser dirs are kept for audit,
+                    # but extracted features otherwise exist only in memory
+                    # (and ground-truth scoring of all candidates needs them).
+                    try:
+                        cdir = (
+                            self.output_dir / f"image_{image_idx:04d}"
+                            / CANDIDATES_DIR_NAME / f"cand_{attempt:02d}"
+                        )
+                        cdir.mkdir(parents=True, exist_ok=True)
+                        with open(cdir / "attempt_result.json", "w") as f:
+                            json.dump({
+                                "attempt": attempt,
+                                "score": candidates[-1]["score"],
+                                "approved": candidates[-1]["approved"],
+                                "success": candidates[-1]["success"],
+                                "iterations": candidates[-1]["iterations"],
+                                "analysis_type": result.get("analysis_type"),
+                                "extracted_features": result.get(
+                                    "extracted_features"),
+                                "quality_metrics": result.get(
+                                    "quality_metrics"),
+                                "summary": result.get("summary"),
+                            }, f, indent=2, default=str)
+                    except Exception as e:
+                        self.logger.debug(
+                            f"attempt_result.json not written: {e}"
+                        )
+            candidates.sort(key=lambda c: c["attempt"])
+
+        def _select() -> tuple:
+            survivors = [
+                c for c in candidates if c["success"] and c["approved"]
+            ]
+            if len(survivors) >= 2:
+                judge_info = self._select_best_anchor_candidate(
+                    state, survivors
+                )
+                return survivors[judge_info["selected_index"]], judge_info
+            if len(survivors) == 1:
+                return survivors[0], {
+                    "reasoning": "Only one candidate passed the quality gate.",
+                    "fallback": False,
+                }
             successful = [c for c in candidates if c["success"]]
             if successful:
                 # Same semantics as a single below-threshold run: keep the
                 # best-scoring result, which already carries quality_warning.
-                winner = max(successful, key=lambda c: c["score"])
-                judge_info = {
+                return max(successful, key=lambda c: c["score"]), {
                     "reasoning": (
                         "No candidate passed the quality gate; kept the "
                         "highest-scoring result."
                     ),
                     "fallback": True,
                 }
-            else:
-                self.logger.error(f"All {n} candidates failed")
+            self.logger.error(f"All {len(candidates)} candidates failed")
+            return None, None
+
+        # --- Fan-out ---
+        escalated = False
+        if escalation:
+            self.logger.info(
+                f"Best-of-{n} (escalation): running attempt 0 alone; "
+                f"fanning out only if it is weak"
+            )
+            _run_attempts([0])
+            if not self._candidate_fast_accept(candidates[0]):
+                escalated = True
+                self.logger.info(
+                    f"First attempt weak "
+                    f"(score={candidates[0]['score']:.2f}, "
+                    f"iterations={candidates[0]['iterations']}) - "
+                    f"escalating to {n} candidates"
+                )
+                _run_attempts(range(1, n))
+        else:
+            self.logger.info(
+                f"Best-of-{n}: launching {n} independent anchor analyses "
+                f"in parallel"
+            )
+            _run_attempts(range(n))
+
+        # --- Selection ---
+        if escalation and not escalated:
+            winner = candidates[0]
+            judge_info = {
+                "reasoning": (
+                    "First attempt passed the fast-accept gate - "
+                    "no escalation."
+                ),
+                "fallback": False,
+            }
+        else:
+            winner, judge_info = _select()
+            if winner is None:
                 return candidates[0]["result"]
 
         self.logger.info(
@@ -3980,6 +4050,36 @@ Return JSON with:
             f"{judge_info['reasoning'][:120]}"
         )
 
+        # --- Join approval (CO_PILOT/AUTOPILOT) ---
+        if (
+            self.enable_human_feedback
+            and not state.get("_suppress_human_feedback")
+        ):
+            choice = self._get_bestofn_join_approval(
+                candidates, winner, judge_info,
+                allow_more=(escalation and not escalated
+                            and len(candidates) < n),
+            )
+            if choice == "more":
+                escalated = True
+                _run_attempts(range(1, n))
+                winner, judge_info = _select()
+                if winner is None:
+                    return candidates[0]["result"]
+                choice = self._get_bestofn_join_approval(
+                    candidates, winner, judge_info, allow_more=False
+                )
+            if isinstance(choice, int):
+                winner = next(
+                    c for c in candidates if c["attempt"] == choice
+                )
+                judge_info = dict(judge_info)
+                judge_info["human_override"] = True
+                self.logger.info(
+                    f"Human override: candidate {choice} selected"
+                )
+
+        # --- Lock the winner ---
         # Winner's (possibly QC-refined) config becomes the regime's config;
         # the caller's existing propagation distributes it.
         state["locked_analysis_config"] = winner["config_after"]
@@ -4004,8 +4104,112 @@ Return JSON with:
         result["anchor_judge"] = {
             "reasoning": judge_info.get("reasoning", ""),
             "fallback": bool(judge_info.get("fallback", False)),
+            "escalated": escalated,
+            "human_override": bool(judge_info.get("human_override", False)),
         }
         return result
+
+    # Escalation fast-accept gate: attempt 0 is accepted without fan-out when
+    # it passed verification with margin and converged quickly. Tunable from
+    # the anchor_candidates tables collected in production runs.
+    ESCALATION_SCORE_MARGIN = 0.1
+    ESCALATION_MAX_FAST_ITERS = 2
+
+    def _candidate_fast_accept(self, c: dict) -> bool:
+        return (
+            c["success"]
+            and c["approved"]
+            and c["score"] >= self.quality_threshold
+            + self.ESCALATION_SCORE_MARGIN
+            and c["iterations"] <= self.ESCALATION_MAX_FAST_ITERS
+        )
+
+    def _get_bestofn_join_approval(
+        self, candidates: List[dict], winner: dict, judge_info: dict,
+        allow_more: bool,
+    ):
+        """CO_PILOT/AUTOPILOT approval of the best-of-N winner.
+
+        Saves each candidate's visualization as a ``*review*`` png (the UI's
+        feedback modal discovers and renders those), prints a comparison
+        block, and asks. Returns ``None`` (accept the judge's pick), an
+        ``int`` (human-overridden attempt index), or ``"more"`` (run the
+        remaining attempts after an escalation fast-accept).
+        """
+        review_paths = []
+        try:
+            print("\n" + "=" * 70)
+            print("BEST-OF-N CANDIDATES - Review Before Locking Anchor")
+            print("=" * 70)
+            for c in candidates:
+                viz = c["result"].get("visualization_bytes")
+                if viz:
+                    p = self.output_dir / (
+                        f"bestofn_candidate_{c['attempt']:02d}_review.png"
+                    )
+                    with open(p, "wb") as f:
+                        f.write(viz)
+                    review_paths.append(p)
+                    print(
+                        f"[Candidate {c['attempt']} visualization "
+                        f"saved to: {p}]"
+                    )
+            print()
+            for c in candidates:
+                mark = "  <- judge pick" if c is winner else ""
+                print(
+                    f"  Candidate {c['attempt']}: score={c['score']:.2f}, "
+                    f"approved={c['approved']}, "
+                    f"iterations={c['iterations']}{mark}"
+                )
+            reasoning = judge_info.get("reasoning", "")
+            if reasoning:
+                print(f"\nJudge: {reasoning[:500]}")
+            print("\n" + "-" * 60)
+            print("Options:")
+            print(
+                f"  - Press Enter to accept candidate {winner['attempt']}"
+            )
+            print("  - Type a candidate number to use that one instead")
+            if allow_more:
+                print(
+                    "  - Type 'more' to run the remaining candidates "
+                    "and compare"
+                )
+            print("-" * 60)
+
+            response = input(
+                f"\nYour choice (Enter = accept candidate "
+                f"{winner['attempt']}): "
+            ).strip()
+
+            if not response:
+                return None
+            if allow_more and response.lower() == "more":
+                print("Running the remaining candidates...")
+                return "more"
+            if response.isdigit():
+                idx = int(response)
+                ok = any(
+                    c["attempt"] == idx and c["success"]
+                    for c in candidates
+                )
+                if ok:
+                    print(f"Using candidate {idx}.")
+                    return idx
+                print(
+                    f"No successful candidate {idx}; accepting the "
+                    f"judge's pick."
+                )
+                return None
+            print("Unrecognized input; accepting the judge's pick.")
+            return None
+        finally:
+            for p in review_paths:
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
 
     def _promote_candidate_artifacts(
         self, result: dict, image_idx: int, attempt: int

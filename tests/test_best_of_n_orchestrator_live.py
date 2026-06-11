@@ -99,24 +99,28 @@ def main() -> int:
             print("(checked persisted chat history)")
     auto_injected = llm_passed_n is False
 
-    # 2. Auto-inject log line.
-    inject_logged = "Best-of-3: anchor analyses run in parallel" in log
+    # 2. Auto-inject log line — the default path runs in escalation mode (v2).
+    inject_logged = "Best-of-3 (escalation)" in log
 
-    # 3. Stored record carries the candidate table.
+    # 3. Stored record carries the candidate table (1 entry on fast-accept,
+    #    3 after escalation — both valid under the v2 default).
     rec = (orch.analysis_results or [{}])[-1]
     full = rec.get("full_result") or {}
     table = full.get("anchor_candidates") or []
     sel = [c for c in table if c.get("selected")] if isinstance(table, list) else []
+    escalated = (full.get("anchor_judge") or {}).get("escalated")
 
-    # 4. Final answer narrates the comparison.
-    narrated = bool(re.search(r"candidate", summary, re.IGNORECASE))
+    # 4. Final answer narrates the comparison (or the fast-accepted attempt).
+    narrated = bool(re.search(r"candidate|attempt", summary, re.IGNORECASE))
 
     checks = [
         ("task status success", task_result.get("status") == "success"),
         ("LLM left n_candidates unset (tool default fired)", auto_injected),
         ("Best-of-3 auto-inject log line", inject_logged),
-        ("analysis record has 3-entry candidate table",
-         isinstance(table, list) and len(table) == 3 and len(sel) == 1),
+        ("candidate table consistent with escalation flag",
+         isinstance(table, list) and len(sel) == 1
+         and ((escalated is True and len(table) == 3)
+              or (escalated is False and len(table) == 1))),
         ("final answer mentions candidates", narrated),
     ]
     print()

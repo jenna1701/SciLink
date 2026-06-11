@@ -312,6 +312,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # judge compares finished fits (R² + fit plots) and locks the winner.
         # Default 1 = no fan-out.
         n_candidates: int = 1,
+        # Escalation mode: attempt 0 runs alone and is fast-accepted when
+        # strong; the remaining n_candidates-1 launch only when it is weak.
+        candidate_escalation: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -460,6 +463,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             n_candidates = max(1, min(int(n_candidates or 1), 8))
         except (TypeError, ValueError):
             n_candidates = 1
+        candidate_escalation = bool(candidate_escalation) and n_candidates > 1
 
         # Resolve task_mode — caller sets this explicitly (standalone user or
         # orchestrator). Defaults to "fitting" when unset.
@@ -704,8 +708,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Default False — prior runs are agent-judged reference material.
             "reuse_locked_script": bool(reuse_locked_script),
             # Best-of-N: independent parallel anchor fits; LLM judge selects
-            # the winner (1 = no fan-out).
+            # the winner (1 = no fan-out). Escalation runs attempt 0 alone
+            # and fans out only when it is weak.
             "n_candidates": n_candidates,
+            "candidate_escalation": candidate_escalation,
 
             # Effective quality gate (curve_fit_controllers reads via _gate()).
             "quality_gate": effective_gate,

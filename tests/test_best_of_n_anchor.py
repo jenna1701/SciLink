@@ -23,7 +23,9 @@ from scilink.agents.exp_agents.controllers.curve_fitting_controllers import (
 )
 from scilink.agents.exp_agents.analysis_orchestrator_tools import (
     _resolve_n_candidates,
+    _resolve_candidate_escalation,
 )
+from scilink.agents.exp_agents._locked_exec import atomic_np_save
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +47,8 @@ def _parse_fn(response):
         return None, {"error": str(e)}
 
 
-def _controller(tmp_path, model=None) -> UnifiedImageProcessingController:
+def _controller(tmp_path, model=None,
+                enable_human_feedback=False) -> UnifiedImageProcessingController:
     return UnifiedImageProcessingController(
         model=model or MagicMock(),
         logger=logging.getLogger("test_best_of_n"),
@@ -58,11 +61,12 @@ def _controller(tmp_path, model=None) -> UnifiedImageProcessingController:
         quality_instructions="",
         output_dir=str(tmp_path),
         image_to_bytes_fn=lambda arr: b"img",
+        enable_human_feedback=enable_human_feedback,
     )
 
 
 def _canned_result(score: float, approved: bool, success: bool = True,
-                   tag: str = "") -> dict:
+                   tag: str = "", iterations: int = 1) -> dict:
     return {
         "index": 0,
         "name": "image_0000",
@@ -78,7 +82,7 @@ def _canned_result(score: float, approved: bool, success: bool = True,
             "approved": approved,
             "verification_iterations": [
                 {"score": score, "annealing_level": 0, "issues": []}
-            ],
+            ] * iterations,
         },
     }
 
@@ -185,18 +189,23 @@ def test_reuse_script_bypasses_fanout(tmp_path):
     assert "anchor_candidates" not in result
 
 
-def test_auxiliary_operands_force_single_attempt(tmp_path):
-    c = _controller(tmp_path)
+def test_auxiliary_operands_no_longer_force_single_attempt(tmp_path):
+    # v2: aux staging is atomic (atomic_np_save), so aux data fans out too.
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _controller(tmp_path, model)
     seen = []
-    _stub_execute(c, {"_direct": _canned_result(0.9, True, tag="direct")}, seen)
+    _stub_execute(c, {
+        "cand_00": _canned_result(0.9, True, tag="cand_00"),
+        "cand_01": _canned_result(0.8, True, tag="cand_01"),
+        "cand_02": _canned_result(0.7, True, tag="cand_02"),
+    }, seen)
 
     state = _base_state(3)
     state["auxiliary_items"] = [{"label": "I0", "path": "ref.npy"}]
     result = _run(c, state)
 
-    assert len(seen) == 1
-    assert seen[0] is state
-    assert "anchor_candidates" not in result
+    assert len(seen) == 3
+    assert len(result["anchor_candidates"]) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +349,8 @@ def test_judge_evidence_includes_all_survivor_visualizations(tmp_path):
 # Curve fitting: same wrapper, R²-gated
 # ---------------------------------------------------------------------------
 
-def _curve_controller(tmp_path, model=None) -> UnifiedSeriesProcessingController:
+def _curve_controller(tmp_path, model=None,
+                      enable_human_feedback=False) -> UnifiedSeriesProcessingController:
     return UnifiedSeriesProcessingController(
         model=model or MagicMock(),
         logger=logging.getLogger("test_best_of_n_curve"),
@@ -353,6 +363,7 @@ def _curve_controller(tmp_path, model=None) -> UnifiedSeriesProcessingController
         quality_instructions="",
         output_dir=str(tmp_path),
         plot_fn=lambda data, info: b"plot",
+        enable_human_feedback=enable_human_feedback,
     )
 
 
@@ -460,17 +471,22 @@ def test_curve_reuse_script_bypasses_fanout(tmp_path):
     assert "anchor_candidates" not in result
 
 
-def test_curve_auxiliary_operands_force_single_attempt(tmp_path):
-    c = _curve_controller(tmp_path)
+def test_curve_auxiliary_operands_no_longer_force_single_attempt(tmp_path):
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _curve_controller(tmp_path, model)
     seen = []
-    _stub_fit(c, {"_direct": _canned_fit(0.99, True, tag="direct")}, seen)
+    _stub_fit(c, {
+        "cand_00": _canned_fit(0.99, True, tag="cand_00"),
+        "cand_01": _canned_fit(0.98, True, tag="cand_01"),
+        "cand_02": _canned_fit(0.97, True, tag="cand_02"),
+    }, seen)
 
     state = _curve_state(3)
     state["auxiliary_items"] = [{"label": "I0", "path": "ref.npy"}]
     result = _run_curve(c, state)
 
-    assert len(seen) == 1
-    assert "anchor_candidates" not in result
+    assert len(seen) == 3
+    assert len(result["anchor_candidates"]) == 3
 
 
 def test_curve_gate_drops_unapproved_then_judge_picks(tmp_path):
@@ -519,17 +535,301 @@ def test_curve_winner_config_propagates(tmp_path):
     assert state["locked_fitting_config"] == {"refined_by": "cand_01"}
 
 
+def test_fanout_persists_attempt_result_snapshots(tmp_path):
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _controller(tmp_path, model)
+    _stub_execute(c, {
+        "cand_00": _canned_result(0.9, True, tag="cand_00"),
+        "cand_01": _canned_result(0.8, True, tag="cand_01"),
+    }, [])
+
+    _run(c, _base_state(2))
+
+    for i in range(2):
+        snap = (tmp_path / "image_0000" / "_candidates" / f"cand_{i:02d}"
+                / "attempt_result.json")
+        assert snap.exists()
+        data = json.loads(snap.read_text())
+        assert data["attempt"] == i
+        assert data["extracted_features"] == {"tag": f"cand_{i:02d}"}
+
+
+# ---------------------------------------------------------------------------
+# Escalation (escalate-on-weak-first)
+# ---------------------------------------------------------------------------
+
+def _esc_state(n: int) -> dict:
+    state = _base_state(n)
+    state["candidate_escalation"] = True
+    return state
+
+
+def test_escalation_fast_accepts_strong_first_attempt(tmp_path):
+    model = _judge_model('{"selected_index": 0, "reasoning": "unused"}')
+    c = _controller(tmp_path, model)
+    seen = []
+    # 0.85 >= 0.7 + 0.1 margin, 1 iteration -> fast accept
+    _stub_execute(c, {
+        "cand_00": _canned_result(0.85, True, tag="cand_00"),
+    }, seen)
+
+    result = _run(c, _esc_state(3))
+
+    assert len(seen) == 1
+    model.generate_content.assert_not_called()
+    assert len(result["anchor_candidates"]) == 1
+    assert result["anchor_judge"]["escalated"] is False
+    assert "no escalation" in result["anchor_judge"]["reasoning"]
+
+
+def test_escalation_weak_score_fans_out(tmp_path):
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _controller(tmp_path, model)
+    seen = []
+    # 0.72 approved but below 0.8 fast-accept bar -> escalate
+    _stub_execute(c, {
+        "cand_00": _canned_result(0.72, True, tag="cand_00"),
+        "cand_01": _canned_result(0.85, True, tag="cand_01"),
+        "cand_02": _canned_result(0.80, True, tag="cand_02"),
+    }, seen)
+
+    result = _run(c, _esc_state(3))
+
+    assert len(seen) == 3
+    assert result["anchor_judge"]["escalated"] is True
+    # Judge sees all three (attempt 0 included).
+    assert len(result["anchor_candidates"]) == 3
+
+
+def test_escalation_failed_first_fans_out(tmp_path):
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _controller(tmp_path, model)
+    seen = []
+    _stub_execute(c, {
+        "cand_00": _canned_result(0.0, False, success=False, tag="cand_00"),
+        "cand_01": _canned_result(0.85, True, tag="cand_01"),
+        "cand_02": _canned_result(0.80, True, tag="cand_02"),
+    }, seen)
+
+    result = _run(c, _esc_state(3))
+
+    assert len(seen) == 3
+    assert result["anchor_judge"]["escalated"] is True
+
+
+def test_escalation_slow_convergence_fans_out(tmp_path):
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _controller(tmp_path, model)
+    seen = []
+    # High score but 3 verification iterations (> 2) -> not fast-accepted
+    _stub_execute(c, {
+        "cand_00": _canned_result(0.9, True, tag="cand_00", iterations=3),
+        "cand_01": _canned_result(0.85, True, tag="cand_01"),
+        "cand_02": _canned_result(0.80, True, tag="cand_02"),
+    }, seen)
+
+    result = _run(c, _esc_state(3))
+
+    assert len(seen) == 3
+    assert result["anchor_judge"]["escalated"] is True
+
+
+def test_no_escalation_flag_keeps_fixed_n(tmp_path):
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _controller(tmp_path, model)
+    seen = []
+    _stub_execute(c, {
+        "cand_00": _canned_result(0.95, True, tag="cand_00"),
+        "cand_01": _canned_result(0.85, True, tag="cand_01"),
+        "cand_02": _canned_result(0.80, True, tag="cand_02"),
+    }, seen)
+
+    result = _run(c, _base_state(3))  # no candidate_escalation
+
+    assert len(seen) == 3
+    assert result["anchor_judge"]["escalated"] is False
+
+
+def test_curve_escalation_fast_accept_and_escalate(tmp_path):
+    # fast_thr = 0.95 + min(0.02, 0.025) = 0.97
+    c = _curve_controller(tmp_path)
+    seen = []
+    _stub_fit(c, {"cand_00": _canned_fit(0.98, True, tag="cand_00")}, seen)
+    state = _curve_state(3)
+    state["candidate_escalation"] = True
+    result = _run_curve(c, state)
+    assert len(seen) == 1
+    assert result["anchor_judge"]["escalated"] is False
+
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c2 = _curve_controller(tmp_path, model)
+    seen2 = []
+    _stub_fit(c2, {
+        "cand_00": _canned_fit(0.955, True, tag="cand_00"),  # < 0.97
+        "cand_01": _canned_fit(0.99, True, tag="cand_01"),
+        "cand_02": _canned_fit(0.98, True, tag="cand_02"),
+    }, seen2)
+    state2 = _curve_state(3)
+    state2["candidate_escalation"] = True
+    result2 = _run_curve(c2, state2)
+    assert len(seen2) == 3
+    assert result2["anchor_judge"]["escalated"] is True
+
+
+# ---------------------------------------------------------------------------
+# Join approval (CO_PILOT/AUTOPILOT)
+# ---------------------------------------------------------------------------
+
+def _patch_input(monkeypatch, responses, observer=None):
+    it = iter(responses)
+
+    def fake_input(prompt=""):
+        if observer:
+            observer(prompt)
+        return next(it)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+
+def test_join_approval_enter_accepts_and_cleans_reviews(tmp_path, monkeypatch):
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _controller(tmp_path, model, enable_human_feedback=True)
+    _stub_execute(c, {
+        "cand_00": _canned_result(0.9, True, tag="cand_00"),
+        "cand_01": _canned_result(0.8, True, tag="cand_01"),
+    }, [])
+
+    reviews_at_prompt = []
+    prompts = []
+
+    def observer(prompt):
+        prompts.append(prompt)
+        reviews_at_prompt.extend(tmp_path.glob("bestofn_candidate_*_review.png"))
+
+    _patch_input(monkeypatch, [""], observer)
+    result = _run(c, _base_state(2))
+
+    # Review pngs existed at prompt time (UI scan filter matches "review")
+    assert len(reviews_at_prompt) == 2
+    assert all("review" in p.stem for p in reviews_at_prompt)
+    # The input() prompt itself names the default (drives CLI/scripted use).
+    assert any("accept candidate 0" in p for p in prompts)
+    # ... and are cleaned up afterwards.
+    assert not list(tmp_path.glob("bestofn_candidate_*_review.png"))
+    selected = [r for r in result["anchor_candidates"] if r["selected"]]
+    assert selected[0]["attempt"] == 0
+    assert result["anchor_judge"]["human_override"] is False
+
+
+def test_join_approval_digit_overrides_winner(tmp_path, monkeypatch):
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _controller(tmp_path, model, enable_human_feedback=True)
+    _stub_execute(c, {
+        "cand_00": _canned_result(0.9, True, tag="cand_00"),
+        "cand_01": _canned_result(0.8, True, tag="cand_01"),
+        "cand_02": _canned_result(0.7, True, tag="cand_02"),
+    }, [])
+
+    _patch_input(monkeypatch, ["2"])
+    state = _base_state(3)
+    result = _run(c, state)
+
+    selected = [r for r in result["anchor_candidates"] if r["selected"]]
+    assert selected[0]["attempt"] == 2
+    assert result["extracted_features"]["tag"] == "cand_02"
+    # Overridden candidate's refined config propagates.
+    assert state["locked_analysis_config"] == {"refined_by": "cand_02"}
+    assert result["anchor_judge"]["human_override"] is True
+
+
+def test_join_approval_more_triggers_escalation(tmp_path, monkeypatch):
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _controller(tmp_path, model, enable_human_feedback=True)
+    seen = []
+    _stub_execute(c, {
+        "cand_00": _canned_result(0.85, True, tag="cand_00"),  # fast-accept
+        "cand_01": _canned_result(0.9, True, tag="cand_01"),
+        "cand_02": _canned_result(0.8, True, tag="cand_02"),
+    }, seen)
+
+    _patch_input(monkeypatch, ["more", ""])
+    result = _run(c, _esc_state(3))
+
+    assert len(seen) == 3
+    assert result["anchor_judge"]["escalated"] is True
+    assert len(result["anchor_candidates"]) == 3
+
+
+def test_join_approval_not_fired_when_feedback_disabled(tmp_path, monkeypatch):
+    def explode(prompt=""):
+        raise AssertionError("input() must not be called")
+
+    monkeypatch.setattr("builtins.input", explode)
+
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _controller(tmp_path, model)  # feedback disabled
+    _stub_execute(c, {
+        "cand_00": _canned_result(0.9, True, tag="cand_00"),
+        "cand_01": _canned_result(0.8, True, tag="cand_01"),
+    }, [])
+    _run(c, _base_state(2))
+
+    # ... and suppressed even when enabled (nested best-of-N context).
+    c2 = _controller(tmp_path, model, enable_human_feedback=True)
+    _stub_execute(c2, {
+        "cand_00": _canned_result(0.9, True, tag="cand_00"),
+        "cand_01": _canned_result(0.8, True, tag="cand_01"),
+    }, [])
+    state = _base_state(2)
+    state["_suppress_human_feedback"] = True
+    _run(c2, state)
+
+
+# ---------------------------------------------------------------------------
+# atomic_np_save
+# ---------------------------------------------------------------------------
+
+def test_atomic_np_save_roundtrip_and_overwrite(tmp_path):
+    p = tmp_path / "aux.npy"
+    a = np.arange(12).reshape(3, 4)
+    atomic_np_save(p, a)
+    assert np.array_equal(np.load(p), a)
+    b = np.ones((2, 2))
+    atomic_np_save(p, b)
+    assert np.array_equal(np.load(p), b)
+    assert not list(tmp_path.glob("*.tmp.npy"))
+
+
+def test_atomic_np_save_concurrent_hammer(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor as TPE
+
+    p = tmp_path / "aux.npy"
+    arr = np.random.default_rng(0).normal(size=(256, 256))
+
+    def writer(_):
+        for _ in range(5):
+            atomic_np_save(p, arr)
+            assert np.array_equal(np.load(p), arr)
+
+    with TPE(max_workers=8) as pool:
+        list(pool.map(writer, range(8)))
+    assert np.array_equal(np.load(p), arr)
+    assert not list(tmp_path.glob("*.tmp.npy"))
+
+
 # ---------------------------------------------------------------------------
 # Tool-side default resolution
 # ---------------------------------------------------------------------------
 
 class ImageAnalysisAgent:  # name drives the default lookup
-    def analyze(self, data, n_candidates: int = 1):
+    def analyze(self, data, n_candidates: int = 1,
+                candidate_escalation: bool = False):
         pass
 
 
 class CurveFittingAgent:
-    def analyze(self, data, n_candidates: int = 1):
+    def analyze(self, data, n_candidates: int = 1,
+                candidate_escalation: bool = False):
         pass
 
 
@@ -554,3 +854,13 @@ def test_resolve_explicit_request_wins():
 def test_resolve_unsupported_agent_returns_none():
     assert _resolve_n_candidates(_NoSupportAgent(), 3) is None
     assert _resolve_n_candidates(_NoSupportAgent(), None) is None
+
+
+def test_resolve_escalation_default_path_only():
+    # Default path (no explicit n) -> escalation on.
+    assert _resolve_candidate_escalation(ImageAnalysisAgent(), None) is True
+    # Explicit n (any value) -> exact N, no escalation.
+    assert _resolve_candidate_escalation(ImageAnalysisAgent(), 3) is False
+    assert _resolve_candidate_escalation(ImageAnalysisAgent(), 1) is False
+    # Agent without the param -> never.
+    assert _resolve_candidate_escalation(_NoSupportAgent(), None) is False

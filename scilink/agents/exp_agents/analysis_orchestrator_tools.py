@@ -205,6 +205,24 @@ def _resolve_n_candidates(agent: Any, requested: Any) -> Optional[int]:
     )
 
 
+def _resolve_candidate_escalation(agent: Any, requested: Any) -> bool:
+    """True only when the best-of-N DEFAULT applies.
+
+    An explicit ``n_candidates`` from the user means "run exactly N" —
+    escalation (attempt 0 alone, fan out only if weak) is reserved for the
+    auto-injected default, and only for agents whose ``analyze()`` accepts
+    ``candidate_escalation``.
+    """
+    if requested is not None:
+        return False
+    import inspect as _inspect
+    try:
+        params = _inspect.signature(agent.analyze).parameters
+    except (TypeError, ValueError):
+        return False
+    return "candidate_escalation" in params
+
+
 def _detect_sidecar_jsons(
     data_files: list[Path],
     all_files: list[Path],
@@ -2614,10 +2632,18 @@ class AnalysisOrchestratorTools:
                         )
                 elif resolved_n > 1:
                     analyze_kwargs["n_candidates"] = resolved_n
-                    self.logger.info(
-                        f"   Best-of-{resolved_n}: anchor analyses run in "
-                        f"parallel; an LLM judge selects the winner."
-                    )
+                    if _resolve_candidate_escalation(agent, n_candidates):
+                        analyze_kwargs["candidate_escalation"] = True
+                        self.logger.info(
+                            f"   Best-of-{resolved_n} (escalation): attempt 0 "
+                            f"runs alone; fans out to {resolved_n} only if it "
+                            f"is weak. An LLM judge selects the winner."
+                        )
+                    else:
+                        self.logger.info(
+                            f"   Best-of-{resolved_n}: anchor analyses run in "
+                            f"parallel; an LLM judge selects the winner."
+                        )
                 result = agent.analyze(**analyze_kwargs)
                 
                 # === Store result ===
@@ -2967,7 +2993,11 @@ class AnalysisOrchestratorTools:
                         "3 automatically; curve fitting and others run 1). Set "
                         "ONLY when the user explicitly asks for more/fewer "
                         "parallel attempts (e.g. 'try 5 candidates' → 5; "
-                        "'single attempt / cheapest run' → 1)."
+                        "'single attempt / cheapest run' → 1). When UNSET, the "
+                        "image default runs in escalation mode (the first "
+                        "attempt is accepted immediately if strong; the rest "
+                        "launch only if it is weak); an explicit value forces "
+                        "exactly N parallel attempts."
                     )
                 }
             },

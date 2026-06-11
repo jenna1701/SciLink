@@ -252,6 +252,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # an LLM judge compares finished attempts (scores + visualizations)
         # and locks the winner. Default 1 = no fan-out.
         n_candidates: int = 1,
+        # Escalation mode: attempt 0 runs alone and is fast-accepted when
+        # strong; the remaining n_candidates-1 launch only when it is weak.
+        candidate_escalation: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -295,6 +298,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 full verification; an LLM judge compares the finished results
                 and the winner's script is locked. Mitigates run-to-run
                 variance at N× anchor cost.
+            candidate_escalation: With n_candidates > 1, run attempt 0 alone
+                and fast-accept it when strong (approved with score margin in
+                few iterations); the remaining attempts launch only when it
+                is weak. Median cost ~1× anchor; weak anchors still get the
+                full comparison.
 
         Returns:
             Dict with status, detailed_analysis, scientific_claims,
@@ -311,6 +319,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             n_candidates = max(1, min(int(n_candidates or 1), 8))
         except (TypeError, ValueError):
             n_candidates = 1
+        candidate_escalation = bool(candidate_escalation) and n_candidates > 1
 
         # Parse input
         data_path, data_paths, data_array, error = self._parse_data_input(data)
@@ -460,8 +469,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # False — prior runs are agent-judged reference material.
             "reuse_locked_script": bool(reuse_locked_script),
             # Best-of-N: independent parallel anchor attempts; LLM judge
-            # selects the winner (1 = no fan-out).
+            # selects the winner (1 = no fan-out). Escalation runs attempt 0
+            # alone and fans out only when it is weak.
             "n_candidates": n_candidates,
+            "candidate_escalation": candidate_escalation,
             # First image (for planning)
             "image_path": (
                 image_paths[0] if image_paths else first_image_name
@@ -1257,6 +1268,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # agent-judged (no reuse), which is correct.
             # Best-of-N applies to Tier 2 anchors as well.
             "n_candidates": tier1_state.get("n_candidates", 1),
+            "candidate_escalation": tier1_state.get(
+                "candidate_escalation", False
+            ),
             # Sub-agent results
             "fft_preprocessing": None,
             "sam_preprocessing": None,
