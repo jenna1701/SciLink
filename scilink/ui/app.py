@@ -284,7 +284,14 @@ def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
     log_handler.setLevel(logging.INFO)
     log_handler.setFormatter(logging.Formatter("%(message)s"))
     _this_thread = threading.get_ident()
-    log_handler.addFilter(lambda record: record.thread == _this_thread)
+    # Best-of-N candidate attempts run in worker threads spawned by this
+    # chat thread; effective_thread maps them back so their detailed
+    # narration (candidate-prefixed at the record factory) stays in the
+    # verbose panel without admitting other sessions' threads.
+    from scilink.utils.log_context import effective_thread
+    log_handler.addFilter(
+        lambda record: effective_thread(record.thread) == _this_thread
+    )
     root_logger = logging.getLogger()
     # Lower root to INFO so agent logger.info() messages (execution
     # details, verification steps, R² values) reach the handler.

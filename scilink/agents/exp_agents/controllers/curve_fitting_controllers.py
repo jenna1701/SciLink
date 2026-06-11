@@ -4217,6 +4217,10 @@ Return JSON with:
         escalation = bool(state.get("candidate_escalation"))
         spectrum_config = state.get("locked_fitting_config", {})
 
+        import threading as _threading
+        from ....utils.log_context import register_worker, unregister_worker
+        _parent_thread = _threading.get_ident()
+
         def _run_candidate(i: int) -> tuple:
             job_state = dict(state)
             job_state["locked_fitting_config"] = copy.deepcopy(spectrum_config)
@@ -4225,11 +4229,18 @@ Return JSON with:
                 f"{CANDIDATES_DIR_NAME}/cand_{i:02d}"
             )
             job_state["_suppress_human_feedback"] = True
-            result = self._fit_with_quality_control(
-                state=job_state, curve_data=curve_data, data_path=data_path,
-                spectrum_name=spectrum_name, spectrum_idx=spectrum_idx,
-                is_regime_anchor=is_regime_anchor,
-            )
+            # Attribute this worker's log records to the calling (chat)
+            # thread with a candidate prefix (UI verbose panel + CLI).
+            register_worker(_parent_thread, f"cand_{i:02d}")
+            try:
+                result = self._fit_with_quality_control(
+                    state=job_state, curve_data=curve_data,
+                    data_path=data_path, spectrum_name=spectrum_name,
+                    spectrum_idx=spectrum_idx,
+                    is_regime_anchor=is_regime_anchor,
+                )
+            finally:
+                unregister_worker()
             return result, job_state
 
         candidates = []

@@ -3887,6 +3887,10 @@ Return JSON with:
         escalation = bool(state.get("candidate_escalation"))
         image_config = state.get("locked_analysis_config", {})
 
+        import threading as _threading
+        from ....utils.log_context import register_worker, unregister_worker
+        _parent_thread = _threading.get_ident()
+
         def _run_candidate(i: int) -> tuple:
             # Shallow-copy state per attempt (cheap; shared fields are
             # read-only) but deep-copy the locked config: the QC loop refines
@@ -3898,11 +3902,19 @@ Return JSON with:
                 f"{CANDIDATES_DIR_NAME}/cand_{i:02d}"
             )
             job_state["_suppress_human_feedback"] = True
-            result = self._execute_and_verify(
-                state=job_state, image_data=image_data, data_path=data_path,
-                image_name=image_name, image_idx=image_idx,
-                is_regime_anchor=is_regime_anchor,
-            )
+            # Attribute this worker's log records to the calling (chat)
+            # thread with a candidate prefix, so the detailed verification
+            # narration stays visible in the UI verbose panel and the CLI
+            # interleave is attributable.
+            register_worker(_parent_thread, f"cand_{i:02d}")
+            try:
+                result = self._execute_and_verify(
+                    state=job_state, image_data=image_data,
+                    data_path=data_path, image_name=image_name,
+                    image_idx=image_idx, is_regime_anchor=is_regime_anchor,
+                )
+            finally:
+                unregister_worker()
             return result, job_state
 
         candidates = []

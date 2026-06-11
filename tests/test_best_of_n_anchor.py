@@ -826,6 +826,73 @@ def test_join_approval_not_fired_when_feedback_disabled(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Worker log attribution (UI verbose panel + CLI prefixes)
+# ---------------------------------------------------------------------------
+
+def test_log_context_attribution_and_prefix(tmp_path):
+    import threading as th
+    from scilink.utils.log_context import (
+        register_worker, unregister_worker, effective_thread,
+    )
+
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    logger = logging.getLogger("test_log_ctx")
+    logger.setLevel(logging.INFO)
+    handler = Capture()
+    logger.addHandler(handler)
+    parent = th.get_ident()
+    seen = {}
+
+    def worker():
+        register_worker(parent, "cand_07")
+        try:
+            seen["effective"] = effective_thread(th.get_ident())
+            logger.info("Verification 2/7 (annealing level 0)...")
+        finally:
+            unregister_worker()
+        logger.info("after unregister")
+
+    t = th.Thread(target=worker)
+    t.start(); t.join()
+    logger.removeHandler(handler)
+
+    # Worker records map back to the parent thread for UI filtering...
+    assert seen["effective"] == parent
+    # ...and are prefixed with the candidate tag; post-unregister ones aren't.
+    assert records[0] == "[cand_07] Verification 2/7 (annealing level 0)..."
+    assert records[1] == "after unregister"
+
+
+def test_fanout_workers_are_log_registered(tmp_path):
+    import threading as th
+    from scilink.utils.log_context import effective_thread
+
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _controller(tmp_path, model)
+    parent = th.get_ident()
+    attribution = []
+
+    def stub(state, image_data, data_path, image_name, image_idx,
+             is_regime_anchor=False, reuse_script=None, reuse_source=None):
+        attribution.append(effective_thread(th.get_ident()) == parent)
+        tag = state.get("_candidate_tag", "_direct")
+        state["locked_analysis_config"] = {"refined_by": tag}
+        return _canned_result(0.9, True, tag=tag)
+
+    c._execute_and_verify = stub
+    state = _base_state(2)
+    # stub keyed results irrelevant; both attempts return tag-stamped results
+    _run(c, state)
+
+    assert attribution == [True, True]
+
+
+# ---------------------------------------------------------------------------
 # atomic_np_save
 # ---------------------------------------------------------------------------
 
