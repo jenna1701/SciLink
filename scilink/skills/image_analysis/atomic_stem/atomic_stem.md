@@ -133,7 +133,10 @@ for this when designing the step's `quality_criteria`:
 goal, use `fourier_reflection_map`
 (`scilink.skills._shared.fourier_reflection`) — the registered,
 reciprocal-space tool that detects reflections and maps a chosen one
-(amplitude + GPA phase), null-gated. Detailed parameter docs and
+(amplitude + GPA phase), null-gated. For the point-defect /
+vacancy-search goal, the reciprocal-space route is `fft_defect_map`
+(`scilink.skills._shared.fft_defect`) — perfect-lattice reconstruction
+plus null-gated residual anomalies, no atom finding required. Detailed parameter docs and
 per-tool usage are in the `analysis` section below — refer to it when
 the goal you picked above needs a specific tool.
 
@@ -160,11 +163,20 @@ goal you picked above:
   (NN distance is not the lattice parameter for multi-sublattice
   structures — true unit cell may be 2× or more of the shortest column
   spacing) and `find_zone_axes` for lattice vectors.
-- *If goal is vacancy / missing-column search:* requires an ideal
-  lattice — use detected positions plus zone vectors from a prior step
-  (load via `prior_analysis_paths`). Compare ideal sites to detected
-  positions; restrict to image interior; verify candidates with forced
-  Gaussian fits.
+- *If goal is vacancy / missing-column search:* two complementary
+  routes — pick by data quality, or run both as a cross-check.
+  **Real-space route** (defect typing, needs reliable columns): requires
+  an ideal lattice — use detected positions plus zone vectors from a
+  prior step (load via `prior_analysis_paths`). Compare ideal sites to
+  detected positions; restrict to image interior; verify candidates with
+  forced Gaussian fits. **Reciprocal-space route** (no atom finding):
+  the registered tool `fft_defect_map` (see `analysis`) reconstructs the
+  perfect lattice from its significant reflections and maps localized
+  deviations against a noise null — prefer it when columns are too noisy
+  / low-dose to detect reliably, when the field of view is large, or as
+  an independent confirmation of real-space candidates. It returns typed
+  signatures (deficit vs excess, lattice-coherence dip) but candidates
+  still need real-space confirmation crops for chemical interpretation.
 - *If goal is displacement / strain mapping:* requires an ideal
   lattice from a prior step. Map displacements spatially; report only
   distortions exceeding the position fit uncertainty. Distinguish
@@ -362,6 +374,33 @@ sites. Restrict vacancy search to the interior of the detected region
 to avoid edge false positives. Verify vacancy candidates with forced
 Gaussian fit at expected position.
 
+**FFT point-defect mapping** — use the registered tool `fft_defect_map`
+(reciprocal-space, atom-detection-free) when columns are unreliable to
+detect or as an independent cross-check. It bakes in the steps that
+make or break a Bragg-filtered residual: a reflection significance gate
+(else noise "peaks" fabricate defects), a phase-randomized null
+threshold, period-scaled smoothing, mirror padding against border
+artifacts, and a pattern-validity mask. The script calls it and
+interprets; do not hand-write this pipeline.
+```
+from scilink.skills._shared.fft_defect import fft_defect_map
+
+res = fft_defect_map(image, pixel_size_nm)
+if res["periodic"]:
+    # deficit + coherence_dip => vacancy-like; excess without dip =>
+    # adatom / heavier dopant on an intact lattice
+    for d in res["defects"]:
+        crop = image[d["y"]-r:d["y"]+r, d["x"]-r:d["x"]+r]  # confirm in real space
+```
+Heed `res["warnings"]`: a single-cluster flag means the candidates trace
+ONE extended feature (precipitate, boundary, contamination) — switch to
+domain mapping (`fourier_reflection_map`) instead of counting sites. A
+coherent twin boundary whose two variants both have significant
+reflections is reconstructed as part of the pattern and will NOT appear.
+If a clearly visible lattice returns `periodic=False`, the note reports
+the best candidate snr — lower `min_peak_snr` only when that margin is
+small; far below the gate means the image is not periodic.
+
 **Strain and displacement:** Map displacements from ideal lattice
 positions spatially across the image. Only report distortions exceeding
 the position fit uncertainty.
@@ -420,6 +459,7 @@ available.
 **Vacancy concentration:** In pristine crystals, typically 0.01-1%.
 Above 5-10% usually indicates detection or fitting error, unless the
 sample was intentionally modified (irradiation, beam damage, quenching).
+(`fft_defect_map` reports this directly as `defects_per_1000_sites`.)
 
 **Superlattice / satellite reflections:** A reflection at a rational
 multiple/fraction of the fundamental (≈2×, ½, ⅓ …) indicates a
@@ -470,6 +510,17 @@ intensities between clusters.
 displacement from ideal lattice should be small (<0.3× lattice
 spacing). Large systematic displacements indicate fitting errors, not
 real strain.
+
+**Point-defect mapping** (when the step targets vacancies / point
+defects): if both routes ran, every `fft_defect_map` deficit candidate
+should correspond to a real-space missing/weak column and vice versa;
+disagreement at a site usually means contamination or a surface step
+(FFT-only) or an atom-finding miss (real-space-only). When only the FFT
+route ran, validate a sample of candidates with real-space crops before
+reporting counts. A defect count must respect the tool's own flags: do
+not report site statistics from a run whose warnings say the candidates
+form one connected cluster (extended feature) or that the anomaly
+fraction is dense-disorder territory.
 
 **Superlattice mapping** (when the step targets a satellite reflection):
 the reflection must clear the significance floor — a detrended radial-PSD
