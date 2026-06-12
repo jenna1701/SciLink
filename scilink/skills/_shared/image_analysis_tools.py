@@ -93,6 +93,91 @@ def _pixel_size_from_tags(named: dict):
         return None
 
 
+_LEN_UNIT_TO_NM = {
+    "nm": 1.0, "nanometer": 1.0, "nanometers": 1.0,
+    "um": 1e3, "µm": 1e3, "micron": 1e3, "microns": 1e3, "micrometer": 1e3,
+    "micrometers": 1e3, "mm": 1e6, "m": 1e9,
+    "a": 0.1, "angstrom": 0.1, "angstroms": 0.1, "å": 0.1, "pm": 1e-3,
+}
+
+
+def resolve_pixel_size_nm(metadata, image_shape):
+    """Resolve nm-per-pixel from metadata + image shape (best effort, never raises).
+
+    The robust, calibration-correct rule that generated analysis code should use
+    instead of hand-rolling it. The common bug it prevents: dividing
+    ``field_of_view`` by a metadata pixel-COUNT field (``n_cols`` / ``width``)
+    that is usually absent — leaving pixel size ``None`` — when the real
+    denominator is the image array shape.
+
+    Priority:
+      1. ``experimental_details.spatial_info.field_of_view_{x,y}`` divided by the
+         image width / height (the standard SEM/TEM/AFM case).
+      2. Embedded TIFF ``pixel_size`` (``embedded_file_metadata.pixel_size`` or a
+         top-level ``pixel_size``) when its unit is a known length.
+
+    Parameters
+    ----------
+    metadata : dict | None
+        The system_info / metadata dict (may nest the payload under
+        ``"system_info"``).
+    image_shape : tuple
+        numpy ``image.shape`` — ``shape[0]`` = rows (height), ``shape[1]`` =
+        columns (width).
+
+    Returns
+    -------
+    dict | None
+        ``{"x": nm_per_px, "y": nm_per_px, "source": str}`` or ``None`` if it
+        cannot be resolved. ``x`` is the horizontal (column) pixel size.
+    """
+    if not isinstance(metadata, dict) or not image_shape or len(image_shape) < 2:
+        return None
+    n_rows, n_cols = float(image_shape[0]), float(image_shape[1])
+    if n_rows < 1 or n_cols < 1:
+        return None
+
+    def _dig(d, *keys):
+        for k in keys:
+            d = d.get(k) if isinstance(d, dict) else None
+        return d
+
+    # unwrap an optional system_info wrapper
+    roots = [metadata]
+    if isinstance(metadata.get("system_info"), dict):
+        roots.append(metadata["system_info"])
+
+    # 1) field of view / image shape
+    for root in roots:
+        spat = _dig(root, "experimental_details", "spatial_info") or \
+            _dig(root, "spatial_info")
+        if isinstance(spat, dict):
+            fov_x = spat.get("field_of_view_x")
+            fov_y = spat.get("field_of_view_y")
+            unit = str(spat.get("field_of_view_units", "nm")).strip().lower()
+            scale = _LEN_UNIT_TO_NM.get(unit)
+            if scale and (fov_x or fov_y):
+                px_x = (float(fov_x) * scale / n_cols) if fov_x else None
+                px_y = (float(fov_y) * scale / n_rows) if fov_y else None
+                px_x = px_x if px_x else px_y
+                px_y = px_y if px_y else px_x
+                if px_x and px_x > 0:
+                    return {"x": px_x, "y": px_y, "source": "field_of_view"}
+
+    # 2) embedded pixel_size with a known length unit
+    for root in roots:
+        px = _dig(root, "embedded_file_metadata", "pixel_size") or \
+            (root.get("pixel_size") if isinstance(root.get("pixel_size"), dict) else None)
+        if isinstance(px, dict):
+            unit = str(px.get("unit", "")).strip().lower()
+            scale = _LEN_UNIT_TO_NM.get(unit)
+            if scale and px.get("x"):
+                return {"x": float(px["x"]) * scale,
+                        "y": float(px.get("y", px["x"])) * scale,
+                        "source": "embedded_tags"}
+    return None
+
+
 def extract_image_metadata(image_path: str) -> dict:
     """Best-effort recovery of embedded metadata from an image file.
 

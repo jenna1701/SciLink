@@ -39,6 +39,16 @@ on an already-fit lattice — are best expressed as a separate
 `run_analysis` call with `prior_analysis_paths` pointing at this run's
 output, not appended to this plan.
 
+**Pixel size / FOV (calibration):** whenever a step needs pixel size in nm
+(e.g. `fourier_reflection_map`, spacing measurements), resolve it with the
+shared helper, not inline arithmetic:
+`from scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm`;
+`px = resolve_pixel_size_nm(metadata, image.shape)` → `{"x","y","source"}` nm/px,
+or `None`. It divides `field_of_view` by the image **shape** — never divide by a
+metadata pixel-count field like `n_cols`/`width`, which is usually absent and
+silently leaves pixel size `None`. (`detect_atoms_dcnn` still takes `fov_nm`
+directly from metadata.)
+
 **Detection vs. pattern-level analysis:**
 inspect the image for pattern-level heterogeneity — visible textures
 or phase-like regions, disorder or defects at a scale coarser than

@@ -401,8 +401,26 @@ def gpa_strain_map(image, reflections=None, reference_roi="auto",
                 f -= np.median(f[rv])
         affine["removed"] = True
 
+    # illumination-envelope guard: the Bragg amplitude should reflect LATTICE
+    # quality, not the raw-intensity envelope (HAADF detector / thickness /
+    # illumination gradient). If a low-pass of |amp| tracks a low-pass of the raw
+    # image, the validity mask and strain are following the envelope rather than
+    # the lattice — the classic HAADF-GPA false result. Flag it and withhold
+    # `answerable` so callers don't trust an envelope-driven strain field.
+    env_sigma = max(8.0, 0.06 * min(H, W))
+    img_env = ndi.gaussian_filter(image.astype(float), env_sigma)
+    amp_env = ndi.gaussian_filter(amp_min.astype(float), env_sigma)
+    _m = valid if valid.sum() > 100 else np.ones((H, W), bool)
+    _a, _b = amp_env[_m].ravel(), img_env[_m].ravel()
+    if _a.std() > 1e-12 and _b.std() > 1e-12:
+        amp_intensity_corr = float(np.corrcoef(_a, _b)[0, 1])
+    else:
+        amp_intensity_corr = 0.0
+    flags["amplitude_tracks_intensity"] = bool(abs(amp_intensity_corr) >= 0.6)
+
     answerable = (valid_fraction >= 0.25 and cond < 50
-                  and not flags["prefiltered"])
+                  and not flags["prefiltered"]
+                  and not flags["amplitude_tracks_intensity"])
 
     return dict(
         exx=exx, eyy=eyy, exy=exy, wxy=wxy,
@@ -411,6 +429,7 @@ def gpa_strain_map(image, reflections=None, reference_roi="auto",
         g2_ref_cyc_per_px=g2_ref.tolist(), condition_number=cond,
         reference_box=ref_box, mask_frac=mask_frac, smooth=float(smooth),
         flags=flags, answerable=bool(answerable), detrended=bool(detrend),
+        amp_intensity_corr=amp_intensity_corr,
         affine=affine, repair_depth=_repair_depth,
         stats=dict(exx=rstats(exx), eyy=rstats(eyy),
                    exy=rstats(exy), wxy=rstats(wxy)),
