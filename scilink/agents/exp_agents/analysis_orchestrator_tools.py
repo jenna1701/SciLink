@@ -23,7 +23,7 @@ import time
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Callable, List
+from typing import Dict, Any, Callable, List, Optional
 
 from .metadata_converter import (
     generate_metadata_json_from_text,
@@ -36,6 +36,7 @@ from ..lit_agents import OwlLiteratureAgent, NoveltyScorer, FittingModelLiteratu
 from ..lit_agents.optimize_query_for_analysis import optimize_query_for_analysis
 from .recommendation_agent import RecommendationAgent
 from .feature_table import write_feature_table
+from ._locked_exec import CANDIDATES_DIR_NAME
 from ...skills.loader import list_skills, list_all_skills, load_skill
 # Note: the simulation pipeline (`run_complete_workflow`) is imported lazily
 # inside `run_dft_workflow` to avoid pulling in the optional [sim] extras
@@ -172,6 +173,54 @@ def _build_skill_description(agent_registry: dict = None,
 _GLOBAL_METADATA_NAMES = frozenset([
     "metadata.json", "meta.json", "info.json", "experiment.json",
 ])
+
+# Best-of-N defaults per agent class when the LLM passes no n_candidates.
+# Image analysis shows real run-to-run variance, so it fans out by default;
+# agents absent from this dict default to a single attempt. Deterministic
+# policy in code (not prompt prose) — an explicit tool param still overrides.
+_DEFAULT_N_CANDIDATES_BY_AGENT_CLASS = {
+    "ImageAnalysisAgent": 3,
+}
+
+
+def _resolve_n_candidates(agent: Any, requested: Any) -> Optional[int]:
+    """Resolve the effective best-of-N count for this agent.
+
+    Returns ``None`` when the agent's ``analyze()`` does not accept
+    ``n_candidates`` (caller should skip forwarding, optionally logging);
+    otherwise the explicit ``requested`` value, or the per-agent-class
+    default (1 when the class is not listed).
+    """
+    import inspect as _inspect
+    try:
+        params = _inspect.signature(agent.analyze).parameters
+    except (TypeError, ValueError):
+        return None
+    if "n_candidates" not in params:
+        return None
+    if requested is not None:
+        return max(1, int(requested))
+    return _DEFAULT_N_CANDIDATES_BY_AGENT_CLASS.get(
+        type(agent).__name__, 1
+    )
+
+
+def _resolve_candidate_escalation(agent: Any, requested: Any) -> bool:
+    """True only when the best-of-N DEFAULT applies.
+
+    An explicit ``n_candidates`` from the user means "run exactly N" —
+    escalation (attempt 0 alone, fan out only if weak) is reserved for the
+    auto-injected default, and only for agents whose ``analyze()`` accepts
+    ``candidate_escalation``.
+    """
+    if requested is not None:
+        return False
+    import inspect as _inspect
+    try:
+        params = _inspect.signature(agent.analyze).parameters
+    except (TypeError, ValueError):
+        return False
+    return "candidate_escalation" in params
 
 
 def _detect_sidecar_jsons(
@@ -2045,6 +2094,7 @@ class AnalysisOrchestratorTools:
             literature_file: str = None,
             r2_threshold: float = None,
             max_verification_iterations: int = None,
+            n_candidates: int = None,
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
@@ -2569,6 +2619,31 @@ class AnalysisOrchestratorTools:
                             f"   max_verification_iterations={max_verification_iterations} ignored: "
                             f"{self.AGENT_NAMES.get(agent_id, 'agent')} has no verification loop."
                         )
+                # Best-of-N: deterministic per-agent default (image=3, others 1)
+                # unless explicitly requested; forwarded only to agents whose
+                # analyze() accepts it.
+                resolved_n = _resolve_n_candidates(agent, n_candidates)
+                if resolved_n is None:
+                    if n_candidates is not None:
+                        self.logger.info(
+                            f"   n_candidates={n_candidates} ignored: "
+                            f"{self.AGENT_NAMES.get(agent_id, 'agent')} has no "
+                            f"best-of-N support."
+                        )
+                elif resolved_n > 1:
+                    analyze_kwargs["n_candidates"] = resolved_n
+                    if _resolve_candidate_escalation(agent, n_candidates):
+                        analyze_kwargs["candidate_escalation"] = True
+                        self.logger.info(
+                            f"   Best-of-{resolved_n} (escalation): attempt 0 "
+                            f"runs alone; fans out to {resolved_n} only if it "
+                            f"is weak. An LLM judge selects the winner."
+                        )
+                    else:
+                        self.logger.info(
+                            f"   Best-of-{resolved_n}: anchor analyses run in "
+                            f"parallel; an LLM judge selects the winner."
+                        )
                 result = agent.analyze(**analyze_kwargs)
                 
                 # === Store result ===
@@ -2591,10 +2666,14 @@ class AnalysisOrchestratorTools:
                     # Find main visualization
                     viz_path = None
                     for candidate in analysis_output_dir.rglob("*_analysis.png"):
+                        if CANDIDATES_DIR_NAME in candidate.parts:
+                            continue  # best-of-N loser attempt, not canonical
                         viz_path = str(candidate)
                         break
                     if not viz_path:
                         for candidate in analysis_output_dir.rglob("*.png"):
+                            if CANDIDATES_DIR_NAME in candidate.parts:
+                                continue
                             if "report" not in candidate.name.lower():
                                 viz_path = str(candidate)
                                 break
@@ -2634,6 +2713,17 @@ class AnalysisOrchestratorTools:
                             response["reuse_warning"] = reuse_validity.get(
                                 "message", ""
                             )
+                    # Best-of-N: compact candidate table + judge reasoning so
+                    # the orchestrator can narrate the comparison.
+                    if result.get("anchor_candidates"):
+                        response["anchor_candidates"] = result[
+                            "anchor_candidates"
+                        ]
+                        judge = result.get("anchor_judge") or {}
+                        if judge.get("reasoning"):
+                            response["anchor_judge_reasoning"] = judge[
+                                "reasoning"
+                            ][:300]
                     return json.dumps(response)
                 else:
                     return json.dumps({
@@ -2889,6 +2979,25 @@ class AnalysisOrchestratorTools:
                         "post-experiment analysis → leave unset (defaults to 7). "
                         "Often paired with r2_threshold (e.g. 'use R²=0.98 and a "
                         "single verification step')."
+                    )
+                },
+                "n_candidates": {
+                    "type": "integer",
+                    "description": (
+                        "Image analysis and curve fitting agents. Number of "
+                        "independent anchor-analysis attempts run in PARALLEL; "
+                        "an LLM judge compares the finished attempts "
+                        "(verification scores/R² + output visualizations) and "
+                        "locks the winner — reduces run-to-run variance. Leave "
+                        "UNSET for the per-agent default (image analysis runs "
+                        "3 automatically; curve fitting and others run 1). Set "
+                        "ONLY when the user explicitly asks for more/fewer "
+                        "parallel attempts (e.g. 'try 5 candidates' → 5; "
+                        "'single attempt / cheapest run' → 1). When UNSET, the "
+                        "image default runs in escalation mode (the first "
+                        "attempt is accepted immediately if strong; the rest "
+                        "launch only if it is weak); an explicit value forces "
+                        "exactly N parallel attempts."
                     )
                 }
             },

@@ -417,6 +417,21 @@ Supported data types:
                     if not api_key:
                         print("❌ Cannot proceed without API key for internal proxy.")
                         sys.exit(1)
+            elif model_name.lower().startswith("bedrock/"):
+                # Bedrock credentials ride env vars (bearer token or AWS
+                # keys); api_key stays None — LiteLLM reads the environment.
+                # Without this branch the model name matches 'claude' and the
+                # CLI wrongly prompts for an ANTHROPIC_API_KEY.
+                if not (os.getenv("AWS_BEARER_TOKEN_BEDROCK")
+                        or os.getenv("AWS_ACCESS_KEY_ID")):
+                    print("\n⚠️  No AWS Bedrock credentials found "
+                          "(AWS_BEARER_TOKEN_BEDROCK or AWS_ACCESS_KEY_ID).")
+                    token = input(
+                        "Enter your Bedrock bearer token (or Enter to "
+                        "proceed with default AWS credential discovery): "
+                    ).strip()
+                    if token:
+                        os.environ["AWS_BEARER_TOKEN_BEDROCK"] = token
             else:
                 provider_name, env_var_hint, env_vars = self._infer_provider(model_name)
                 api_key = self._get_api_key_from_env(env_vars)

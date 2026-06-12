@@ -308,6 +308,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         outlier_sigma: Optional[float] = None,
         max_verification_iterations: Optional[int] = None,
         quality_gate: "QualityGate | dict | None" = None,
+        # Number of independent anchor-fit attempts run in parallel; an LLM
+        # judge compares finished fits (R² + fit plots) and locks the winner.
+        # Default 1 = no fan-out.
+        n_candidates: int = 1,
+        # Escalation mode: attempt 0 runs alone and is fast-accepted when
+        # strong; the remaining n_candidates-1 launch only when it is weak.
+        candidate_escalation: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -452,6 +459,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             else self.max_verification_iterations)
         if effective_max_verification < 0:
             raise ValueError("max_verification_iterations must be >= 0")
+        try:
+            n_candidates = max(1, min(int(n_candidates or 1), 8))
+        except (TypeError, ValueError):
+            n_candidates = 1
+        candidate_escalation = bool(candidate_escalation) and n_candidates > 1
 
         # Resolve task_mode — caller sets this explicitly (standalone user or
         # orchestrator). Defaults to "fitting" when unset.
@@ -695,6 +707,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Opt-in: force verbatim reuse of the prior locked script (#172).
             # Default False — prior runs are agent-judged reference material.
             "reuse_locked_script": bool(reuse_locked_script),
+            # Best-of-N: independent parallel anchor fits; LLM judge selects
+            # the winner (1 = no fan-out). Escalation runs attempt 0 alone
+            # and fans out only when it is weak.
+            "n_candidates": n_candidates,
+            "candidate_escalation": candidate_escalation,
 
             # Effective quality gate (curve_fit_controllers reads via _gate()).
             "quality_gate": effective_gate,
@@ -1262,6 +1279,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if series_results and series_results[0].get("reuse_validity"):
                 results["reuse_validity"] = series_results[0]["reuse_validity"]
 
+            # Best-of-N: candidate table for the lone anchor (flattened)
+            anchor_tables = state.get("anchor_candidates") or {}
+            if anchor_tables:
+                table = next(iter(anchor_tables.values()))
+                results["anchor_candidates"] = table["candidates"]
+                results["anchor_judge"] = table["judge"]
+
         else:
             # Series: full structure with trends and flagged spectra
             successful = sum(1 for r in series_results if r.get("success", False))
@@ -1319,7 +1343,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             results["caveats"] = synthesis.get("caveats", "")
             results["literature_files"] = state.get("literature_files")
             results["locked_fitting_config"] = state.get("locked_fitting_config")
-        
+
+            # Best-of-N: per-anchor candidate tables ({spectrum_index: {candidates, judge}})
+            if state.get("anchor_candidates"):
+                results["anchor_candidates"] = state["anchor_candidates"]
+
         return results
 
     def _make_serializable(self, obj: Any) -> Any:

@@ -1,5 +1,5 @@
 ---
-description: Geometric Phase Analysis (GPA) strain mapping of atomic-resolution / lattice-fringe images — maps the in-plane strain tensor (exx, eyy, exy) and lattice rotation (wxy) RELATIVE TO AN UNDISTORTED REFERENCE REGION, localizes strain concentration at defects/interfaces/boundaries, and honestly disclaims when the input is unsuitable (Fourier-pre-filtered, too few valid pixels, ill-conditioned reflections).
+description: Geometric Phase Analysis (GPA) strain mapping of atomic-resolution / lattice-fringe images — maps the in-plane strain tensor (exx, eyy, exy) and lattice rotation (wxy) RELATIVE TO AN UNDISTORTED REFERENCE REGION, localizes strain concentration at defects/interfaces/boundaries, and honestly disclaims when the input is unsuitable (Fourier-pre-filtered, too few valid pixels, ill-conditioned reflections). Also the right tool for lattice-displacement tasks phrased differently — precipitate interface coherency (coherent vs incoherent / misfit strain), Burgers-vector / dislocation displacement circuits, and twin-boundary displacement — all of which reduce to the GPA displacement-gradient field.
 technique: STEM, HAADF-STEM, HRTEM, lattice-fringe TEM
 ---
 # GPA Strain Mapping Skill
@@ -57,6 +57,12 @@ Read calibration from the provided metadata block (authoritative). GPA strain is
 **dimensionless** (independent of pixel size); pixel size is only needed to
 report the *physical location/extent* of strain features. The tool assumes
 **square pixels** — if `dx != dy`, resample to square physical pixels first.
+Resolve pixel size with the shared helper rather than hand-rolling it:
+`from scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm`;
+`px = resolve_pixel_size_nm(metadata, image.shape)` → `{"x","y","source"}` nm/px,
+or `None`. It divides `field_of_view` by the image **shape**; never divide by a
+metadata pixel-count field (`n_cols`/`width`), which is usually absent and
+silently yields `None`.
 
 ### foundational — reference region
 The single most important choice. Default `reference_roi="auto"` selects the
@@ -202,3 +208,13 @@ peak-strain location in nm.
 - **Honesty**: `answerable=False` (pre-filtered, low valid fraction, ill-
   conditioned) is a legitimate, final answer — report the reason, do not
   manufacture a strain field.
+- **Illumination-envelope guard (HAADF)**: the tool reports `amp_intensity_corr`
+  and `flags["amplitude_tracks_intensity"]`. When the Bragg amplitude tracks the
+  raw-intensity envelope (|corr| ≥ 0.6 — detector / thickness / illumination
+  gradient), the validity mask and strain follow the envelope, not the lattice;
+  the tool sets `answerable=False`. This is the classic HAADF-GPA failure — do
+  NOT report the strain field. The fix is to flatten the illumination first
+  (divide the image by a strong low-pass / Gaussian background, or high-pass it)
+  so the Bragg amplitude reflects lattice quality, then re-run; if the flag
+  persists, the data cannot support GPA at this contrast and the honest answer is
+  a null with that reason.

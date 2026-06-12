@@ -3251,6 +3251,52 @@ Return JSON:
 """
 
 
+IMAGE_ANALYSIS_BEST_OF_N_SELECTION_PROMPT = """You are selecting the best result among {num_candidates} independent analysis runs of the SAME scientific image under the SAME analysis plan.
+
+The runs differ only by sampling randomness in code generation and refinement.
+Each completed its own verification loop. Select the run whose RESULT — the
+actual output visualization compared against the original image — is best.
+
+## Candidates
+{candidates_formatted}
+
+The original image is attached first, followed by each candidate's final
+visualization in order.
+
+## Selection Criteria
+Judge primarily from the visualizations against the original image:
+1. **Completeness**: what fraction of the visible target structures did the run
+   capture? Missed objects do not appear as errors — a clean overlay can still
+   be badly incomplete. Actively scan the original image for clearly-visible
+   targets a candidate failed to mark, and weight under-detection exactly as
+   seriously as over-detection.
+2. **Correctness**: does the output correspond to real structures (not noise,
+   artifacts, or hallucinated features)? Do reported values match visual
+   estimates from the image?
+3. **Relevance**: does the headline output present the quantity the analysis
+   plan asks for, in a scientifically usable form?
+
+Each candidate's verification score was assigned by an LLM during its own run —
+these scores are NOISY and not calibrated across runs. Treat them as advisory
+only, and override them whenever the visual evidence disagrees.
+
+A candidate that declined or reported the target as absent/unresolvable while
+the target is visibly present in the original image is an INCOMPLETE
+deliverable — it must not win over a candidate that actually delivered,
+regardless of scores. Credit a null result only when the original image
+confirms the target is genuinely absent.
+
+Mild tiebreakers, in order: fewer verification iterations / lower annealing
+level (the result stayed closer to the planned approach); simpler output.
+
+Return JSON:
+{{
+    "selected_index": <0-based index of the best run>,
+    "reasoning": "Brief comparison: why this run's result is best and what the others missed or got wrong"
+}}
+"""
+
+
 IMAGE_ANALYSIS_PLAN_VALIDATION_PROMPT = """You are validating an image analysis plan BEFORE it is executed.
 
 **Proposed Plan:**

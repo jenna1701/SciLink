@@ -24,14 +24,19 @@ import json
 import logging
 import os
 import base64
+import copy
 import re
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
-from .._locked_exec import stage_and_run, script_uses_canonical_input, DATA_NAME
+from .._locked_exec import (
+    stage_and_run, script_uses_canonical_input, DATA_NAME, CANDIDATES_DIR_NAME,
+    atomic_np_save,
+)
 from ....utils.codegen_parse import parse_codegen_response
 
 # Canonical fitted-curve output the fit script saves alongside visualization.png.
@@ -872,7 +877,9 @@ class CurveFittingSkillSuggestionController:
             context_parts.append(f"Data statistics: {stats}")
         plot_bytes = state.get("original_plot_bytes")
         if plot_bytes:
-            context_parts.append({"mime_type": "image/jpeg", "data": plot_bytes})
+            # plot_fn renders PNG; declare it correctly (Bedrock's converse
+            # API validates the declared type and rejects a mismatch).
+            context_parts.append({"mime_type": "image/png", "data": plot_bytes})
         if not context_parts:
             return state
 
@@ -2211,8 +2218,39 @@ Examine each fit carefully. Look at:
     "issues_with_selected": "any remaining concerns with the chosen fit, or null if none"
 }}
 
-IMPORTANT: If one fit is clearly better than others (better residuals, more physical parameters), 
+IMPORTANT: If one fit is clearly better than others (better residuals, more physical parameters),
 select it even if it's not perfect. Only return acceptable=false if ALL fits are fundamentally flawed.
+'''
+
+    BEST_OF_N_JUDGE_PROMPT = '''You are a scientific data fitting expert selecting the best result among {num_candidates} independent fitting runs of the SAME data under the SAME fitting plan.
+
+The runs differ only by sampling randomness in code generation and refinement.
+Each completed its own verification loop and passed the R² gate. Select the
+run whose RESULT is best.
+
+## Candidates
+{candidates_formatted}
+
+The original data plot is attached first, followed by each candidate's fit
+visualization in order.
+
+## Selection Criteria
+R² is objective, but a marginally higher R² does NOT automatically win —
+inspect the fit plots:
+1. Physical plausibility — are the model and its parameters reasonable for
+   this type of data? A higher R² achieved by an unphysical model or by
+   fitting noise/baseline artifacts loses to a slightly lower R² from a
+   physically sound fit.
+2. Residual structure — random scatter is good; systematic patterns mean the
+   model misses real features regardless of R².
+3. Parsimony — when fits are comparable, prefer the simpler model and the run
+   with fewer verification iterations (it stayed closer to the planned model).
+
+**Return JSON:**
+{{
+    "selected_index": <0-based index of the best run>,
+    "reasoning": "Brief comparison: why this run's fit is best and what the others got wrong"
+}}
 '''
 
     HUMAN_FEEDBACK_PROMPT = '''## Fit Quality Issue
@@ -2373,7 +2411,8 @@ Your guidance: '''
             if arr.ndim == 1 and arr.shape[0] == stats["n_points"]:
                 safe = _sanitize_aux_name(label, j)
                 aux_path = self.output_dir / f"temp_auxiliary_{safe}.npy"
-                np.save(aux_path, np.column_stack([axis, arr]))
+                # Atomic: best-of-N attempts stage this concurrently.
+                atomic_np_save(aux_path, np.column_stack([axis, arr]))
                 operand_lines.append(
                     f"- \"{label}\": `{aux_path}` — a 2-column [x, y] array, "
                     f"{arr.shape[0]} points, same x-axis as the primary "
@@ -2653,8 +2692,13 @@ Your guidance: '''
         # Per-spectrum working dir: the locked script runs VERBATIM here with data
         # staged as the canonical DATA_NAME and viz written canonically — no
         # per-spectrum source rewriting, no cross-item glob hazard.
+        # Best-of-N anchor attempts nest under _candidates/cand_NN so concurrent
+        # attempts never share a working dir.
         output_prefix = f"spectrum_{spectrum_idx:04d}"
         item_dir = self.output_dir / output_prefix
+        candidate_subdir = state.get("_candidate_subdir")
+        if candidate_subdir:
+            item_dir = item_dir / candidate_subdir
 
         # Phase 2: extra columns the planner flagged (e.g. an uncertainty column)
         # are staged per-spectrum as canonical operand files and described to the
@@ -4010,7 +4054,15 @@ Return JSON with:
         # --- Human feedback for poor fit (if enabled) ---
         # Guard `best_result`: when every fitting attempt failed it is None, and
         # there is no fit to review — skip straight to graceful failure handling.
-        if self.enable_human_feedback and _is_anchor and best_result:
+        # Suppressed inside best-of-N candidate attempts: interactive prompts
+        # from N worker threads would interleave (and the threshold adjustment
+        # below mutates shared self.r2_threshold).
+        if (
+            self.enable_human_feedback
+            and _is_anchor
+            and best_result
+            and not state.get("_suppress_human_feedback")
+        ):
             feedback_result = self._get_human_feedback_for_poor_fit(state, best_result, all_attempts)
 
             if feedback_result:
@@ -4121,6 +4173,483 @@ Return JSON with:
                 "error": "All fitting attempts failed", "attempts": len(all_attempts),
                 "parameters": {}, "fit_quality": {},
             }
+
+    def _fit_with_quality_control_best_of_n(
+        self,
+        state: dict,
+        curve_data: np.ndarray,
+        data_path: str,
+        spectrum_name: str,
+        spectrum_idx: int,
+        is_regime_anchor: bool = False,
+        reuse_script: Optional[str] = None,
+        reuse_source: Optional[str] = None,
+    ) -> dict:
+        """Run N independent anchor fits in parallel and keep the best.
+
+        Mirrors the image controller's ``_execute_and_verify_best_of_n``:
+        each attempt is a full ``_fit_with_quality_control`` run in its own
+        working subdir with its own copy of the locked config; attempts
+        differ only by sampling randomness. R²-gated survivors go to an LLM
+        judge that inspects the fit plots (a marginally higher R² from an
+        unphysical fit loses); the winner's (possibly QC-refined) config is
+        propagated back into ``state`` for the regime.
+
+        ``n_candidates == 1`` and the #172 ``reuse_script`` fast path bypass
+        the fan-out entirely (byte-identical to a direct call).
+
+        With ``candidate_escalation`` set (the orchestrator's auto-default
+        path), attempt 0 runs alone first and is fast-accepted when strong
+        (``_candidate_fast_accept``); the remaining attempts launch only when
+        it is weak. In CO_PILOT/AUTOPILOT a join-approval prompt lets the
+        user accept the judge's pick, override it, or demand the remaining
+        attempts after a fast-accept.
+        """
+        n = max(1, int(state.get("n_candidates") or 1))
+        if n == 1 or reuse_script:
+            return self._fit_with_quality_control(
+                state=state, curve_data=curve_data, data_path=data_path,
+                spectrum_name=spectrum_name, spectrum_idx=spectrum_idx,
+                is_regime_anchor=is_regime_anchor,
+                reuse_script=reuse_script, reuse_source=reuse_source,
+            )
+
+        escalation = bool(state.get("candidate_escalation"))
+        spectrum_config = state.get("locked_fitting_config", {})
+
+        import threading as _threading
+        from ....utils.log_context import register_worker, unregister_worker
+        _parent_thread = _threading.get_ident()
+
+        def _run_candidate(i: int) -> tuple:
+            job_state = dict(state)
+            job_state["locked_fitting_config"] = copy.deepcopy(spectrum_config)
+            job_state["_candidate_tag"] = f"cand_{i:02d}"
+            job_state["_candidate_subdir"] = (
+                f"{CANDIDATES_DIR_NAME}/cand_{i:02d}"
+            )
+            job_state["_suppress_human_feedback"] = True
+            # Attribute this worker's log records to the calling (chat)
+            # thread with a candidate prefix (UI verbose panel + CLI).
+            register_worker(_parent_thread, f"cand_{i:02d}")
+            try:
+                result = self._fit_with_quality_control(
+                    state=job_state, curve_data=curve_data,
+                    data_path=data_path, spectrum_name=spectrum_name,
+                    spectrum_idx=spectrum_idx,
+                    is_regime_anchor=is_regime_anchor,
+                )
+            finally:
+                unregister_worker()
+            return result, job_state
+
+        candidates = []
+
+        def _run_attempts(indices) -> None:
+            indices = list(indices)
+            with ThreadPoolExecutor(max_workers=min(len(indices), 6)) as pool:
+                future_to_attempt = {
+                    pool.submit(_run_candidate, i): i for i in indices
+                }
+                done_count = 0
+                for future in as_completed(future_to_attempt):
+                    attempt = future_to_attempt[future]
+                    done_count += 1
+                    try:
+                        result, job_state = future.result()
+                    except Exception as exc:
+                        self.logger.error(f"Candidate {attempt} raised: {exc}")
+                        result = {
+                            "index": spectrum_idx, "name": spectrum_name,
+                            "success": False, "error": str(exc),
+                            "parameters": {}, "fit_quality": {},
+                        }
+                        job_state = {}
+                    qh = result.get("quality_history") or {}
+                    candidates.append({
+                        "attempt": attempt,
+                        "result": result,
+                        "config_after": job_state.get(
+                            "locked_fitting_config", spectrum_config
+                        ),
+                        "score": qh.get("final_r2", 0.0) or 0.0,
+                        "approved": bool(qh.get("approved", False)),
+                        "success": bool(result.get("success", False)),
+                        "iterations": len(qh.get("verification_iterations", [])),
+                        "visualization_path": result.get("visualization_path"),
+                    })
+                    self.logger.info(
+                        f"Candidate {attempt} finished "
+                        f"({done_count}/{len(indices)}): "
+                        f"R²={candidates[-1]['score']:.4f}, "
+                        f"approved={candidates[-1]['approved']}, "
+                        f"iterations={candidates[-1]['iterations']}"
+                    )
+                    # Persist a JSON-safe snapshot of the attempt's numbers
+                    # into its candidate dir (audit + ground-truth scoring
+                    # of losers; mirrors the image controller).
+                    try:
+                        cdir = (
+                            self.output_dir / f"spectrum_{spectrum_idx:04d}"
+                            / CANDIDATES_DIR_NAME / f"cand_{attempt:02d}"
+                        )
+                        cdir.mkdir(parents=True, exist_ok=True)
+                        with open(cdir / "attempt_result.json", "w") as f:
+                            json.dump({
+                                "attempt": attempt,
+                                "score": candidates[-1]["score"],
+                                "approved": candidates[-1]["approved"],
+                                "success": candidates[-1]["success"],
+                                "iterations": candidates[-1]["iterations"],
+                                "model_type": result.get("model_type"),
+                                "parameters": result.get("parameters"),
+                                "fit_quality": result.get("fit_quality"),
+                            }, f, indent=2, default=str)
+                    except Exception as e:
+                        self.logger.debug(
+                            f"attempt_result.json not written: {e}"
+                        )
+            candidates.sort(key=lambda c: c["attempt"])
+
+        def _select() -> tuple:
+            survivors = [
+                c for c in candidates if c["success"] and c["approved"]
+            ]
+            if len(survivors) >= 2:
+                judge_info = self._select_best_fit_candidate(state, survivors)
+                return survivors[judge_info["selected_index"]], judge_info
+            if len(survivors) == 1:
+                return survivors[0], {
+                    "reasoning": "Only one candidate passed the R² gate.",
+                    "fallback": False,
+                }
+            successful = [c for c in candidates if c["success"]]
+            if successful:
+                return max(successful, key=lambda c: c["score"]), {
+                    "reasoning": (
+                        "No candidate passed the R² gate; kept the "
+                        "highest-R² result."
+                    ),
+                    "fallback": True,
+                }
+            self.logger.error(f"All {len(candidates)} candidates failed")
+            return None, None
+
+        # --- Fan-out ---
+        escalated = False
+        if escalation:
+            self.logger.info(
+                f"Best-of-{n} (escalation): running attempt 0 alone; "
+                f"fanning out only if it is weak"
+            )
+            _run_attempts([0])
+            if not self._candidate_fast_accept(candidates[0]):
+                escalated = True
+                self.logger.info(
+                    f"First attempt weak "
+                    f"(R²={candidates[0]['score']:.4f}, "
+                    f"iterations={candidates[0]['iterations']}) - "
+                    f"escalating to {n} candidates"
+                )
+                _run_attempts(range(1, n))
+        else:
+            self.logger.info(
+                f"Best-of-{n}: launching {n} independent anchor fits "
+                f"in parallel"
+            )
+            _run_attempts(range(n))
+
+        # --- Selection ---
+        if escalation and not escalated:
+            winner = candidates[0]
+            judge_info = {
+                "reasoning": (
+                    "First attempt passed the fast-accept gate - "
+                    "no escalation."
+                ),
+                "fallback": False,
+            }
+        else:
+            winner, judge_info = _select()
+            if winner is None:
+                return candidates[0]["result"]
+
+        self.logger.info(
+            f"Best-of-{n}: selected candidate {winner['attempt']} "
+            f"(R²={winner['score']:.4f}) - {judge_info['reasoning'][:120]}"
+        )
+
+        # --- Join approval (CO_PILOT/AUTOPILOT) ---
+        if (
+            self.enable_human_feedback
+            and not state.get("_suppress_human_feedback")
+        ):
+            choice = self._get_bestofn_join_approval(
+                candidates, winner, judge_info,
+                allow_more=(escalation and not escalated
+                            and len(candidates) < n),
+            )
+            if choice == "more":
+                escalated = True
+                _run_attempts(range(1, n))
+                winner, judge_info = _select()
+                if winner is None:
+                    return candidates[0]["result"]
+                choice = self._get_bestofn_join_approval(
+                    candidates, winner, judge_info, allow_more=False
+                )
+            if isinstance(choice, int):
+                winner = next(
+                    c for c in candidates if c["attempt"] == choice
+                )
+                judge_info = dict(judge_info)
+                judge_info["human_override"] = True
+                self.logger.info(
+                    f"Human override: candidate {choice} selected"
+                )
+
+        # --- Lock the winner ---
+        # Winner's (possibly QC-refined) config becomes the regime's config;
+        # the caller's existing propagation distributes it.
+        state["locked_fitting_config"] = winner["config_after"]
+
+        result = winner["result"]
+        self._promote_candidate_artifacts(
+            result, spectrum_idx, winner["attempt"]
+        )
+        winner["visualization_path"] = result.get("visualization_path")
+
+        result["anchor_candidates"] = [
+            {
+                "attempt": c["attempt"],
+                "score": c["score"],
+                "approved": c["approved"],
+                "success": c["success"],
+                "iterations": c["iterations"],
+                "visualization_path": c["visualization_path"],
+                "selected": c is winner,
+            }
+            for c in candidates
+        ]
+        result["anchor_judge"] = {
+            "reasoning": judge_info.get("reasoning", ""),
+            "fallback": bool(judge_info.get("fallback", False)),
+            "escalated": escalated,
+            "human_override": bool(judge_info.get("human_override", False)),
+        }
+        return result
+
+    # Escalation fast-accept gate: attempt 0 is accepted without fan-out when
+    # it passed the R² gate with margin and converged quickly. The margin is
+    # capped near 1.0 (an r2_threshold of 0.999 leaves no room for +0.02).
+    ESCALATION_R2_MARGIN = 0.02
+    ESCALATION_MAX_FAST_ITERS = 2
+
+    def _candidate_fast_accept(self, c: dict) -> bool:
+        fast_thr = self.r2_threshold + min(
+            self.ESCALATION_R2_MARGIN, (1.0 - self.r2_threshold) / 2
+        )
+        return (
+            c["success"]
+            and c["approved"]
+            and c["score"] >= fast_thr
+            and c["iterations"] <= self.ESCALATION_MAX_FAST_ITERS
+        )
+
+    def _get_bestofn_join_approval(
+        self, candidates: List[dict], winner: dict, judge_info: dict,
+        allow_more: bool,
+    ):
+        """CO_PILOT/AUTOPILOT approval of the best-of-N winner.
+
+        Saves each candidate's fit plot as a ``*review*`` png (the UI's
+        feedback modal discovers and renders those), prints a comparison
+        block, and asks. Returns ``None`` (accept the judge's pick), an
+        ``int`` (human-overridden attempt index), or ``"more"`` (run the
+        remaining attempts after an escalation fast-accept). Never mutates
+        ``self.r2_threshold`` (shared across attempts).
+        """
+        review_paths = []
+        try:
+            print("\n" + "=" * 70)
+            print("BEST-OF-N CANDIDATES - Review Before Locking Anchor")
+            print("=" * 70)
+            for c in candidates:
+                viz = c["result"].get("visualization_bytes")
+                if viz:
+                    p = self.output_dir / (
+                        f"bestofn_candidate_{c['attempt']:02d}_review.png"
+                    )
+                    with open(p, "wb") as f:
+                        f.write(viz)
+                    review_paths.append(p)
+                    print(
+                        f"[Candidate {c['attempt']} fit saved to: {p}]"
+                    )
+            print()
+            for c in candidates:
+                mark = "  <- judge pick" if c is winner else ""
+                print(
+                    f"  Candidate {c['attempt']}: R²={c['score']:.4f}, "
+                    f"approved={c['approved']}, "
+                    f"iterations={c['iterations']}{mark}"
+                )
+            reasoning = judge_info.get("reasoning", "")
+            if reasoning:
+                print(f"\nJudge: {reasoning[:500]}")
+            print("\n" + "-" * 60)
+            print("Options:")
+            print(
+                f"  - Press Enter to accept candidate {winner['attempt']}"
+            )
+            print("  - Type a candidate number to use that one instead")
+            if allow_more:
+                print(
+                    "  - Type 'more' to run the remaining candidates "
+                    "and compare"
+                )
+            print("-" * 60)
+
+            response = input(
+                f"\nYour choice (Enter = accept candidate "
+                f"{winner['attempt']}): "
+            ).strip()
+
+            if not response:
+                return None
+            if allow_more and response.lower() == "more":
+                print("Running the remaining candidates...")
+                return "more"
+            if response.isdigit():
+                idx = int(response)
+                ok = any(
+                    c["attempt"] == idx and c["success"]
+                    for c in candidates
+                )
+                if ok:
+                    print(f"Using candidate {idx}.")
+                    return idx
+                print(
+                    f"No successful candidate {idx}; accepting the "
+                    f"judge's pick."
+                )
+                return None
+            print("Unrecognized input; accepting the judge's pick.")
+            return None
+        finally:
+            for p in review_paths:
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
+    def _promote_candidate_artifacts(
+        self, result: dict, spectrum_idx: int, attempt: int
+    ) -> None:
+        """Copy the winning attempt's files up into the canonical per-spectrum dir.
+
+        Everything downstream (feature tables, prior_analysis_paths, the
+        orchestrator's viz search) expects artifacts directly under
+        ``spectrum_NNNN/``; loser attempts stay under ``_candidates/`` for
+        audit.
+        """
+        item_dir = self.output_dir / f"spectrum_{spectrum_idx:04d}"
+        cand_dir = item_dir / CANDIDATES_DIR_NAME / f"cand_{attempt:02d}"
+        if not cand_dir.is_dir():
+            return
+        try:
+            for src in cand_dir.iterdir():
+                dest = item_dir / src.name
+                if src.is_dir():
+                    shutil.copytree(src, dest, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(src, dest)
+            viz_path = result.get("visualization_path")
+            if viz_path:
+                promoted = item_dir / Path(viz_path).name
+                if promoted.exists():
+                    result["visualization_path"] = str(promoted)
+        except Exception as e:
+            self.logger.warning(
+                f"Could not promote winning candidate artifacts: {e}"
+            )
+
+    def _select_best_fit_candidate(
+        self, state: dict, candidates: List[dict]
+    ) -> dict:
+        """LLM judge: compare finished candidate fits, pick the best.
+
+        Returns ``{"selected_index": <index into candidates>, "reasoning": str,
+        "fallback": bool}``. Any judge failure falls back to the highest R².
+        """
+        def _fallback(reason: str) -> dict:
+            best = max(
+                range(len(candidates)), key=lambda i: candidates[i]["score"]
+            )
+            self.logger.warning(
+                f"Best-of-N judge fallback ({reason}); using highest R² "
+                f"(candidate {candidates[best]['attempt']})."
+            )
+            return {
+                "selected_index": best,
+                "reasoning": "judge unavailable - fell back to highest R²",
+                "fallback": True,
+            }
+
+        blocks = []
+        for i, c in enumerate(candidates):
+            r = c["result"]
+            qh = r.get("quality_history") or {}
+            iters = qh.get("verification_iterations", [])
+            max_anneal = max(
+                (it.get("annealing_level", 0) or 0 for it in iters), default=0
+            )
+            params = json.dumps(r.get("parameters", {}), default=str)[:600]
+            blocks.append(
+                f"### Candidate {i}\n"
+                f"  R²: {c['score']:.4f} (approved: {c['approved']})\n"
+                f"  Model: {r.get('model_type', 'unknown')}\n"
+                f"  Verification iterations: {c['iterations']} "
+                f"(max annealing level: {max_anneal})\n"
+                f"  Parameters (truncated): {params}\n"
+            )
+
+        prompt_text = self.BEST_OF_N_JUDGE_PROMPT.format(
+            num_candidates=len(candidates),
+            candidates_formatted="\n".join(blocks),
+        )
+
+        prompt_parts: List[Any] = [prompt_text]
+        original_plot = state.get("original_plot_bytes")
+        if original_plot:
+            prompt_parts.append("\n**ORIGINAL DATA PLOT:**")
+            prompt_parts.append({"mime_type": "image/png", "data": original_plot})
+        for i, c in enumerate(candidates):
+            viz = c["result"].get("visualization_bytes")
+            if not viz:
+                return _fallback(f"candidate {i} has no visualization bytes")
+            prompt_parts.append(f"\n**Candidate {i} fit:**")
+            prompt_parts.append({"mime_type": "image/png", "data": viz})
+
+        try:
+            response = self.model.generate_content(
+                contents=prompt_parts,
+                generation_config=self.generation_config,
+                safety_settings=self.safety_settings,
+            )
+            parsed, error = self._parse(response)
+            if error or not parsed:
+                return _fallback(f"parse failed: {error}")
+            idx = parsed.get("selected_index")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(candidates):
+                return _fallback(f"invalid selected_index {idx!r}")
+            return {
+                "selected_index": idx,
+                "reasoning": parsed.get("reasoning", ""),
+                "fallback": False,
+            }
+        except Exception as e:
+            return _fallback(str(e))
 
     def _log_verification_issues(self, verification: dict) -> None:
         """Log verification issues in a readable format."""
@@ -4556,7 +5085,7 @@ Return JSON with:
                         pass
                     state["data_statistics"] = self._compute_statistics(curve_data)
 
-                result = self._fit_with_quality_control(
+                result = self._fit_with_quality_control_best_of_n(
                     state=state, curve_data=curve_data, data_path=data_path,
                     spectrum_name=spectrum_name, spectrum_idx=idx,
                     is_regime_anchor=(idx != 0 and idx in first_in_regime),
@@ -4746,7 +5275,20 @@ Return JSON with:
         
         state["series_results"] = series_results
         state["flagged_spectra"] = flagged_spectra
-        
+
+        # Best-of-N: per-anchor candidate tables (index -> table) for the
+        # final result dict.
+        anchor_candidate_tables = {
+            r["index"]: {
+                "candidates": r["anchor_candidates"],
+                "judge": r.get("anchor_judge", {}),
+            }
+            for r in series_results
+            if r.get("anchor_candidates")
+        }
+        if anchor_candidate_tables:
+            state["anchor_candidates"] = anchor_candidate_tables
+
         if is_single and series_results and series_results[0]["success"]:
             first_result = series_results[0]
             state["fit_results"] = {

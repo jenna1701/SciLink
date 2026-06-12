@@ -113,7 +113,8 @@ def _segment_gray(gray, boundary_sensitivity, min_area_px, contamination):
 
 def grain_analysis(image, pixel_size=1.0, pixel_unit="px", mode="auto",
                    min_grain_diameter=None, boundary_sensitivity=0.5,
-                   contamination="auto", min_len_frac=0.03):
+                   contamination="auto", min_len_frac=0.03,
+                   min_curved_fraction=0.30):
     """Segment grains and quantify size, twin-boundary fraction, and texture.
 
     Parameters
@@ -178,12 +179,25 @@ def grain_analysis(image, pixel_size=1.0, pixel_unit="px", mode="auto",
     frac, tot_len, str_len, segments = straight_boundary_fraction(
         skel, min_len_px=max(10, int(min_len_frac * min(H, W))))
     # The straight fraction is only a TWIN proxy when there is a curved-boundary
-    # baseline to contrast straight twins against. If almost the entire boundary
-    # network is straight (idealized / polygonal / faceted / columnar grains),
-    # the straightness says nothing about twins — flag it so callers report ~0
-    # rather than the raw fraction. (Real recrystallized twinned microstructures
-    # keep curved general boundaries, so they sit below this threshold.)
-    twin_proxy_reliable = bool(frac < 0.9)
+    # baseline to contrast straight twins against. The reliability test is the
+    # SIZE of that baseline, not just whether `frac` clears some high bar: real
+    # recrystallized twinned microstructures keep a substantial curved general-
+    # boundary population (straight Σ3 twins are a MINORITY of total boundary
+    # length), so the curved fraction (1 - frac) stays well above zero. When the
+    # network is predominantly straight (idealized / polygonal / faceted /
+    # columnar grains, or annealed grains with naturally straight boundaries),
+    # the curved baseline collapses and the straightness says nothing about
+    # twins — flag it so callers report ~0 rather than the raw fraction.
+    #
+    # Gating on the curved baseline (default >= 0.30) rather than the old
+    # `frac < 0.9` is what stops a 0.83-straight EBSD network from being reported
+    # as an 0.83 twin fraction (a real benchmark false-positive). NOTE: this is
+    # still a morphological proxy that cannot separate a straight GRAIN boundary
+    # from an intragranular twin lamella; a misorientation (Σ3) measurement is
+    # the only definitive twin test when orientation data is available.
+    curved_fraction = float("nan") if not np.isfinite(frac) else 1.0 - frac
+    twin_proxy_reliable = bool(
+        np.isfinite(curved_fraction) and curved_fraction >= min_curved_fraction)
 
     n = len(grains)
     out = dict(
@@ -193,6 +207,8 @@ def grain_analysis(image, pixel_size=1.0, pixel_unit="px", mode="auto",
         grain_diameters=np.array(diam_px) * pixel_size,
         grain_area=_describe(area_px, px2),
         straight_boundary_fraction=frac,
+        curved_boundary_fraction=curved_fraction,
+        min_curved_fraction=float(min_curved_fraction),
         twin_boundary_fraction=(frac if twin_proxy_reliable else 0.0),
         twin_proxy_reliable=twin_proxy_reliable,
         boundary_length_px=tot_len, straight_length_px=str_len,

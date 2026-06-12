@@ -34,6 +34,14 @@ with `pixel_unit` (EBSD/SEM grain maps are usually µm/px). Note: a `step_size` 
 supplied image is smaller, compute pixel size from FOV / image-width so it
 matches the pixels you actually have.
 
+Use the shared resolver rather than hand-rolling this:
+`from scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm`;
+`px = resolve_pixel_size_nm(metadata, image.shape)` returns `{"x","y","source"}`
+in nm/px (convert to µm if reporting µm), or `None`. It divides `field_of_view`
+by the image **shape** — never divide by a metadata pixel-count field like
+`n_cols`/`width` (usually absent → silently `None`). If it returns `None`,
+proceed in pixels and report sizes as uncalibrated rather than halting.
+
 ### foundational — pick the mode and deliverables
 The objective usually asks for several of: grain size distribution, twin
 (straight-boundary) fraction, twin count per grain, texture, EBSD-vs-channeling
@@ -101,10 +109,24 @@ fractions + dominant component.
 **Use the tool's twin outputs directly — do NOT run your own Hough/Canny twin
 detection.** `twin_boundary_fraction`, `mean_twin_segments_per_grain` and
 `straight_segments` are already set to 0 / empty when `twin_proxy_reliable` is
-False (an all-straight boundary network with no curved baseline), so following
-them gives the right answer (twins ≈ 0, no straight lines drawn) for idealized /
-polygonal microstructures without any extra code. If you want the raw value,
-report `straight_boundary_fraction` separately and clearly labelled as such.
+False, so following them gives the right answer (twins ≈ 0, no straight lines
+drawn) without any extra code. If you want the raw value, report
+`straight_boundary_fraction` separately and clearly labelled as such.
+
+The reliability gate is the SIZE of the curved-boundary baseline:
+`twin_proxy_reliable` is True only when `curved_boundary_fraction` (= 1 −
+straight fraction) is at least `min_curved_fraction` (default 0.30). A
+predominantly straight network — polygonal/faceted/columnar grains, OR annealed
+grains with naturally straight boundaries — has little curved baseline and is
+gated off. (A straight fraction of ~0.83, e.g. a typical EBSD IPF map, is NOT a
+0.83 twin fraction: curved fraction 0.17 < 0.30 → proxy unreliable → reported as
+≈0.) Tune `min_curved_fraction` only if you can SEE the curved baseline and
+disagree with the gate.
+
+**Overlay coordinate order:** `straight_segments` are `((x0, y0), (x1, y1))`
+pairs in (column, row) order. Plot them as `(x, y)` (e.g.
+`plt.plot([x0, x1], [y0, y1])`), NOT as `(row, col)`; transposing them mislocates
+segments and can place them outside a non-square frame.
 
 ## interpretation
 

@@ -24,6 +24,15 @@ fringes) silently under-counts the population.
 ## planning
 
 ### foundational
+**Pixel size (calibration).** When sizing needs physical units (`pixel_size_nm`
+for `object_diameter_nm`, or size stats in nm), resolve it with the shared
+helper, not inline arithmetic:
+`from scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm`;
+`px = resolve_pixel_size_nm(metadata, image.shape)` → `{"x","y","source"}` nm/px,
+or `None`. It divides `field_of_view` by the image **shape** — never divide by a
+metadata pixel-count field (`n_cols`/`width`), which is usually absent and
+silently yields `None`. If `None`, report diameters in pixels (uncalibrated).
+
 **Detect particles with the method that fits the image — choose by packing and
 contrast (you can see it).** For **densely-packed or faint small cores**,
 scale-space LoG blob detection is the right first choice — it finds each core as

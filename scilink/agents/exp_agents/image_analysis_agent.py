@@ -38,6 +38,7 @@ from ...executors import ScriptExecutor, require_sandbox_approval
 from ..lit_agents.literature_agent import FittingModelLiteratureAgent
 from .pipelines.image_analysis_pipelines import create_unified_image_analysis_pipeline
 from .controllers.image_analysis_controllers import compute_image_statistics
+from ._locked_exec import CANDIDATES_DIR_NAME
 from ...skills._shared.image_analysis_tools import (
     load_image_data,
     image_to_thumbnail_bytes,
@@ -247,6 +248,13 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         literature_file: Optional[str] = None,
         # Quality control overrides
         outlier_sigma: Optional[float] = None,
+        # Number of independent anchor-analysis attempts run in parallel;
+        # an LLM judge compares finished attempts (scores + visualizations)
+        # and locks the winner. Default 1 = no fan-out.
+        n_candidates: int = 1,
+        # Escalation mode: attempt 0 runs alone and is fast-accepted when
+        # strong; the remaining n_candidates-1 launch only when it is weak.
+        candidate_escalation: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -284,6 +292,17 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 generator so generated scripts can load prior outputs via
                 absolute path.
             outlier_sigma: Override default outlier sigma
+            n_candidates: Number of independent anchor-analysis attempts run
+                in parallel (clamped to 1-8). Each anchor (single image, or
+                first image of each series regime) is analyzed N times with
+                full verification; an LLM judge compares the finished results
+                and the winner's script is locked. Mitigates run-to-run
+                variance at N× anchor cost.
+            candidate_escalation: With n_candidates > 1, run attempt 0 alone
+                and fast-accept it when strong (approved with score margin in
+                few iterations); the remaining attempts launch only when it
+                is weak. Median cost ~1× anchor; weak anchors still get the
+                full comparison.
 
         Returns:
             Dict with status, detailed_analysis, scientific_claims,
@@ -296,6 +315,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         effective_outlier_sigma = (
             outlier_sigma if outlier_sigma is not None else self.outlier_sigma
         )
+        try:
+            n_candidates = max(1, min(int(n_candidates or 1), 8))
+        except (TypeError, ValueError):
+            n_candidates = 1
+        candidate_escalation = bool(candidate_escalation) and n_candidates > 1
 
         # Parse input
         data_path, data_paths, data_array, error = self._parse_data_input(data)
@@ -444,6 +468,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Opt-in verbatim reuse of the prior locked script (#172); default
             # False — prior runs are agent-judged reference material.
             "reuse_locked_script": bool(reuse_locked_script),
+            # Best-of-N: independent parallel anchor attempts; LLM judge
+            # selects the winner (1 = no fan-out). Escalation runs attempt 0
+            # alone and fans out only when it is weak.
+            "n_candidates": n_candidates,
+            "candidate_escalation": candidate_escalation,
             # First image (for planning)
             "image_path": (
                 image_paths[0] if image_paths else first_image_name
@@ -1150,8 +1179,14 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         tier1_files = []
         for ext in ("*.npy", "*.json", "*.png"):
             for f in self.output_dir.rglob(ext):
-                if not f.is_relative_to(tier1_archive):
-                    tier1_files.append(str(f))
+                # Skip the tier1/ archive (duplicates) and best-of-N loser
+                # attempts under _candidates/ (winner files are promoted to
+                # the canonical per-image dir).
+                if f.is_relative_to(tier1_archive):
+                    continue
+                if CANDIDATES_DIR_NAME in f.parts:
+                    continue
+                tier1_files.append(str(f))
 
         features = tier1_results.get("extracted_features", {})
         claims = tier1_results.get("scientific_claims", [])
@@ -1231,6 +1266,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # verbatim-reuse the locked script (that would defeat deepening).
             # Absent here, the controller's state.get(...) defaults to
             # agent-judged (no reuse), which is correct.
+            # Best-of-N applies to Tier 2 anchors as well.
+            "n_candidates": tier1_state.get("n_candidates", 1),
+            "candidate_escalation": tier1_state.get(
+                "candidate_escalation", False
+            ),
             # Sub-agent results
             "fft_preprocessing": None,
             "sam_preprocessing": None,
@@ -1321,6 +1361,13 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if series_results and series_results[0].get("reuse_validity"):
                 results["reuse_validity"] = series_results[0]["reuse_validity"]
 
+            # Best-of-N: candidate table for the lone anchor (flattened)
+            anchor_tables = state.get("anchor_candidates") or {}
+            if anchor_tables:
+                table = next(iter(anchor_tables.values()))
+                results["anchor_candidates"] = table["candidates"]
+                results["anchor_judge"] = table["judge"]
+
         else:
             # Series: full structure with trends and flagged images
             successful = sum(
@@ -1385,6 +1432,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             results["locked_analysis_config"] = state.get(
                 "locked_analysis_config"
             )
+
+            # Best-of-N: per-anchor candidate tables ({image_index: {candidates, judge}})
+            if state.get("anchor_candidates"):
+                results["anchor_candidates"] = state["anchor_candidates"]
 
             # Aggregate verification summary
             vh_entries = [

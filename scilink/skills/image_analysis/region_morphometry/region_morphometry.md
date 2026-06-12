@@ -31,7 +31,13 @@ precipitate full extent; needle/wedge taper.
 
 ### foundational — calibration
 Pass `pixel_size` + `pixel_unit` from metadata; all lengths come back in that
-unit. Assumes square pixels.
+unit. Assumes square pixels. Resolve the value with the shared helper rather than
+hand-rolling it:
+`from scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm`;
+`px = resolve_pixel_size_nm(metadata, image.shape)` → `{"x","y","source"}` nm/px,
+or `None`. It divides `field_of_view` by the image **shape**; never divide by a
+metadata pixel-count field (`n_cols`/`width`) — that field is usually absent and
+silently yields `None`. If `None`, report sizes in pixels (uncalibrated).
 
 ## analysis
 
