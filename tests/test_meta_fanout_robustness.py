@@ -72,7 +72,7 @@ def _verdict(paths, fanout_set):
 
 
 def _install_fake_gate(fanout_set):
-    def fake(orch, prompt):
+    def fake(orch, prompt, extra_parts=None):
         if "complementary measurements of ONE system" in prompt:   # HOLISTIC fusion prompt
             return {"detailed_analysis": "fused narrative",
                     "scientific_claims": [{"claim": "c", "keywords": ["k"]}]}

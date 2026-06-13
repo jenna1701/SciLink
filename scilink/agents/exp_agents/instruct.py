@@ -1123,6 +1123,8 @@ Follow these steps:
 
 3.  **Generate synthesized claims** that genuinely depend on MORE THAN ONE dataset. Do not relabel a single-dataset finding as a synthesis.
 
+4.  **List the caveats** — the limitations a reader must keep in mind when trusting this synthesis. Be specific and honest: what is INFERRED vs directly MEASURED (e.g. a correlation read from area fractions rather than pixel-level co-registration); what could NOT be established from the data; technique limitations that bound the conclusions (surface- vs bulk-sensitivity, Z-contrast insensitivity to oxidation state, area-averaging); and any assumptions made (e.g. that the datasets share a region without an explicit registration marker). If there are essentially no caveats, return an empty list.
+
 You MUST respond in a valid JSON format with the following keys:
 {
     "detailed_analysis": "<reconciled narrative across the datasets; state explicitly where they correlate and where they do not>",
@@ -1133,7 +1135,8 @@ You MUST respond in a valid JSON format with the following keys:
             "has_anyone_question": "<A question for a literature search, formatted as 'Has anyone observed...'>",
             "keywords": ["<keyword1>", "<keyword2>"]
         }
-    ]
+    ],
+    "caveats": ["<a specific limitation/assumption a reader must keep in mind>", "..."]
 }
 """
 

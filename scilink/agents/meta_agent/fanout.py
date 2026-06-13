@@ -27,6 +27,7 @@ The logic lives here as free functions taking the orchestrator instance; thin
 sibling helper to the orchestrator.
 """
 
+import io
 import json
 import logging
 import re
@@ -149,18 +150,23 @@ def _parse_json_block(text: str) -> Optional[dict]:
             return None
 
 
-def _llm_json(orch, prompt: str) -> Optional[dict]:
+def _llm_json(orch, prompt: str, extra_parts=None) -> Optional[dict]:
     """LLM call returning parsed JSON, or None after retries.
 
     Retries on an empty completion or an unparseable body — Bedrock
     intermittently returns an empty content block, and silently fail-closing
     the gate on that transient would wrongly decline a complementary set.
     Only a persistent failure returns None (which callers fail closed on).
+
+    ``extra_parts`` is an optional list of additional prompt parts (label
+    strings and/or ``{mime_type, data}`` image dicts) appended after the prompt
+    — used to attach per-dataset figures to the (multimodal) fusion call.
     """
     model = _structured_model(orch)
+    contents = [prompt] + list(extra_parts or [])
     for attempt in range(_LLM_JSON_ATTEMPTS):
         try:
-            resp = model.generate_content(contents=[prompt])
+            resp = model.generate_content(contents=contents)
             text = resp.text if hasattr(resp, "text") else str(resp)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"complementarity/fusion LLM call failed "
@@ -571,6 +577,96 @@ def run_fanout(orch, branches: List[dict]) -> str:
 # Fusion
 # ======================================================================
 
+_FIGURE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+_FUSION_FIG_MAX_DIM = 1536   # enough to read spatial structure; keeps payload small
+
+
+def _branch_key_figure(entry: dict) -> Optional[str]:
+    """Pick one representative figure from a branch's produced files.
+
+    Prefers known representative names (segmentation overlay, NMF/PCA summary
+    grid, fit-review plot); falls back to the first image. Returns a path or None.
+    """
+    imgs = [str(f) for f in (entry.get("files_produced") or [])
+            if Path(str(f)).suffix.lower() in _FIGURE_EXTS and Path(str(f)).exists()]
+    if not imgs:
+        return None
+    for pat in ("summary_grid", "visualization", "overlay", "review", "fit", "map"):
+        for f in imgs:
+            if pat in Path(f).name.lower():
+                return f
+    return imgs[0]
+
+
+def _load_figure_part(path: str) -> Optional[dict]:
+    """Load an image, downscale for the fusion call, return a {mime_type,data} part."""
+    try:
+        from PIL import Image
+        im = Image.open(path)
+        if im.mode not in ("RGB", "L"):
+            im = im.convert("RGB")
+        if max(im.size) > _FUSION_FIG_MAX_DIM:
+            im.thumbnail((_FUSION_FIG_MAX_DIM, _FUSION_FIG_MAX_DIM))
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return {"mime_type": "image/png", "data": buf.getvalue()}
+    except Exception:  # noqa: BLE001 - a bad figure must not break fusion
+        return None
+
+
+def _write_fusion_html(out_dir: Path, fused: dict, figures: list) -> Optional[Path]:
+    """Write a self-contained HTML fusion report (narrative + claims + the
+    per-dataset figures inline as base64). ``figures`` is a list of
+    ``(label, png_bytes)``. Returns the path, or None on failure."""
+    import html as _html
+    import base64
+    try:
+        claims_html = "".join(
+            f"<li><b>{_html.escape(str(c.get('claim', '')))}</b>"
+            f"<div class='imp'>{_html.escape(str(c.get('scientific_impact', '')))}</div></li>"
+            for c in (fused.get("scientific_claims") or []) if isinstance(c, dict)
+        ) or "<li>(none)</li>"
+        caveats = [str(c) for c in (fused.get("caveats") or []) if str(c).strip()]
+        caveats_html = (
+            "<h2>Caveats &amp; limitations</h2><ul class='cav'>"
+            + "".join(f"<li>{_html.escape(c)}</li>" for c in caveats) + "</ul>"
+        ) if caveats else ""
+        figs_html = "".join(
+            f"<div class='fig'><h3>{_html.escape(str(lbl))}</h3>"
+            f"<img src='data:image/png;base64,{base64.b64encode(b).decode()}'></div>"
+            for lbl, b in figures
+        ) or "<p>(no figures available)</p>"
+        focus_html = (f"<p><b>Focus:</b> {_html.escape(str(fused.get('focus')))}</p>"
+                      if fused.get("focus") else "")
+        doc = f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Cross-dataset fusion</title><style>
+ body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:920px;
+   margin:24px auto;padding:0 18px;color:#1b1b1b;line-height:1.6}}
+ h1{{font-size:1.5em}} h2{{margin-top:1.4em;border-bottom:1px solid #e3e3e3;padding-bottom:4px}}
+ .narr{{white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:8px;padding:14px 16px}}
+ .imp{{color:#555;font-size:.9em;margin:2px 0 10px}}
+ .fig{{margin:14px 0}} .fig img{{max-width:100%;border:1px solid #ddd;border-radius:8px}}
+ ol{{padding-left:20px}} li{{margin-bottom:6px}}
+ .cav{{background:#fff8f0;border:1px solid #f0e0c8;border-radius:8px;padding:10px 16px 10px 32px}}
+ .cav li{{color:#6b4e1a}}
+</style></head><body>
+<h1>🔀 Cross-dataset fusion</h1>
+<p><b>Datasets:</b> {_html.escape(", ".join(str(l) for l in (fused.get("labels") or [])))}</p>
+{focus_html}
+<h2>Reconciled interpretation</h2>
+<div class="narr">{_html.escape(str(fused.get("detailed_analysis", "")))}</div>
+<h2>Synthesized claims</h2><ol>{claims_html}</ol>
+{caveats_html}
+<h2>Source figures (one per dataset)</h2>{figs_html}
+</body></html>"""
+        path = out_dir / "fusion_report.html"
+        path.write_text(doc, encoding="utf-8")
+        return path
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"could not write fusion HTML report: {e}")
+        return None
+
+
 def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> str:
     """Reconcile finished branch findings into one cross-dataset narrative.
 
@@ -609,14 +705,37 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             f"Key findings:\n{findings_str}"
         )
 
+    # One representative figure per branch — attached to the (multimodal) fusion
+    # call so spatial correlations can be verified from the actual plots, not
+    # only the text. Also embedded in the HTML report. Best-effort: a missing or
+    # bad figure just drops that branch's image.
+    figures = []          # (label, png_bytes) for the HTML report
+    image_parts = []      # interleaved label-strings + image dicts for the LLM
+    for e in ok:
+        fpath = _branch_key_figure(e)
+        part = _load_figure_part(fpath) if fpath else None
+        if part:
+            label = e.get("label") or f"delegation {e['index']}"
+            figures.append((label, part["data"]))
+            image_parts.append(f"\n[Figure — {label}]:")
+            image_parts.append(part)
+
     prompt = (
         HOLISTIC_EXPERIMENTAL_SYNTHESIS_INSTRUCTIONS
         + (f"\n\nFUSION FOCUS (weight your synthesis toward this): {focus}\n"
            if focus else "")
+        + ("\n\nFIGURES: one representative figure per dataset is attached after "
+           "this text, labeled by dataset. Use them to verify spatial/visual "
+           "correlations DIRECTLY rather than relying on the text descriptions "
+           "alone.\n" if image_parts else "")
         + "\n\n--- PER-DATASET FINDINGS TO RECONCILE ---\n\n"
         + "\n\n".join(blocks)
     )
-    parsed = _llm_json(orch, prompt)
+    parsed = _llm_json(orch, prompt, extra_parts=image_parts or None)
+    if parsed is None and image_parts:
+        # Multimodal call failed — fall back to a text-only fusion.
+        logger.warning("fusion with figures failed; retrying text-only")
+        parsed = _llm_json(orch, prompt)
     if not parsed or "detailed_analysis" not in parsed:
         return json.dumps({"status": "error",
                            "message": "Fusion synthesis did not return a usable result."})
@@ -634,12 +753,17 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "focus": focus,
         "detailed_analysis": parsed.get("detailed_analysis", ""),
         "scientific_claims": parsed.get("scientific_claims", []),
+        "caveats": parsed.get("caveats", []),
     }
     try:
         with open(report_path, "w") as fh:
             json.dump(fused, fh, indent=2, default=str)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"could not write fusion report: {e}")
+
+    # Human-facing HTML report: narrative + claims + the per-dataset figures.
+    html_path = _write_fusion_html(out_dir, fused, figures)
+    produced = [str(report_path)] + ([str(html_path)] if html_path else [])
 
     with orch._fanout_lock:
         orch._delegation_ledger.append({
@@ -653,7 +777,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             "summary": parsed.get("detailed_analysis", ""),
             "key_findings": [c.get("claim", "") for c in parsed.get("scientific_claims", [])
                              if isinstance(c, dict)],
-            "files_produced": [str(report_path)],
+            "files_produced": produced,
             "warnings": [],
             "error": None,
         })
@@ -661,7 +785,10 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
     return json.dumps({
         "status": "success",
         "fused_from": [e["index"] for e in ok],
+        "figures_used": len(figures),
         "detailed_analysis": parsed.get("detailed_analysis", ""),
         "scientific_claims": parsed.get("scientific_claims", []),
+        "caveats": parsed.get("caveats", []),
         "report_path": str(report_path),
+        "report_html_path": str(html_path) if html_path else None,
     }, indent=2, default=str)

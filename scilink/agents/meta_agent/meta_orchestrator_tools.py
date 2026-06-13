@@ -486,12 +486,17 @@ class MetaOrchestratorTools:
                 "Reconcile the findings of two or more COMPLETED analysis "
                 "delegations (typically the branches from `delegate_to_analyses`, "
                 "but any successful delegations work) into ONE cross-dataset "
-                "scientific narrative + synthesized claims, written to a fusion "
-                "report. Reconciles local vs bulk / multi-modal evidence. "
-                "Crucially, 'no significant correlation found' is a VALID result "
-                "— it will not manufacture a correlation the findings don't "
-                "support. Pass the `delegation_index` numbers to fuse; optional "
-                "`focus` weights the synthesis toward a specific question."
+                "scientific narrative + synthesized claims. Reconciles spatial / "
+                "shared-axis / local-vs-bulk / complementary-observable evidence, "
+                "and ATTACHES one representative figure per dataset to the "
+                "(multimodal) synthesis so spatial correlations are verified from "
+                "the actual plots, not just the text. Writes BOTH a JSON and a "
+                "human-readable HTML fusion report (figures inline) — surface the "
+                "`report_html_path` to the user. Crucially, 'no significant "
+                "correlation found' is a VALID result — it will not manufacture a "
+                "correlation the findings don't support. Pass the "
+                "`delegation_index` numbers to fuse; optional `focus` weights the "
+                "synthesis toward a specific question."
             ),
             parameters={
                 "delegation_indices": {
