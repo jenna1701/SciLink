@@ -32,6 +32,7 @@ import json
 import logging
 import re
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -42,7 +43,8 @@ logger = logging.getLogger("meta_agent.fanout")
 # not the raw input: the gate prunes first, so a 6-upload request with one
 # complementary pair runs a 2-way mesh, not a 6-way one.
 FANOUT_MAX_WORKERS = 4          # peak concurrent branches (rate-limit ceiling)
-_FANOUT_HEARTBEAT_S = 20        # how often to print a "still running" heartbeat
+_FANOUT_POLL_S = 5              # how often to check for finished branches
+_FANOUT_HEARTBEAT_S = 60        # min gap between "still running" ticks
 FANOUT_SOFT_CAP = 5             # warn / confirm beyond this many fused branches
 FANOUT_HARD_CAP = 8             # refuse beyond this — cost/quality cliff
 # In AUTONOMOUS mode there is no human to confirm, so the verdict IS the gate:
@@ -532,18 +534,29 @@ def run_fanout(orch, branches: List[dict]) -> str:
         # Wait with a periodic heartbeat so the user can see the parallel run is
         # alive (a slow branch can otherwise look like a hang). Each branch is
         # announced as it finishes; the rest get a "still running" tick.
+        # Plain text only — the branch child orchestrators stream their own
+        # progress to the same stdout from worker threads, and this output is
+        # often captured (UI / log) where ANSI escapes and \r are not honored.
+        # So no in-place rewrite: poll often (prompt completion announcements)
+        # but print a "still running" tick at most once per _FANOUT_HEARTBEAT_S,
+        # and treat a completion as its own liveness signal (resets the timer).
         pending = set(fut_label)
-        waited = 0
+        start = time.monotonic()
+        since_tick = 0.0
         while pending:
-            done, pending = wait(pending, timeout=_FANOUT_HEARTBEAT_S)
+            t0 = time.monotonic()
+            done, pending = wait(pending, timeout=_FANOUT_POLL_S)
+            since_tick += time.monotonic() - t0
             for f in done:
                 f.result()  # _run_one_branch never raises; just surfaces oddities
                 print(f"  ✅ analysis branch finished: {fut_label[f]}  "
                       f"({n_total - len(pending)}/{n_total} done)")
-            if pending:
-                waited += _FANOUT_HEARTBEAT_S
+                since_tick = 0.0  # a completion already shows the run is alive
+            if pending and since_tick >= _FANOUT_HEARTBEAT_S:
+                since_tick = 0.0
+                elapsed = int(time.monotonic() - start)
                 print(f"  ⏳ {len(pending)} of {n_total} parallel analyses still "
-                      f"running ... (~{waited}s elapsed)")
+                      f"running ... (~{elapsed}s elapsed)")
 
     def _productive(e):
         # A branch that reports success but yields neither findings nor files
