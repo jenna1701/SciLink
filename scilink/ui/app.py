@@ -85,8 +85,7 @@ def _render_fanout_confirm(ctx: str) -> None:
         st.markdown("**Branches** — run concurrently, each seeing the others "
                     "as auxiliary:\n" + "\n".join(f"- {b}" for b in branches))
     if rationale:
-        with st.expander("Why these are complementary"):
-            st.write(rationale)
+        st.markdown(f"**Why:** {rationale}")
     st.caption("Branches run autonomously — no per-branch approval pauses.")
 
 
@@ -770,6 +769,12 @@ else:
                 # "y", Cancel sends "no" — matching _confirm_fanout's parsing),
                 # no text area (there is nothing to edit, only launch/abort).
                 elif _is_fanout_confirm:
+                    # Anchor so theme.py can force Cancel/Launch to identical
+                    # box size (equal columns fix width; this fixes height too).
+                    st.markdown(
+                        '<span class="fanout-actions-anchor"></span>',
+                        unsafe_allow_html=True,
+                    )
                     col_cancel, col_go = st.columns(2)
                     with col_cancel:
                         if st.button("Cancel", type="secondary", width="stretch"):
