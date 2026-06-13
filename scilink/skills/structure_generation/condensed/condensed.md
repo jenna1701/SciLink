@@ -35,18 +35,30 @@ rather than packed here. Pack explicitly here for generic liquids / solutions / 
 
 ## Implementation
 
-Prefer whatever is installed (the generation loop will fall back if an import is missing):
+Prefer whatever is installed (check the AVAILABLE LIBRARIES list in the prompt). For any
+**multi-component** box — solutions, ions in solvent, mixtures — strongly prefer a dedicated
+packing tool (Packmol, OpenMM, mBuild) over a hand-rolled placement loop: these enforce the
+minimum separation across **all** atom pairs, whereas ad-hoc loops routinely check only
+heavy-atom centres and let hydrogens of neighbouring molecules overlap. Reserve the ASE/numpy
+fallback for when no packing library is available.
 
-- **Packmol** — the de-facto packing tool. Drive it from Python via **pymatgen**
-  (`pymatgen.io.packmol.PackmolBoxGen`), which writes the Packmol input, runs it, and returns a
-  structure; or write a Packmol input file and call the `packmol` binary via `subprocess`
-  (place N copies per species with a `tolerance` ≈ 2.0 Å minimum separation).
+- **Packmol** — the de-facto packing tool, and the default choice for solvated / multi-component
+  boxes. Drive it from Python via **pymatgen** (`pymatgen.io.packmol.PackmolBoxGen`), which writes
+  the Packmol input, runs it, and returns a structure; or write a Packmol input file and call the
+  `packmol` binary via `subprocess` (place N copies per species with a `tolerance` ≈ 2.0 Å minimum
+  separation). Packmol checks every atom pair, so ions and solvent are packed without the
+  hydrogen-overlap clashes a manual loop produces.
 - **OpenMM `Modeller.addSolvent()`** (often with **PDBFixer**) — adds a water box + neutralizing
   ions in a few lines; convenient for solvating a solute.
 - **mBuild (MoSDeF)** — programmatic construction of complex / multi-component / polymeric boxes
   (`mbuild.fill_box`).
 - **ASE / numpy fallback** — build each molecule once (ASE / RDKit), then insert copies at random
-  positions/orientations into the cell, rejecting placements closer than a minimum distance.
+  positions/orientations into the cell, rejecting placements closer than a minimum distance. The
+  rejection test must compare **every atom** of the trial molecule (hydrogens included) against
+  **every** already-placed atom under the minimum image — checking only heavy-atom or
+  molecular-centre distances lets light atoms of neighbouring molecules interpenetrate. Wrap each
+  molecule into the cell as a rigid unit (shift by one reference atom's image), never per-atom
+  (`positions % L` applied atom-by-atom splits a molecule across the boundary).
 - **Cell & PBC:** set an orthorhombic/cubic `cell` and `pbc=True` sized to the target density.
 - **Output:** write a periodic POSCAR, e.g.
   `ase.io.write("POSCAR", atoms, format="vasp", vasp5=True, direct=True)`, then print the exact
