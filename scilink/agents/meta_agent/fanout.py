@@ -381,7 +381,13 @@ def _mesh_task(branch: dict, companions: List[dict]) -> str:
     a shape-aligned companion numerically (correlate / mask / normalize).
     """
     task = branch["task"].rstrip()
-    block = []
+    # This is ONE branch of a joint multi-dataset analysis — novelty is assessed
+    # ONCE on the fused cross-dataset interpretation, not per branch.
+    block = ["", "",
+             "NOTE — this is ONE branch of a JOINT multi-dataset analysis: do NOT "
+             "run novelty / literature assessment (assess_novelty) on this branch's "
+             "findings. Novelty is evaluated once on the FUSED cross-dataset "
+             "interpretation afterward. Complete the analysis itself normally."]
     if companions:
         block += ["", "",
                   f"PRIMARY dataset for THIS analysis: {branch['data_path']} — pass "
@@ -636,11 +642,22 @@ def _write_fusion_html(out_dir: Path, fused: dict, figures: list) -> Optional[Pa
     import html as _html
     import base64
     try:
-        claims_html = "".join(
-            f"<li><b>{_html.escape(str(c.get('claim', '')))}</b>"
-            f"<div class='imp'>{_html.escape(str(c.get('scientific_impact', '')))}</div></li>"
-            for c in (fused.get("scientific_claims") or []) if isinstance(c, dict)
-        ) or "<li>(none)</li>"
+        def _claim_li(c):
+            score = c.get("novelty_score")
+            badge = (f" <span class='novbadge'>novelty {_html.escape(str(score))}/5</span>"
+                     if score not in (None, "") else "")
+            expl = c.get("novelty_explanation")
+            expl_html = (f"<div class='imp'><b>Novelty:</b> {_html.escape(str(expl))}</div>"
+                         if expl else "")
+            return (f"<li><b>{_html.escape(str(c.get('claim', '')))}</b>{badge}"
+                    f"<div class='imp'>{_html.escape(str(c.get('scientific_impact', '')))}</div>"
+                    f"{expl_html}</li>")
+        _claims = [c for c in (fused.get("scientific_claims") or []) if isinstance(c, dict)]
+        claims_html = "".join(_claim_li(c) for c in _claims) or "<li>(none)</li>"
+        _claims_hdr = ("Synthesized claims"
+                       + ("  <small>(with literature-novelty score per claim)</small>"
+                          if any(c.get("novelty_score") not in (None, "") for c in _claims)
+                          else ""))
         caveats = [str(c) for c in (fused.get("caveats") or []) if str(c).strip()]
         caveats_html = (
             "<h2>Caveats &amp; limitations</h2><ul class='cav'>"
@@ -664,13 +681,16 @@ def _write_fusion_html(out_dir: Path, fused: dict, figures: list) -> Optional[Pa
  ol{{padding-left:20px}} li{{margin-bottom:6px}}
  .cav{{background:#fff8f0;border:1px solid #f0e0c8;border-radius:8px;padding:10px 16px 10px 32px}}
  .cav li{{color:#6b4e1a}}
+ .novbadge{{background:#e7efff;color:#274690;border:1px solid #c7d6f5;border-radius:10px;
+   padding:1px 8px;font-size:.8em;font-weight:bold;white-space:nowrap}}
+ h2 small{{color:#888;font-weight:normal;font-size:.6em}}
 </style></head><body>
 <h1>🔀 Cross-dataset fusion</h1>
 <p><b>Datasets:</b> {_html.escape(", ".join(str(l) for l in (fused.get("labels") or [])))}</p>
 {focus_html}
 <h2>Reconciled interpretation</h2>
 <div class="narr">{_html.escape(str(fused.get("detailed_analysis", "")))}</div>
-<h2>Synthesized claims</h2><ol>{claims_html}</ol>
+<h2>{_claims_hdr}</h2><ol>{claims_html}</ol>
 {caveats_html}
 <h2>Source figures (one per dataset)</h2>{figs_html}
 </body></html>"""
@@ -680,6 +700,47 @@ def _write_fusion_html(out_dir: Path, fused: dict, figures: list) -> Optional[Pa
     except Exception as e:  # noqa: BLE001
         logger.warning(f"could not write fusion HTML report: {e}")
         return None
+
+
+def _assess_fusion_novelty(orch, claims: list):
+    """Literature-novelty scoring on the FUSED cross-dataset claims (the joint-
+    analysis equivalent of per-analysis `assess_novelty`). Reuses the same
+    OwlLiteratureAgent + NoveltyScorer path. Returns a list of scored entries,
+    or None when no literature backend (futurehouse_api_key) is configured or
+    nothing scored. Best-effort — never raises."""
+    key = getattr(orch, "futurehouse_api_key", None)
+    if not key or not claims:
+        return None
+    try:
+        from ..lit_agents import OwlLiteratureAgent, NoveltyScorer
+        owl = OwlLiteratureAgent(api_key=key, max_wait_time=600)
+        scorer = NoveltyScorer(api_key=orch.api_key, model_name=orch.model_name,
+                               base_url=orch.base_url)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"fusion novelty: could not init literature agents: {e}")
+        return None
+    scored = []
+    for i, c in enumerate(claims):
+        if not isinstance(c, dict):
+            continue
+        q = c.get("has_anyone_question")
+        if not q:
+            continue
+        try:
+            res = owl.query_literature(q)
+            if res.get("status") != "success":
+                continue
+            sc = scorer.score_novelty(q, res.get("formatted_answer", ""))
+            scored.append({
+                "claim": c.get("claim"),
+                "question": q,
+                "novelty_score": sc.get("novelty_score", 0),
+                "novelty_explanation": sc.get("explanation"),
+            })
+        except Exception as e:  # noqa: BLE001 - one bad claim must not break fusion
+            logger.warning(f"fusion novelty: claim {i + 1} failed: {e}")
+            continue
+    return scored or None
 
 
 def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> str:
@@ -755,6 +816,25 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         return json.dumps({"status": "error",
                            "message": "Fusion synthesis did not return a usable result."})
 
+    # Joint-analysis novelty: assess the FUSED claims once (the branches were
+    # told to skip per-branch novelty). No-op without a literature backend.
+    fused_claims = parsed.get("scientific_claims") or []
+    novelty = None
+    if getattr(orch, "futurehouse_api_key", None) and fused_claims:
+        print(f"  🔍 Assessing novelty of {len(fused_claims)} fused "
+              "cross-dataset claim(s)...")
+        novelty = _assess_fusion_novelty(orch, fused_claims)
+        # Attach each score to ITS claim (matched by the literature question), so
+        # novelty enriches the claims inline rather than as a duplicate list.
+        if novelty:
+            _by_q = {n.get("question"): n for n in novelty if isinstance(n, dict)}
+            for c in fused_claims:
+                if isinstance(c, dict):
+                    _n = _by_q.get(c.get("has_anyone_question"))
+                    if _n:
+                        c["novelty_score"] = _n.get("novelty_score")
+                        c["novelty_explanation"] = _n.get("novelty_explanation")
+
     # Persist the fused report + record a fusion ledger entry.
     from datetime import datetime
     with orch._fanout_lock:
@@ -769,6 +849,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "detailed_analysis": parsed.get("detailed_analysis", ""),
         "scientific_claims": parsed.get("scientific_claims", []),
         "caveats": parsed.get("caveats", []),
+        "novelty": novelty,
     }
     try:
         with open(report_path, "w") as fh:
@@ -804,6 +885,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "detailed_analysis": parsed.get("detailed_analysis", ""),
         "scientific_claims": parsed.get("scientific_claims", []),
         "caveats": parsed.get("caveats", []),
+        "novelty": novelty,
         "report_path": str(report_path),
         "report_html_path": str(html_path) if html_path else None,
     }, indent=2, default=str)
