@@ -29,6 +29,21 @@ bugs found, and what was fixed vs. flagged.
   agents' own QC correctly rejected degenerate fits on the synthetic cube. A
   clean re-run with proper energy metadata confirms the EELS branch. ✅
 
+### 3-WAY end-to-end (image + datacube + spectrum, one sample) ✅
+HAADF→`ImageAnalysisAgent`, EELS cube→`HyperspectralAnalysisAgent`,
+XPS→`CurveFittingAgent` — **three different agents concurrently**, all 3
+produced output. Gate complementary 0.90 over a set with TWO join axes
+(spatial HAADF↔EELS + chemical-state ↔XPS). Fusion found the real correlation
+(bright HAADF domains = Ti⁴⁺ TiO₂ domains, ~45/55% spatial coincidence) **and
+explicitly flagged the unresolved dark phase** — honest demarcation on a
+3-dataset synthesis.
+
+### DSC + TGA end-to-end (same-modality, two CurveFitting branches) ✅
+Fusion reconciled events point-for-point on the shared temperature axis:
+dehydration (DSC endotherm + coincident TGA mass loss) vs a mass-neutral
+crystallization exotherm (DSC-only) — the planted physics — and flagged a
+DSC-vs-TGA quantitative discrepancy, prioritizing the direct mass measurement.
+
 ### Stress battery — data-type breadth (gate, one LLM call each) — 6/6 graded
 | Scenario | Verdict | Note |
 |---|---|---|
