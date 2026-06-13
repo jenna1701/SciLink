@@ -17,6 +17,7 @@ this development stage — see CLAUDE.md "Why no BaseChatOrchestrator refactor".
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -373,10 +374,21 @@ class MetaOrchestratorAgent:
         self.checkpoint_path = self.base_dir / "checkpoint.json"
         self.analysis_dir = self.base_dir / "analysis"
         self.planning_dir = self.base_dir / "planning"
+        # Fan-out workers (ephemeral, one isolated analysis session per branch)
+        # and fused cross-dataset reports live in their own sub-trees, distinct
+        # from the persistent analysis/ and planning/ children. See fanout.py.
+        self.fanout_dir = self.base_dir / "fanout"
+        self.fusion_dir = self.base_dir / "fusion"
 
         # Session state — kept shallow; children own their deep state.
         self._children: Dict[str, Any] = {}          # "analysis"/"planning" -> agent
         self._delegation_ledger: List[Dict[str, Any]] = []
+        # Complementarity verdicts cached by frozenset of dataset paths, so the
+        # standalone assess_complementarity tool and the internal gate in
+        # run_fanout share one LLM call. Serializes ledger preallocation and
+        # fusion-entry appends across fan-out worker threads.
+        self._complementarity_cache: Dict[frozenset, Dict[str, Any]] = {}
+        self._fanout_lock = threading.Lock()
         # Auto-generated specialist capability inventory — built once on the
         # first chat turn (children must exist to read their tool registries).
         self._capabilities_block: Optional[str] = None
@@ -1069,6 +1081,26 @@ class MetaOrchestratorAgent:
         if limit is not None and limit > 0:
             ledger = ledger[-limit:]
         return json.dumps(ledger, indent=2, default=str)
+
+    # =========================================================================
+    # Parallel multi-dataset analysis (fan-out) — see fanout.py
+    # =========================================================================
+
+    def _assess_complementarity(self, datasets: list) -> str:
+        """Partition datasets into complementary / redundant / unrelated."""
+        from .fanout import assess_complementarity
+        return json.dumps(assess_complementarity(self, datasets),
+                          indent=2, default=str)
+
+    def _run_fanout(self, branches: list) -> str:
+        """Gate, confirm, then run analysis branches concurrently (full mesh)."""
+        from .fanout import run_fanout
+        return run_fanout(self, branches)
+
+    def _fuse_delegations(self, indices: list, focus: Optional[str] = None) -> str:
+        """Reconcile finished complementary branch findings into one narrative."""
+        from .fanout import fuse_delegations
+        return fuse_delegations(self, indices, focus)
 
     # =========================================================================
     # Checkpoint / history
