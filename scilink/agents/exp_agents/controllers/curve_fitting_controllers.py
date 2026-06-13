@@ -3587,8 +3587,13 @@ Return JSON with:
                 f"from the prior run."
             )
 
-        # --- Initial fit (skills mandatory at T=0) ---
-        state["_annealing_level"] = 0
+        # --- Initial fit (annealing schedule starts here; default T=0) ---
+        # A re-run may start the schedule HIGHER (e.g. hot) via
+        # `_starting_annealing_level`, so it does not repeat early constraint
+        # stages a prior run already found inadequate. Default 0 = unchanged.
+        _start_level = max(0, min(int(state.get("_starting_annealing_level") or 0),
+                                  len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1))
+        state["_annealing_level"] = _start_level
         initial_model = state.get('locked_fitting_config', {}).get('physical_model') or 'Initial model'
         self.logger.info(f"   Attempt 1: {str(initial_model)[:80]}...")
 
@@ -3648,7 +3653,7 @@ Return JSON with:
                     #       the minimum allowed level — guarantees we hit the
                     #       hot level by the end of the budget regardless of
                     #       what the rate/patience say.
-                    _annealing_level = 0
+                    _annealing_level = _start_level
                     # Annealing level at which the PREVIOUS refit actually ran.
                     # Used to detect the escalation INTO the hot level (see the
                     # fresh-generation trigger below). Must track the prior
@@ -3657,7 +3662,10 @@ Return JSON with:
                     # an iteration, so a start-of-iteration snapshot already
                     # equals the (escalated) current level and never registers a
                     # transition. Mirrors image_analysis's _previous_annealing_level.
-                    _previous_annealing_level = 0
+                    # max(start-1,0): starting AT hot still registers the
+                    # transition into hot (fires fresh generation); start at 0
+                    # restores the original `= 0`.
+                    _previous_annealing_level = max(_start_level - 1, 0)
                     _prev_best_r2 = best_r2
                     _n_anneal_levels = len(self._CONSTRAINT_ANNEALING_SCHEDULE)
                     _PATIENCE = 2

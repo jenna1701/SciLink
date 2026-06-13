@@ -255,6 +255,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Escalation mode: attempt 0 runs alone and is fast-accepted when
         # strong; the remaining n_candidates-1 launch only when it is weak.
         candidate_escalation: bool = False,
+        # Annealing schedule start level for THIS run (None/0 = current
+        # behavior: start frozen at T=0 and escalate adaptively). A re-run may
+        # start higher (e.g. hot) so it does not re-obey early constraint stages
+        # a prior run already found inadequate.
+        starting_annealing_level: Optional[int] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -451,6 +456,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "series_metadata": series_metadata or {},
             "analysis_hints": hints,
             "analysis_objective": objective,
+            # Annealing schedule start level (None/0 = start frozen at T=0).
+            "_starting_annealing_level": starting_annealing_level,
             # Auxiliary reference data
             **aux_state,
             # Domain skill

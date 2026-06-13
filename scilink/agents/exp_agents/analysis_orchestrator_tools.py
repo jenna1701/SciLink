@@ -2094,6 +2094,7 @@ class AnalysisOrchestratorTools:
             literature_file: str = None,
             r2_threshold: float = None,
             max_verification_iterations: int = None,
+            starting_annealing_level: int = None,
             n_candidates: int = None,
         ) -> str:
             """
@@ -2637,6 +2638,21 @@ class AnalysisOrchestratorTools:
                             f"   max_verification_iterations={max_verification_iterations} ignored: "
                             f"{self.AGENT_NAMES.get(agent_id, 'agent')} has no verification loop."
                         )
+                if starting_annealing_level is not None:
+                    # Annealing-schedule override for a RE-RUN: start the
+                    # constraint-relaxation schedule higher (e.g. hot) so the
+                    # agent does not repeat early stages a prior run already
+                    # found inadequate. Default/first run is None -> unchanged
+                    # (schedule starts frozen at T=0). Only forward to agents
+                    # whose analyze() accepts it (CurveFitting, Image).
+                    import inspect as _inspect
+                    if "starting_annealing_level" in _inspect.signature(agent.analyze).parameters:
+                        analyze_kwargs["starting_annealing_level"] = int(starting_annealing_level)
+                    else:
+                        self.logger.info(
+                            f"   starting_annealing_level={starting_annealing_level} ignored: "
+                            f"{self.AGENT_NAMES.get(agent_id, 'agent')} has no annealing schedule."
+                        )
                 # Best-of-N: deterministic per-agent default (image=3, others 1)
                 # unless explicitly requested; forwarded only to agents whose
                 # analyze() accepts it.
@@ -2997,6 +3013,25 @@ class AnalysisOrchestratorTools:
                         "post-experiment analysis → leave unset (defaults to 7). "
                         "Often paired with r2_threshold (e.g. 'use R²=0.98 and a "
                         "single verification step')."
+                    )
+                },
+                "starting_annealing_level": {
+                    "type": "integer",
+                    "description": (
+                        "CurveFitting and Image analysis agents. The constraint-"
+                        "annealing schedule normally starts FROZEN (skill rules "
+                        "and model locked) and only relaxes toward full freedom "
+                        "across verification iterations. Set this to start the "
+                        "schedule HIGHER on a RE-RUN, so the agent does not waste "
+                        "iterations repeating early constraint stages that a prior "
+                        "run already showed to be inadequate. Levels: 0 = frozen "
+                        "(default / first run — ALWAYS leave UNSET on a first "
+                        "analysis), 1 = warm (constraints loosened), 2 = hot (full "
+                        "freedom, fresh generation from scratch). Set it ONLY when "
+                        "the user is re-running after an unsatisfactory fit and "
+                        "wants to skip the early restrictive stages (e.g. 'this "
+                        "didn't work — try again without the earlier constraints' "
+                        "→ 2). Leave UNSET otherwise."
                     )
                 },
                 "n_candidates": {
