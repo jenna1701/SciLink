@@ -38,6 +38,7 @@ from .._locked_exec import (
     atomic_np_save,
 )
 from ....utils.codegen_parse import parse_codegen_response
+from ....utils.synthesis_parse import salvage_synthesis_from_response
 
 # Canonical fitted-curve output the fit script saves alongside visualization.png.
 # Best-effort: when present it powers controller-side residual diagnostics; when
@@ -6562,7 +6563,7 @@ same trend.
             result_json, error_dict = self._parse(response)
 
             if error_dict:
-                salvaged = self._salvage_synthesis_fields(response)
+                salvaged = salvage_synthesis_from_response(response)
                 if salvaged:
                     self.logger.warning("Synthesis JSON parse failed; salvaged detailed_analysis from raw text.")
                     state["synthesis_result"] = salvaged
@@ -6731,7 +6732,7 @@ same trend.
             result_json, error_dict = self._parse(response)
 
             if error_dict:
-                salvaged = self._salvage_synthesis_fields(response)
+                salvaged = salvage_synthesis_from_response(response)
                 if salvaged:
                     self.logger.warning("Series synthesis JSON parse failed; salvaged detailed_analysis from raw text.")
                     state["synthesis_result"] = salvaged

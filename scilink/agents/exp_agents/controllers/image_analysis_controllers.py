@@ -39,6 +39,7 @@ from .._locked_exec import (
     DATA_NAME, VIZ_NAME, CANDIDATES_DIR_NAME, atomic_np_save,
 )
 from ....utils.codegen_parse import parse_codegen_response
+from ....utils.synthesis_parse import salvage_synthesis_from_response
 
 
 # Anthropic's API rejects images over 5 MB. Cap below that with headroom
@@ -6639,7 +6640,7 @@ Return JSON with:
             result_json, error_dict = self._parse(response)
 
             if error_dict:
-                salvaged = self._salvage_synthesis_fields(response)
+                salvaged = salvage_synthesis_from_response(response)
                 if salvaged:
                     self.logger.warning("Synthesis JSON parse failed; salvaged detailed_analysis from raw text.")
                     state["synthesis_result"] = salvaged
@@ -6818,7 +6819,7 @@ Return JSON with:
             result_json, error_dict = self._parse(response)
 
             if error_dict:
-                salvaged = self._salvage_synthesis_fields(response)
+                salvaged = salvage_synthesis_from_response(response)
                 if salvaged:
                     self.logger.warning("Series synthesis JSON parse failed; salvaged detailed_analysis from raw text.")
                     state["synthesis_result"] = salvaged

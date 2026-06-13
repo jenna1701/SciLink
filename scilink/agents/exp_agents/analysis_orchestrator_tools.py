@@ -2181,10 +2181,28 @@ class AnalysisOrchestratorTools:
                 if has_sidecars:
                     self.orch.current_metadata = {}
                 else:
-                    return json.dumps({
-                        "status": "error",
-                        "message": "No metadata available. Use load_metadata or convert_metadata first."
-                    })
+                    # Single-file backstop: if a stem-matched sidecar JSON sits
+                    # next to the data file (foo.npy -> foo.json), auto-load it
+                    # instead of erroring. This ONLY runs when no metadata was
+                    # loaded (so it can never override an explicit load); it
+                    # converts a hard error into a usable run and makes metadata
+                    # forwarding deterministic for the meta fan-out path.
+                    if data_p.is_file():
+                        sidecar = data_p.with_suffix(".json")
+                        if sidecar.exists():
+                            try:
+                                with open(sidecar) as _fh:
+                                    _md = json.load(_fh)
+                                if isinstance(_md, dict) and _md:
+                                    self.orch.current_metadata = _md
+                                    print(f"  📎 Auto-loaded sidecar metadata: {sidecar.name}")
+                            except Exception:  # noqa: BLE001 - bad sidecar -> fall through to error
+                                pass
+                    if self.orch.current_metadata is None:
+                        return json.dumps({
+                            "status": "error",
+                            "message": "No metadata available. Use load_metadata or convert_metadata first."
+                        })
             
             try:
                 # === Handle directory input - filter out metadata files ===
@@ -2683,8 +2701,8 @@ class AnalysisOrchestratorTools:
                         "analysis_id": analysis_id,
                         "agent_used": self.AGENT_NAMES.get(agent_id),
                         "output_directory": str(analysis_output_dir),
-                        "detailed_analysis": result.get("detailed_analysis", "")[:2000],
-                        "claims_count": len(result.get("scientific_claims", [])),
+                        "detailed_analysis": (result.get("detailed_analysis") or "")[:2000],
+                        "claims_count": len(result.get("scientific_claims") or []),
                         "full_result_available": True,
                         "note": f"All outputs saved to: {analysis_output_dir}",
                         "next_steps": "Use assess_novelty to check literature for these claims, or get_recommendations for follow-up experiments.",
