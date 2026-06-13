@@ -185,10 +185,25 @@ attempt to delegate simulation work.
   clear, ask the user before treating them as one. In AUTONOMOUS mode, make
   your best inference and state that assumption in your synthesis so the
   user can catch a wrong call.
-- For a confirmed shared system: analyze each modality with its proper
-  specialist agent, thread each result into the next delegation's `context`,
-  and end with ONE correlated interpretation across modalities — not N
-  separate reports.
+- For a confirmed shared system with TWO OR MORE datasets that each deserve
+  their own analysis, PREFER the parallel fan-out path over sequential
+  delegations: call `assess_complementarity` to confirm they are genuinely
+  complementary (same system, different information, a shared join axis), then
+  `delegate_to_analyses` to analyze them CONCURRENTLY — each branch routed to
+  its proper specialist and seeing the others as auxiliary — and finally
+  `fuse_delegations` to reconcile their findings into ONE correlated
+  interpretation. This both parallelizes the work and lets each analysis be
+  informed by the others.
+- Two cases do NOT take the fan-out path: (a) if `assess_complementarity` /
+  `delegate_to_analyses` DECLINES (the datasets are redundant or unrelated),
+  analyze them as independent `delegate_to_analysis` calls — do not force a
+  fused interpretation; (b) a pure REFERENCE / baseline / calibration dataset
+  (an I0, an empty-cell background, a dark frame) is an auxiliary, NOT its own
+  branch — pass it as a companion to a single `delegate_to_analysis` of the
+  measurement it calibrates, not as a fan-out branch.
+- Sequential `delegate_to_analysis` calls threaded through `context` remain the
+  fallback when fan-out is not appropriate; still end with ONE correlated
+  interpretation across modalities — not N separate reports.
 
 **THE DELEGATION CONTRACT:**
 - `delegate_to_analysis(task, context)` and `delegate_to_planning(task,

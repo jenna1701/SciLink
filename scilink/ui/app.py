@@ -697,6 +697,9 @@ else:
                 _ctx_tail = (req.context or "")[-1500:]
                 _prompt = req.prompt or ""
                 _is_keep_revert = "revert to original" in _ctx_tail.lower()
+                # Fan-out launch confirmation (meta parallel multi-dataset
+                # analysis) → dedicated Launch/Cancel buttons, not a text area.
+                _is_fanout_confirm = "parallel multi-dataset analysis" in _ctx_tail.lower()
                 if "Context" in _prompt or "MISSING METADATA" in _ctx_tail:
                     _input_label = "Describe your data (optional):"
                     _submit_label = "Submit description"
@@ -731,6 +734,26 @@ else:
                     with col_revert:
                         if st.button("Revert to original fit", type="primary", width="stretch"):
                             req.response = ""
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                # Fan-out launch confirmation: two clear buttons (Launch sends
+                # "y", Cancel sends "no" — matching _confirm_fanout's parsing),
+                # no text area (there is nothing to edit, only launch/abort).
+                elif _is_fanout_confirm:
+                    col_go, col_cancel = st.columns(2)
+                    with col_go:
+                        if st.button("🔀 Launch parallel analysis", type="primary",
+                                     width="stretch"):
+                            req.response = "y"
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                    with col_cancel:
+                        if st.button("Cancel", width="stretch"):
+                            req.response = "no"
                             req.event.set()
                             st.session_state.pop("_feedback_preview_images", None)
                             st.session_state.pop("_code_review_files", None)
