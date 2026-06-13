@@ -96,7 +96,7 @@ def _render_available_skills(agent) -> None:
                 for name in names:
                     nc, vc = st.columns([3, 1])
                     nc.markdown(f"`{name}`")
-                    with vc.popover("view", use_container_width=True):
+                    with vc.popover("view", width="stretch"):
                         _render_skill_markdown(domain, name)
     else:
         st.caption("No built-in skills found.")
@@ -214,7 +214,7 @@ def _render_staged_section() -> None:
                     f"id={r['id']} · {prov} · session={r.get('session','?')}"
                     + (f" · {_staging.metric_label(r)}" if _staging.metric_label(r) else "")
                 )
-                with view_col.popover("View", use_container_width=True):
+                with view_col.popover("View", width="stretch"):
                     _render_staged_record(r)
             if model is None:
                 st.info("Start a session to enable upgrade/consolidate (needs a model).")
