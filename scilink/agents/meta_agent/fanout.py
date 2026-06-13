@@ -672,8 +672,9 @@ def _write_fusion_html(out_dir: Path, fused: dict, figures: list) -> Optional[Pa
                       if fused.get("focus") else "")
         doc = f"""<!doctype html><html><head><meta charset="utf-8">
 <title>Cross-dataset fusion</title><style>
+ html{{background:#ffffff}}
  body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:920px;
-   margin:24px auto;padding:0 18px;color:#1b1b1b;line-height:1.6}}
+   margin:0 auto;padding:24px 18px;color:#1b1b1b;background:#ffffff;line-height:1.6}}
  h1{{font-size:1.5em}} h2{{margin-top:1.4em;border-bottom:1px solid #e3e3e3;padding-bottom:4px}}
  .narr{{white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:8px;padding:14px 16px}}
  .imp{{color:#555;font-size:.9em;margin:2px 0 10px}}
