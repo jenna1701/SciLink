@@ -29,6 +29,19 @@ bugs found, and what was fixed vs. flagged.
   agents' own QC correctly rejected degenerate fits on the synthetic cube. A
   clean re-run with proper energy metadata confirms the EELS branch. ✅
 
+### Stress battery — data-type breadth (gate, one LLM call each) — 6/6 graded
+| Scenario | Verdict | Note |
+|---|---|---|
+| **DSC + TGA** (thermal, shared T axis) | complementary 0.92 | join = "temperature at 10°C/min" ✅ |
+| **Raman + FTIR** (same calcite) | complementary 0.86 | join = vibrational wavenumber ✅ |
+| **PL + UV-Vis** (same QDs) | complementary 0.90 | join = wavelength / one band gap ✅ |
+| **image + results-table** (mis-routed) | unrelated 0.85 | correctly rejected planning data ✅ |
+| **Raman(polymer) + DSC(metal)** | unrelated 0.95 | different systems ✅ |
+| **two FTIR, same sample** | redundant 0.95 | replicate, clustered ✅ |
+| _observational:_ before/after SEM (temporal) | complementary 0.78 | **does NOT flag directionality** — see below |
+| _observational:_ survey + detail (diff mag) | uncertain 0.60, declined | conservative: same modality, no pixel co-registration |
+| _observational:_ two XPS, different regions | complementary 0.70 | correctly distinguished spatial heterogeneity from a replicate |
+
 ### Offline robustness (24/24 checks, deterministic)
 branch-error handling, empty-but-successful flagging, fuse edge cases
 (<2 / nonexistent / good indices), N=4 concurrency + ledger integrity,
@@ -59,6 +72,26 @@ single-branch rejection, gate fail-closed, soft/hard size caps.
    axis assumptions and thus wrong analysis. Fixed: `_mesh_task` now forwards
    the primary's metadata — a `.json` path → instructs the child to
    `load_metadata` on it (don't synthesize); inline text → embedded directly.
+7. **Fusion template generalized (motivated by the stress tests).**
+   `HOLISTIC_EXPERIMENTAL_SYNTHESIS_INSTRUCTIONS` (its ONLY consumer is
+   fan-out) was entirely "local-atomic vs bulk-crystal" framed — wrong for the
+   thermal/vibrational/electronic pairs fan-out now fuses. Rewrote it to
+   reconcile on *whatever* the datasets share (co-registered spatial / shared
+   parameter axis / length-scale / complementary observables), folded the
+   anti-spurious-correlation principle INTO the template (was a separate
+   `fanout.py` guard, now removed), and added "claims must depend on >1
+   dataset." Zero blast radius (no other caller).
+
+## Design boundary surfaced by the stress tests (not a bug — deferred work)
+**Temporal before/after is treated as `complementary` (0.78) with no
+directionality flag.** Full-mesh would then let the "after" dataset inform the
+"before" branch's analysis — temporal leakage (anachronism). This is the
+Bucket-2 directional case from the design discussion: the gate sees "same
+region across a time/condition" as a valid join but doesn't mark the influence
+as one-way. Low severity today (the aux is an *optional* operand the agent may
+ignore), but it's the first concrete case justifying the deferred per-branch
+`auxiliary_from` (directed companions) extension. If time-series workflows are
+in scope, wire directed aux there first.
 
 ## Bugs found — PRE-EXISTING in the shared curve/image stack (NOT fan-out; flagged for your nod)
 

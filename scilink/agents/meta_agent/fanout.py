@@ -94,15 +94,6 @@ Respond in valid JSON with EXACTLY these keys:
 }
 """
 
-_ANTI_SPURIOUS_FUSION_GUARD = """
-IMPORTANT — do not manufacture correlations. These datasets were screened as \
-plausibly complementary, but the evidence is the final authority. If the \
-findings do NOT actually correlate or reconcile, say so plainly: "no \
-significant cross-dataset correlation found" is a valid and valuable \
-conclusion. Assert a correlation ONLY where the provided findings support it; \
-never invent one to satisfy the synthesis.
-"""
-
 
 def _slug(text: str, maxlen: int = 32) -> str:
     """Filesystem-safe short slug from a label."""
@@ -620,7 +611,6 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
 
     prompt = (
         HOLISTIC_EXPERIMENTAL_SYNTHESIS_INSTRUCTIONS
-        + _ANTI_SPURIOUS_FUSION_GUARD
         + (f"\n\nFUSION FOCUS (weight your synthesis toward this): {focus}\n"
            if focus else "")
         + "\n\n--- PER-DATASET FINDINGS TO RECONCILE ---\n\n"
