@@ -46,7 +46,12 @@ Prefer whatever is installed (the generation loop will fall back if an import is
 - **mBuild (MoSDeF)** — programmatic construction of complex / multi-component / polymeric boxes
   (`mbuild.fill_box`).
 - **ASE / numpy fallback** — build each molecule once (ASE / RDKit), then insert copies at random
-  positions/orientations into the cell, rejecting placements closer than a minimum distance.
+  positions/orientations into the cell, rejecting placements closer than a minimum distance. The
+  rejection test must compare **every atom** of the trial molecule (hydrogens included) against
+  **every** already-placed atom under the minimum image — checking only heavy-atom or
+  molecular-centre distances lets light atoms of neighbouring molecules interpenetrate. Wrap each
+  molecule into the cell as a rigid unit (shift by one reference atom's image), never per-atom
+  (`positions % L` applied atom-by-atom splits a molecule across the boundary).
 - **Cell & PBC:** set an orthorhombic/cubic `cell` and `pbc=True` sized to the target density.
 - **Output:** write a periodic POSCAR, e.g.
   `ase.io.write("POSCAR", atoms, format="vasp", vasp5=True, direct=True)`, then print the exact
