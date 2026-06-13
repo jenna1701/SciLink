@@ -32,7 +32,7 @@ import json
 import logging
 import re
 import sys
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -42,6 +42,7 @@ logger = logging.getLogger("meta_agent.fanout")
 # not the raw input: the gate prunes first, so a 6-upload request with one
 # complementary pair runs a 2-way mesh, not a 6-way one.
 FANOUT_MAX_WORKERS = 4          # peak concurrent branches (rate-limit ceiling)
+_FANOUT_HEARTBEAT_S = 20        # how often to print a "still running" heartbeat
 FANOUT_SOFT_CAP = 5             # warn / confirm beyond this many fused branches
 FANOUT_HARD_CAP = 8             # refuse beyond this — cost/quality cliff
 # In AUTONOMOUS mode there is no human to confirm, so the verdict IS the gate:
@@ -515,14 +516,28 @@ def run_fanout(orch, branches: List[dict]) -> str:
                 for j in range(len(run_branches)) if j != i]
 
     max_workers = min(len(run_branches), FANOUT_MAX_WORKERS)
+    n_total = len(run_branches)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [
-            pool.submit(_run_one_branch, orch, run_branches[i],
-                        _companions_for(i), entries[i])
-            for i in range(len(run_branches))
-        ]
-        for f in futures:
-            f.result()  # _run_one_branch never raises; this just joins
+        fut_label = {}
+        for i in range(n_total):
+            fut = pool.submit(_run_one_branch, orch, run_branches[i],
+                              _companions_for(i), entries[i])
+            fut_label[fut] = run_branches[i]["label"]
+        # Wait with a periodic heartbeat so the user can see the parallel run is
+        # alive (a slow branch can otherwise look like a hang). Each branch is
+        # announced as it finishes; the rest get a "still running" tick.
+        pending = set(fut_label)
+        waited = 0
+        while pending:
+            done, pending = wait(pending, timeout=_FANOUT_HEARTBEAT_S)
+            for f in done:
+                f.result()  # _run_one_branch never raises; just surfaces oddities
+                print(f"  ✅ analysis branch finished: {fut_label[f]}  "
+                      f"({n_total - len(pending)}/{n_total} done)")
+            if pending:
+                waited += _FANOUT_HEARTBEAT_S
+                print(f"  ⏳ {len(pending)} of {n_total} parallel analyses still "
+                      f"running ... (~{waited}s elapsed)")
 
     def _productive(e):
         # A branch that reports success but yields neither findings nor files
