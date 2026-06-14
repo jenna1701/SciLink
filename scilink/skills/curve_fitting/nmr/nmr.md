@@ -231,6 +231,21 @@ the EFG asymmetry (0 = axial). The observed centre of gravity is shifted from
 `derived` — quote δ_iso(CS), not the apparent peak, as the chemical shift. If
 `Cq_resolved=False`, do not report C_Q as a measurement.
 
+**Lineshape is a discriminator for half-integer quadrupolar nuclei — do not
+assign on the isotropic shift alone.** For these nuclei the shift is a weak
+fingerprint: its chemical-shift range is narrow and the apparent peak is offset
+by the field-dependent δ_QIS, so very different environments can share an
+apparent position. The **linewidth / asymmetry supplies the missing dimension**:
+a *narrow, near-symmetric* line indicates a mobile or high-symmetry environment
+(motional averaging and/or a small EFG — e.g. a solvated/solution-like or
+cubic-site species), whereas a *broad, asymmetric (second-order quadrupolar)*
+line indicates a static, low-symmetry crystallographic site (large EFG). So when
+assigning a species or proposing candidate phases from a quadrupolar nucleus,
+**condition the assignment on the linewidth/asymmetry, not the shift** — and when
+the line is broad enough to be quadrupolar, the resolved C_Q/η_Q (from
+`fit_quad_ct`) are the most discriminating identifiers, far more specific than
+the centre of gravity.
+
 **Sidebands → CSA / quadrupolar product.** When sidebands are fit, their
 intensity envelope encodes the CSA (spin-½) or the satellite/CSA interplay
 (quadrupolar); v0 reports the manifold but defers tensor extraction.
