@@ -1198,7 +1198,7 @@ class GenerateCurveFittingReportController:
         filepath = output_dir / filename
 
         params_html = self._format_parameters(parameters)
-        quality_html = self._format_fit_quality(fit_quality, quality_warning)
+        quality_html = self._format_fit_quality(fit_quality, quality_warning, gate=_gate(state))
 
         # In identification mode, surface the ranked candidate list. Empty
         # string in fitting mode so the HTML report is unchanged for the
@@ -1443,7 +1443,8 @@ class GenerateCurveFittingReportController:
             <tbody>{rows}</tbody>
         </table>"""
 
-    def _format_fit_quality(self, fit_quality: dict, quality_warning: str = None) -> str:
+    def _format_fit_quality(self, fit_quality: dict, quality_warning: str = None,
+                            gate=None) -> str:
         if not fit_quality:
             return "<p>No quality metrics available.</p>"
 
@@ -1452,7 +1453,22 @@ class GenerateCurveFittingReportController:
         chi_squared = fit_quality.get("chi_squared_reduced", fit_quality.get("reduced_chi_squared"))
 
         html = "<div>"
-        if r_squared is not None:
+        # Badge on the GATE's acceptance metric. For a non-R² goodness-of-fit
+        # gate (e.g. peak_region_r2) the badge must reflect that metric and its
+        # thresholds — a global-R² badge mislabels a verifier-approved low-SNR
+        # fit as "Poor". The R² path is unchanged.
+        gate_value = gate.extract(fit_quality) if (gate is not None and gate.metric != "r_squared") else None
+        if gate_value is not None:
+            if gate.is_accept(gate_value):
+                badge_class, label = "quality-good", "Good"
+            elif gate.is_hard_reject(gate_value):
+                badge_class, label = "quality-poor", "Poor"
+            else:
+                badge_class, label = "quality-ok", "Marginal"
+            html += f'<span class="quality-badge {badge_class}">{label}</span><strong>{gate.label} = {gate_value:.4f}</strong>'
+            if r_squared is not None:
+                html += f" &nbsp;|&nbsp; <span>R² = {r_squared:.4f}</span>"
+        elif r_squared is not None:
             if r_squared >= self.r2_threshold + 0.04:
                 badge_class, label = "quality-good", "Excellent"
             elif r_squared >= self.r2_threshold:
@@ -2779,6 +2795,23 @@ Your guidance: '''
                     yy = cd.ravel()
                     xx = np.arange(yy.shape[0], dtype=float)
                 fit_arr = np.load(fit_path)
+                # The generated script can save fit.npy in a different x-ordering
+                # than the data it was given (NMR ppm is usually DESCENDING, but
+                # a script that sorts ascending for fitting saves the fit on that
+                # ascending grid). Pairing fit.npy[i] with data[i] is then
+                # reversed — corrupting the residual diagnostics below and the
+                # saved fit.npy artifact. Detect the reversal against the data and
+                # realign (and re-save the corrected fit.npy). Length/other
+                # mismatches are left untouched.
+                if fit_arr.shape == yy.shape:
+                    fwd = _canonical_r2(yy, fit_arr)
+                    rev = _canonical_r2(yy, fit_arr[::-1])
+                    if rev is not None and (fwd is None or rev > fwd + 0.05):
+                        fit_arr = np.ascontiguousarray(fit_arr[::-1])
+                        try:
+                            np.save(fit_path, fit_arr)
+                        except Exception:
+                            pass
                 residual_diag = _residual_diagnostics(xx, yy, fit_arr)
 
                 # Trust the saved fit over a broken self-reported R². The
@@ -2828,7 +2861,7 @@ Your guidance: '''
 **TASK:** Examine this fit visualization and determine if the fit is acceptable for scientific use.
 
 **FIT STATISTICS:**
-- R² = {r_squared:.4f}
+- R² = {r_squared:.4f}{metric_stat_line}
 - Model: {model_type}
 - Number of components: {n_components}
 
@@ -2848,18 +2881,18 @@ If ANY box above is checked: set fit_acceptable: FALSE, explain the data range o
 
 ## STEP 2: IF STEP 1 PASSED, evaluate fit quality
 
-The two R² thresholds form a **soft band** derived from the user's
+The two {metric_label} thresholds form a **soft band** derived from the user's
 configured acceptance target:
 - **{accept_threshold:.2f}** = acceptance target ("accept floor")
-- **{reject_threshold:.2f}** = hard-reject floor (= accept floor − 0.05)
+- **{reject_threshold:.2f}** = hard-reject floor{reject_floor_note}
 
 **Accept if:**
-- R² ≥ {accept_threshold:.2f} AND residuals are mostly random noise AND main data features are captured
+- {metric_label} {accept_cmp} {accept_threshold:.2f} AND residuals are mostly random noise AND main data features are captured
 
 **Reject if:**
-- R² < {reject_threshold:.2f} (hard-reject floor — numerical fit is too poor)
-- Major systematic residual pattern across ENTIRE spectrum (any R²)
-- A prominent data feature is completely missed by the model (any R²)
+- {metric_label} {reject_cmp} {reject_threshold:.2f} (hard-reject floor — numerical fit is too poor)
+- Major systematic residual pattern across ENTIRE spectrum (any {metric_label})
+- A prominent data feature is completely missed by the model (any {metric_label})
 - **Under-resolved structure:** a *localized* region shows clearly systematic
   residuals — RMS well above the noise AND repeated sign-changes (an
   oscillation), at a named, visible spectral position — even if the rest of the
@@ -2870,18 +2903,18 @@ configured acceptance target:
   active constraint level permits model changes), the fix may be to add a
   physically-nameable component or change the peak shape, not just retune.
 
-**Soft band ({reject_threshold:.2f} ≤ R² < {accept_threshold:.2f}):**
-- Numerical R² is borderline. Reject ONLY if you find concrete physics
+**Soft band ({soft_band_desc}):**
+- Numerical {metric_label} is borderline. Reject ONLY if you find concrete physics
   problems (systematic residuals, missing features, unphysical parameters).
-  Don't reject solely because R² is in the band.
+  Don't reject solely because {metric_label} is in the band.
 - When you reject in this band, **state the physics reason** in
-  `overall_assessment` rather than just citing the R² number, so the
+  `overall_assessment` rather than just citing the {metric_label} number, so the
   trace is interpretable.
 
-**Never claim R² is "below the threshold" unless the number truly is below
-{accept_threshold:.2f}** — when you reject a fit whose R² is at or above the
+**Never claim {metric_label} is "below the threshold" unless the number truly is below
+{accept_threshold:.2f}** — when you reject a fit whose {metric_label} is at or above the
 accept floor, give only the physics reason for rejection (the systematic
-residual, missed feature, or unphysical parameter), never the R² value, so the
+residual, missed feature, or unphysical parameter), never the {metric_label} value, so the
 report stays factually correct.
 
 **Do NOT reject for:**
@@ -2936,7 +2969,7 @@ Return JSON:
 }}
 
 
-Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal improvements often makes things WORSE through overfitting or convergence failures.
+Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2f}) to chase marginal improvements often makes things WORSE through overfitting or convergence failures.
 '''
 
     # Constraint annealing: gradually raise the "temperature" so the
@@ -2992,13 +3025,15 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
         the prior high-water mark.  ``best_verification`` (the verifier's
         last verdict on best) is used to summarize prior issues.
 
-        Workflow-style skills (where the active QualityGate uses a non-R²
-        metric such as figure_of_merit) bypass this verifier — the skill's
-        own scoring tools (e.g. score_xrd_match_robust) ARE the
-        verification, and the R²-shaped prompt would not apply.
+        Workflow-style skills whose gate sets ``physical_review=False`` (e.g.
+        xrd's figure_of_merit) bypass this verifier — the skill's own scoring
+        tools (e.g. score_xrd_match_robust) ARE the verification, and the
+        goodness-of-fit-shaped prompt would not apply. Goodness-of-fit gates
+        (r_squared, peak_region_r2, BIC, …) keep ``physical_review=True`` and
+        run the verifier below, framed against the gate's own metric.
         """
         gate = _gate(state)
-        if gate.metric != "r_squared":
+        if not gate.physical_review:
             value = gate.extract(fit_result.get("fit_quality"))
             # Canonical verdict schema — must match the keys downstream
             # consumers actually read (curve_fitting_controllers.py:2839, :3094
@@ -3111,13 +3146,53 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
                 f"{best_issues_text}\n"
             )
 
+        # Frame the acceptance criterion against the GATE's metric, not always
+        # R². For the r_squared gate this reproduces the previous wording
+        # exactly (label "R²", the controller's r2_threshold + soft margin). For
+        # a goodness-of-fit gate with a different metric (peak_region_r2, BIC, …)
+        # the verifier judges that metric, with the gate's own thresholds and
+        # comparison direction, and the metric value is surfaced in the stats.
+        if gate.metric == "r_squared":
+            metric_label = "R²"
+            accept_thr = self.r2_threshold
+            reject_thr = self.r2_threshold - self._r2_soft_margin(self.r2_threshold)
+            metric_stat_line = ""
+        else:
+            gate_value = gate.extract(fit_result.get("fit_quality"))
+            metric_label = gate.label
+            accept_thr = gate.accept_threshold
+            reject_thr = gate.hard_reject_threshold
+            metric_stat_line = (
+                f"\n- {metric_label} = {gate_value:.4f} (acceptance metric)"
+                if isinstance(gate_value, (int, float)) else ""
+            )
+        # Direction-aware soft-band descriptor (byte-identical to the original
+        # "{reject} ≤ R² < {accept}" for the higher-is-better r_squared path).
+        if gate.direction == "higher_is_better":
+            soft_band_desc = f"{reject_thr:.2f} ≤ {metric_label} < {accept_thr:.2f}"
+        else:
+            soft_band_desc = f"{accept_thr:.2f} < {metric_label} ≤ {reject_thr:.2f}"
+        # The "(= accept floor − margin)" note is the R² path's original wording
+        # (a fixed margin below accept). Keep it only for r_squared; omit it for
+        # metrics where a subtractive margin is not the framing.
+        reject_floor_note = (
+            f" (= accept floor − {accept_thr - reject_thr:.2f})"
+            if gate.metric == "r_squared" else ""
+        )
+
         prompt_text = self.FIT_VERIFICATION_PROMPT.format(
             r_squared=r_squared,
+            metric_label=metric_label,
+            metric_stat_line=metric_stat_line,
+            soft_band_desc=soft_band_desc,
+            reject_floor_note=reject_floor_note,
+            accept_cmp=gate.accept_cmp,
+            reject_cmp=gate.reject_cmp,
             model_type=model_type,
             n_components=n_components,
             parameters=params_str,
-            accept_threshold=self.r2_threshold,
-            reject_threshold=self.r2_threshold - self._r2_soft_margin(self.r2_threshold),
+            accept_threshold=accept_thr,
+            reject_threshold=reject_thr,
             prior_best_section=prior_best_section,
             residual_diagnostics=_format_residual_diagnostics(
                 fit_result.get("residual_diagnostics")
@@ -4245,17 +4320,31 @@ Return JSON with:
             state["locked_fitting_config"] = original_config
             return best_result, best_r2
 
-    def _detect_outliers(self, series_results: List[dict]) -> List[dict]:
+    def _detect_outliers(self, series_results: List[dict], gate=None) -> List[dict]:
+        # Score each fit by the GATE's metric, not always global R². For a
+        # non-R² goodness-of-fit gate (e.g. peak_region_r2) a correct low-SNR
+        # fit has a high gate metric but a low global R² — flagging on global R²
+        # false-flags it. Fall back to r_squared when there is no such gate
+        # (legacy behavior, unchanged).
+        self._outlier_gate = gate if (gate is not None and gate.metric != "r_squared") else None
+
+        def _score(r):
+            fq = r.get("fit_quality", {})
+            if self._outlier_gate is not None:
+                return self._outlier_gate.extract(fq)
+            return fq.get("r_squared")
+
+        self._score_fn = _score
         r2_values = []
         for r in series_results:
             if r["success"]:
-                r2 = r.get("fit_quality", {}).get("r_squared")
+                r2 = _score(r)
                 if r2 is not None:
                     r2_values.append(r2)
-        
+
         if len(r2_values) < 3:
             return []
-        
+
         r2_array = np.array(r2_values)
         # Robust center/scale (median + MAD). A single bad fit can't mask itself
         # by inflating the statistic the way mean/std let it — with mean/std a
@@ -4280,14 +4369,20 @@ Return JSON with:
                 })
                 continue
 
-            r2 = r.get("fit_quality", {}).get("r_squared")
+            r2 = self._score_fn(r)
             if r2 is None:
                 continue
 
-            below_threshold = r2 < self.r2_threshold
-            # Robust z-score; only a fit *below* the series median can be an
+            g = self._outlier_gate
+            if g is not None:
+                below_threshold = not g.is_accept(r2)
+                worse = (median_r2 - r2) if g.direction == "higher_is_better" else (r2 - median_r2)
+            else:
+                below_threshold = r2 < self.r2_threshold
+                worse = median_r2 - r2
+            # Robust z-score; only a fit *worse* than the series median can be an
             # outlier (a better-than-typical fit is never flagged).
-            deviation_sigma = (median_r2 - r2) / robust_scale
+            deviation_sigma = worse / robust_scale
             is_outlier = deviation_sigma > self.outlier_sigma
             
             if below_threshold or is_outlier:
@@ -4716,7 +4811,7 @@ Return JSON with:
         
         flagged_spectra = []
         if num_spectra > 1:
-            flagged_spectra = self._detect_outliers(series_results)
+            flagged_spectra = self._detect_outliers(series_results, gate=_gate(state))
             
             if flagged_spectra:
                 report = self._generate_outlier_report(flagged_spectra, series_results)
@@ -5433,9 +5528,7 @@ class AdaptiveRefitController:
                 # The refit ran in the same spectrum directory and overwrote the
                 # kept fit's visualization.png. Restore the kept fit's plot so the
                 # report shows the fit whose metrics it records — not the
-                # discarded refit's. (fit.npy is a transient consumed only at fit
-                # time for residual diagnostics and never read afterwards, so it
-                # is left as-is.)
+                # discarded refit's. (fit.npy is realigned at read time, below.)
                 kept = series_results[idx] if idx < len(series_results) else None
                 if isinstance(kept, dict):
                     vpath = kept.get("visualization_path")
