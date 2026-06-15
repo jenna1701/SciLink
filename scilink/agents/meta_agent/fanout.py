@@ -512,6 +512,10 @@ def run_fanout(orch, branches: List[dict]) -> str:
                 "analysis", _mesh_task(b, []), b.get("context"), None, b["label"])
             entry["parallel_group"] = group_id
             entry["fanout"] = True
+            # Carry the input path/metadata so a later fuse_delegations can
+            # recognize this set as already gated (or re-gate a mixed set).
+            entry["data_path"] = b.get("data_path")
+            entry["metadata"] = b.get("metadata")
             entries.append(entry)
 
     # --- run concurrently; each branch sees all others (full mesh) ---
@@ -784,6 +788,39 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
                         f"Got {len(ok)} usable of {len(idxs)} requested."),
         })
 
+    # Honesty guard (review #293): fusion has no complementarity gate of its
+    # own — only run_fanout gates before launching branches. Branches of a
+    # single fan-out group were verified complementary at launch; ANY other
+    # fused set (notably two direct delegate_to_analysis runs on unrelated
+    # data) was NOT, and could manufacture a spurious "they agree" conclusion.
+    # Recognize already-gated sets; for the rest, re-run the gate when dataset
+    # paths are available, else mark the fusion ungated so the synthesis prompt
+    # and the report state it explicitly. We never hard-refuse (a caller may
+    # deliberately want a caveated comparison) — we just refuse to do it
+    # silently.
+    _groups = {e.get("parallel_group") for e in ok}
+    gated = (all(e.get("fanout") for e in ok)
+             and len(_groups) == 1 and None not in _groups)
+    ungated_warning = None
+    if not gated:
+        _paths = [e.get("data_path") for e in ok]
+        if all(_paths) and len(set(_paths)) >= 2:
+            _verdict = assess_complementarity(
+                orch, [{"path": e.get("data_path"), "metadata": e.get("metadata")}
+                       for e in ok])
+            _v = (_verdict.get("verdict") or "").lower()
+            gated = _v == "complementary"
+            if not gated:
+                ungated_warning = (
+                    f"These datasets were assessed NOT complementary (verdict: {_v}; "
+                    f"{_verdict.get('rationale') or 'no shared system/join axis'}). "
+                    "Any apparent agreement across them is likely spurious.")
+        else:
+            ungated_warning = (
+                "This fusion was NOT complementarity-gated and the datasets could "
+                "not be verified as measuring the same system. Treat any "
+                "cross-dataset agreement as unverified and possibly spurious.")
+
     blocks = []
     for e in ok:
         findings = e.get("key_findings") or []
@@ -812,6 +849,11 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
 
     prompt = (
         HOLISTIC_EXPERIMENTAL_SYNTHESIS_INSTRUCTIONS
+        + (f"\n\n⚠️ UNGATED FUSION — {ungated_warning} Do NOT claim the datasets "
+           "agree or correlate unless the evidence is overwhelming and explicit; "
+           "default to reporting them as independent observations and say plainly "
+           "that complementarity was not verified.\n"
+           if ungated_warning else "")
         + (f"\n\nFUSION FOCUS (weight your synthesis toward this): {focus}\n"
            if focus else "")
         + ("\n\nFIGURES: one representative figure per dataset is attached after "
@@ -860,9 +902,14 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "fused_from": [e["index"] for e in ok],
         "labels": [e.get("label") for e in ok],
         "focus": focus,
-        "detailed_analysis": parsed.get("detailed_analysis", ""),
+        "complementarity_gated": gated,
+        "complementarity_warning": ungated_warning,
+        "detailed_analysis": (
+            (f"⚠️ UNGATED FUSION — {ungated_warning}\n\n" if ungated_warning else "")
+            + parsed.get("detailed_analysis", "")),
         "scientific_claims": parsed.get("scientific_claims", []),
-        "caveats": parsed.get("caveats", []),
+        "caveats": (([ungated_warning] if ungated_warning else [])
+                    + (parsed.get("caveats", []) or [])),
         "novelty": novelty,
     }
     try:
@@ -884,21 +931,23 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             "label": "cross-dataset fusion",
             "context_from": [e["index"] for e in ok],
             "status": "success",
-            "summary": parsed.get("detailed_analysis", ""),
+            "summary": fused["detailed_analysis"],
             "key_findings": [c.get("claim", "") for c in parsed.get("scientific_claims", [])
                              if isinstance(c, dict)],
             "files_produced": produced,
-            "warnings": [],
+            "warnings": ([ungated_warning] if ungated_warning else []),
             "error": None,
         })
 
     return json.dumps({
         "status": "success",
         "fused_from": [e["index"] for e in ok],
+        "complementarity_gated": gated,
+        "complementarity_warning": ungated_warning,
         "figures_used": len(figures),
-        "detailed_analysis": parsed.get("detailed_analysis", ""),
-        "scientific_claims": parsed.get("scientific_claims", []),
-        "caveats": parsed.get("caveats", []),
+        "detailed_analysis": fused["detailed_analysis"],
+        "scientific_claims": fused["scientific_claims"],
+        "caveats": fused["caveats"],
         "novelty": novelty,
         "report_path": str(report_path),
         "report_html_path": str(html_path) if html_path else None,
