@@ -64,6 +64,31 @@ def _escape_tildes(text: str) -> str:
     return "".join(parts)
 
 
+def _render_fanout_confirm(ctx: str) -> None:
+    """Clean confirmation panel for the meta fan-out launch — replaces the raw
+    monospace stdout dump with readable markdown (verdict, join axis, the
+    branch list; the long rationale tucked into an expander)."""
+    def _g(pat):
+        m = re.search(pat, ctx or "")
+        return re.sub(r"\s{2,}", " ", m.group(1).strip()) if m else None
+    verdict = _g(r"Complementarity verdict\s*:\s*(.+)")
+    join = _g(r"Join axis\s*:\s*(.+)")
+    rationale = _g(r"Rationale\s*:\s*(.+)")
+    branches = [re.sub(r"\s{2,}", " ", b.strip())
+                for b in re.findall(r"•\s*(.+)", ctx or "")]
+    st.markdown("#### 🔀 Launch parallel multi-dataset analysis?")
+    if verdict:
+        st.markdown(f"**Complementarity:** {verdict}")
+    if join:
+        st.markdown(f"**Join axis:** {join}")
+    if branches:
+        st.markdown("**Branches** — run concurrently, each seeing the others "
+                    "as auxiliary:\n" + "\n".join(f"- {b}" for b in branches))
+    if rationale:
+        st.markdown(f"**Why:** {rationale}")
+    st.caption("Branches run autonomously — no per-branch approval pauses.")
+
+
 _LOGO_DIR = Path(__file__).resolve().parent / "assets"
 _LOGO_DARK = _LOGO_DIR / "scilink_logo_v3_dark.svg"
 _LOGO_LIGHT = _LOGO_DIR / "scilink_logo_v3_light.svg"
@@ -415,7 +440,7 @@ if not st.session_state.agent_initialized:
             with _col:
                 _btype = ("primary" if st.session_state.app_mode == _m["key"]
                           else "secondary")
-                if st.button(_m["label"], type=_btype, use_container_width=True,
+                if st.button(_m["label"], type=_btype, width="stretch",
                              key=f"mode_{_m['key']}"):
                     st.session_state.app_mode = _m["key"]
                     st.rerun()
@@ -638,10 +663,14 @@ else:
                             with st.expander(f"📄 {fname}", expanded=len(code_files) == 1):
                                 st.code(content, language="python")
     
-                if req.context:
+                _is_fanout_confirm = ("parallel multi-dataset analysis"
+                                      in (req.context or "").lower())
+                if _is_fanout_confirm:
+                    _render_fanout_confirm(req.context)
+                elif req.context:
                     import html as _html
                     import re
-    
+
                     display_ctx = req.context
                     lines = display_ctx.split("\n")
                     # Find the last separator block (===…) followed by a
@@ -697,6 +726,7 @@ else:
                 _ctx_tail = (req.context or "")[-1500:]
                 _prompt = req.prompt or ""
                 _is_keep_revert = "revert to original" in _ctx_tail.lower()
+                # (_is_fanout_confirm computed above, before the context render)
                 if "Context" in _prompt or "MISSING METADATA" in _ctx_tail:
                     _input_label = "Describe your data (optional):"
                     _submit_label = "Submit description"
@@ -731,6 +761,32 @@ else:
                     with col_revert:
                         if st.button("Revert to original fit", type="primary", width="stretch"):
                             req.response = ""
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                # Fan-out launch confirmation: two clear buttons (Launch sends
+                # "y", Cancel sends "no" — matching _confirm_fanout's parsing),
+                # no text area (there is nothing to edit, only launch/abort).
+                elif _is_fanout_confirm:
+                    # Anchor so theme.py can force Cancel/Launch to identical
+                    # box size (equal columns fix width; this fixes height too).
+                    st.markdown(
+                        '<span class="fanout-actions-anchor"></span>',
+                        unsafe_allow_html=True,
+                    )
+                    col_cancel, col_go = st.columns(2)
+                    with col_cancel:
+                        if st.button("Cancel", type="secondary", width="stretch"):
+                            req.response = "no"
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                    with col_go:
+                        if st.button("🔀 Launch parallel analysis", type="primary",
+                                     width="stretch"):
+                            req.response = "y"
                             req.event.set()
                             st.session_state.pop("_feedback_preview_images", None)
                             st.session_state.pop("_code_review_files", None)
@@ -998,7 +1054,7 @@ else:
                     # rerun, which re-evaluates the rglob below and shows
                     # any newly-created files.
                     if st.button("🔄 Refresh", key="files_refresh_btn",
-                                 use_container_width=True,
+                                 width="stretch",
                                  help="Re-scan the session directory for new files."):
                         st.rerun()
     
@@ -1038,7 +1094,7 @@ else:
                                 if st.button(
                                     f"{icon}  {display_name}  ({size})",
                                     key=f"fbtn_{f.relative_to(session_path)}",
-                                    use_container_width=True,
+                                    width="stretch",
                                     type=btn_type,
                                     help=f.name,
                                 ):

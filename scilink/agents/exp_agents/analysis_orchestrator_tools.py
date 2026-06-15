@@ -2094,6 +2094,7 @@ class AnalysisOrchestratorTools:
             literature_file: str = None,
             r2_threshold: float = None,
             max_verification_iterations: int = None,
+            starting_annealing_level: int = None,
             n_candidates: int = None,
         ) -> str:
             """
@@ -2181,10 +2182,28 @@ class AnalysisOrchestratorTools:
                 if has_sidecars:
                     self.orch.current_metadata = {}
                 else:
-                    return json.dumps({
-                        "status": "error",
-                        "message": "No metadata available. Use load_metadata or convert_metadata first."
-                    })
+                    # Single-file backstop: if a stem-matched sidecar JSON sits
+                    # next to the data file (foo.npy -> foo.json), auto-load it
+                    # instead of erroring. This ONLY runs when no metadata was
+                    # loaded (so it can never override an explicit load); it
+                    # converts a hard error into a usable run and makes metadata
+                    # forwarding deterministic for the meta fan-out path.
+                    if data_p.is_file():
+                        sidecar = data_p.with_suffix(".json")
+                        if sidecar.exists():
+                            try:
+                                with open(sidecar) as _fh:
+                                    _md = json.load(_fh)
+                                if isinstance(_md, dict) and _md:
+                                    self.orch.current_metadata = _md
+                                    print(f"  📎 Auto-loaded sidecar metadata: {sidecar.name}")
+                            except Exception:  # noqa: BLE001 - bad sidecar -> fall through to error
+                                pass
+                    if self.orch.current_metadata is None:
+                        return json.dumps({
+                            "status": "error",
+                            "message": "No metadata available. Use load_metadata or convert_metadata first."
+                        })
             
             try:
                 # === Handle directory input - filter out metadata files ===
@@ -2619,6 +2638,21 @@ class AnalysisOrchestratorTools:
                             f"   max_verification_iterations={max_verification_iterations} ignored: "
                             f"{self.AGENT_NAMES.get(agent_id, 'agent')} has no verification loop."
                         )
+                if starting_annealing_level is not None:
+                    # Annealing-schedule override for a RE-RUN: start the
+                    # constraint-relaxation schedule higher (e.g. hot) so the
+                    # agent does not repeat early stages a prior run already
+                    # found inadequate. Default/first run is None -> unchanged
+                    # (schedule starts frozen at T=0). Only forward to agents
+                    # whose analyze() accepts it (CurveFitting, Image).
+                    import inspect as _inspect
+                    if "starting_annealing_level" in _inspect.signature(agent.analyze).parameters:
+                        analyze_kwargs["starting_annealing_level"] = int(starting_annealing_level)
+                    else:
+                        self.logger.info(
+                            f"   starting_annealing_level={starting_annealing_level} ignored: "
+                            f"{self.AGENT_NAMES.get(agent_id, 'agent')} has no annealing schedule."
+                        )
                 # Best-of-N: deterministic per-agent default (image=3, others 1)
                 # unless explicitly requested; forwarded only to agents whose
                 # analyze() accepts it.
@@ -2683,8 +2717,8 @@ class AnalysisOrchestratorTools:
                         "analysis_id": analysis_id,
                         "agent_used": self.AGENT_NAMES.get(agent_id),
                         "output_directory": str(analysis_output_dir),
-                        "detailed_analysis": result.get("detailed_analysis", "")[:2000],
-                        "claims_count": len(result.get("scientific_claims", [])),
+                        "detailed_analysis": (result.get("detailed_analysis") or "")[:2000],
+                        "claims_count": len(result.get("scientific_claims") or []),
                         "full_result_available": True,
                         "note": f"All outputs saved to: {analysis_output_dir}",
                         "next_steps": "Use assess_novelty to check literature for these claims, or get_recommendations for follow-up experiments.",
@@ -2979,6 +3013,25 @@ class AnalysisOrchestratorTools:
                         "post-experiment analysis → leave unset (defaults to 7). "
                         "Often paired with r2_threshold (e.g. 'use R²=0.98 and a "
                         "single verification step')."
+                    )
+                },
+                "starting_annealing_level": {
+                    "type": "integer",
+                    "description": (
+                        "CurveFitting and Image analysis agents. The constraint-"
+                        "annealing schedule normally starts FROZEN (skill rules "
+                        "and model locked) and only relaxes toward full freedom "
+                        "across verification iterations. Set this to start the "
+                        "schedule HIGHER on a RE-RUN, so the agent does not waste "
+                        "iterations repeating early constraint stages that a prior "
+                        "run already showed to be inadequate. Levels: 0 = frozen "
+                        "(default / first run — ALWAYS leave UNSET on a first "
+                        "analysis), 1 = warm (constraints loosened), 2 = hot (full "
+                        "freedom, fresh generation from scratch). Set it ONLY when "
+                        "the user is re-running after an unsatisfactory fit and "
+                        "wants to skip the early restrictive stages (e.g. 'this "
+                        "didn't work — try again without the earlier constraints' "
+                        "→ 2). Leave UNSET otherwise."
                     )
                 },
                 "n_candidates": {

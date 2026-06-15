@@ -378,6 +378,141 @@ class MetaOrchestratorTools:
             required=["task", "label"],
         )
 
+        # -- assess_complementarity -----------------------------------------
+        def assess_complementarity(datasets: list) -> str:
+            print(f"  🔎 Assessing complementarity of {len(datasets or [])} dataset(s)...")
+            return self.orch._assess_complementarity(datasets)
+
+        self._register_tool(
+            func=assess_complementarity,
+            name="assess_complementarity",
+            description=(
+                "Judge whether two or more datasets are GENUINELY COMPLEMENTARY "
+                "— same physical system, different (non-redundant) information, "
+                "and a shared join axis to reconcile them on — and partition "
+                "them: a `fanout_set` worth analyzing together, `redundant_"
+                "clusters` (duplicates), and `unrelated` outliers. Call this "
+                "BEFORE proposing `delegate_to_analyses` so you can show the "
+                "user the verdict and discuss it. Read-only; does not run any "
+                "analysis. (The same gate also runs INSIDE delegate_to_analyses, "
+                "so a non-complementary set is refused even if you skip this.)"
+            ),
+            parameters={
+                "datasets": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string",
+                                     "description": "Absolute path to the dataset."},
+                            "role": {"type": "string",
+                                     "description": "Optional: what this dataset is / "
+                                                    "its stated relationship to the others."},
+                            "metadata": {"type": "string",
+                                         "description": "Optional: path to a metadata "
+                                                        "JSON, or an inline description."},
+                        },
+                        "required": ["path"],
+                    },
+                    "description": "The datasets to assess (>= 2).",
+                },
+            },
+            required=["datasets"],
+        )
+
+        # -- delegate_to_analyses (parallel fan-out, full-mesh aux) ----------
+        def delegate_to_analyses(branches: list) -> str:
+            print(f"  🔀 Parallel analysis over {len(branches or [])} dataset(s)...")
+            return self.orch._run_fanout(branches)
+
+        self._register_tool(
+            func=delegate_to_analyses,
+            name="delegate_to_analyses",
+            description=(
+                "Run SEVERAL analysis branches CONCURRENTLY over complementary "
+                "datasets, each branch seeing the others as auxiliary operands "
+                "(full mesh), then fuse with `fuse_delegations`. Use this — NOT "
+                "repeated `delegate_to_analysis` — when the user has 2+ datasets "
+                "that are complementary measurements of ONE system and you want "
+                "each analysis informed by the others plus a final cross-dataset "
+                "synthesis. A complementarity GATE runs first and PRUNES to the "
+                "genuinely-complementary subset: a redundant or unrelated set is "
+                "declined (analyze those independently instead). In AUTOPILOT the "
+                "user is asked to confirm before launching; branches always run "
+                "AUTONOMOUSLY (no per-branch approval pauses — concurrent prompts "
+                "can't interleave). Each branch's `task` must be a complete, "
+                "self-contained instruction with the absolute data path; the "
+                "companions are wired in automatically. Returns the per-branch "
+                "delegation_index list and the indices to pass to "
+                "`fuse_delegations`."
+            ),
+            parameters={
+                "branches": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "data_path": {"type": "string",
+                                          "description": "Absolute path to THIS branch's "
+                                                         "primary dataset."},
+                            "task": {"type": "string",
+                                     "description": "Complete, self-contained analysis "
+                                                    "instruction for this dataset."},
+                            "label": {"type": "string",
+                                      "description": "Short 2-5 word UI label (the data "
+                                                     "type, e.g. 'STEM image')."},
+                            "metadata": {"type": "string",
+                                         "description": "Optional: path to a metadata JSON "
+                                                        "or inline description (also feeds "
+                                                        "the complementarity gate)."},
+                        },
+                        "required": ["data_path", "task", "label"],
+                    },
+                    "description": "The analysis branches to run in parallel (>= 2).",
+                },
+            },
+            required=["branches"],
+        )
+
+        # -- fuse_delegations -----------------------------------------------
+        def fuse_delegations(delegation_indices: list, focus: str = None) -> str:
+            print(f"  🧬 Fusing delegations {delegation_indices}...")
+            return self.orch._fuse_delegations(delegation_indices, focus)
+
+        self._register_tool(
+            func=fuse_delegations,
+            name="fuse_delegations",
+            description=(
+                "Reconcile the findings of two or more COMPLETED analysis "
+                "delegations (typically the branches from `delegate_to_analyses`, "
+                "but any successful delegations work) into ONE cross-dataset "
+                "scientific narrative + synthesized claims. Reconciles spatial / "
+                "shared-axis / local-vs-bulk / complementary-observable evidence, "
+                "and ATTACHES one representative figure per dataset to the "
+                "(multimodal) synthesis so spatial correlations are verified from "
+                "the actual plots, not just the text. Writes BOTH a JSON and a "
+                "human-readable HTML fusion report (figures inline) — surface the "
+                "`report_html_path` to the user. Crucially, 'no significant "
+                "correlation found' is a VALID result — it will not manufacture a "
+                "correlation the findings don't support. Pass the "
+                "`delegation_index` numbers to fuse; optional `focus` weights the "
+                "synthesis toward a specific question."
+            ),
+            parameters={
+                "delegation_indices": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "delegation_index numbers of the completed "
+                                   "delegations to fuse (>= 2).",
+                },
+                "focus": {
+                    "type": "string",
+                    "description": "Optional question/aspect to weight the synthesis toward.",
+                },
+            },
+            required=["delegation_indices"],
+        )
+
         # -- delegate_to_simulation: DEFERRED lazy seam, intentionally NOT built
         #
         # v1 covers analysis + planning only. When simulation delegation is

@@ -171,6 +171,25 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
     color: #E0E0E0 !important;
     box-shadow: none !important;
 }
+/* Fan-out confirm — force Cancel/Launch to IDENTICAL box size and shape.
+   Equal st.columns fixes width; the secondary (Cancel) and primary (Launch)
+   otherwise differ in height/box-model, so pin both to one height + padding. */
+div:has(> [data-testid="stMarkdown"] .fanout-actions-anchor) + div .stButton > button {
+    min-height: 2.75rem !important;
+    height: 2.75rem !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+/* Cancel (secondary) gets a solid neutral fill so it reads as the SAME box as
+   the purple primary Launch — equal size AND equal shape, color = the only
+   difference (grey = abort, purple = go). */
+div:has(> [data-testid="stMarkdown"] .fanout-actions-anchor) + div .stButton > button[kind="secondary"] {
+    background-color: #3A4556 !important;
+    color: #C7D0DC !important;
+}
 /* File explorer tree buttons — soft gray, blue on selection */
 [data-testid="stExpander"] .stButton > button,
 [data-testid="stExpander"] .stButton button {

@@ -1109,31 +1109,34 @@ You MUST respond with a valid JSON object containing a single key:
 
 
 HOLISTIC_EXPERIMENTAL_SYNTHESIS_INSTRUCTIONS = """
-You are an expert materials scientist tasked with synthesizing findings from a multi-modal characterization of a single sample. You have been provided with analyses from different experimental techniques, which may provide information at different length scales (e.g., local atomic structure vs. bulk crystal phase).
+You are an expert scientist synthesizing findings from several complementary measurements of ONE system. The datasets have already been confirmed to share a subject and a join axis; each was analyzed independently. Your task is to reconcile them into a single interpretation consistent with ALL the evidence — or to state clearly where they do NOT constrain one another.
 
-Your primary task is to build a single, cohesive scientific narrative that is consistent with ALL the provided experimental evidence.
+Follow these steps:
 
-To do this, follow these steps:
+1.  **Identify how the datasets join, and reconcile them on that basis.** The right reconciliation depends on what they share:
+    * **Co-registered spatial data** (e.g. an image + a spectral map or datacube of the same region): look for direct SPATIAL correlations — does a structural domain coincide with a distinct chemical/spectral signature on the same pixels?
+    * **A shared parameter axis** (temperature, energy, time, wavelength, composition): look for COINCIDENCES on that axis — e.g. a DSC thermal event at the same temperature as a TGA mass-loss step (a decomposition/dehydration) versus a mass-neutral event (a solid-state phase transition); an absorption edge and a photoluminescence peak consistent with a single band gap.
+    * **Different length scales** (a local probe + a bulk-average technique): reconcile the local observations with the bulk averages — do the phases, composition, or defects seen locally explain the bulk signal (e.g. XRD phases vs. TEM structure, XPS vs. EDX composition, local strain vs. peak broadening)?
+    * **Complementary observables of the same sample** (e.g. Raman vs. IR selection rules): check MUTUAL CONSISTENCY — do they point to the same phase / composition / structure?
 
-1.  **First, consider the nature of each analysis provided:**
-    * For **spatially-resolved techniques** (e.g., Microscopy, SEM, TEM, EELS/EDX mapping): Look for direct **spatial correlations**. Does a structural feature seen in an image correspond to a unique signature in a spectral map?
-    * For **bulk-average techniques** (e.g., XRD, DSC, XPS): **Reconcile** these average properties with the local observations. For example, do the phases identified by XRD match the crystal structure seen in TEM? Can local defects or strain observed in microscopy explain peak broadening in the XRD pattern? Is the bulk elemental composition from XPS consistent with the local composition from EDX?
+2.  **Formulate the reconciled narrative ('detailed_analysis').** Build a coherent account supported by the COMBINED evidence. CRITICAL — the evidence is the final authority: assert a cross-dataset correlation, coincidence, or causal link ONLY where the provided findings actually support it. If the datasets do not correlate or constrain one another, say so plainly — "the techniques are mutually consistent but capture independent aspects" or "no significant cross-dataset correlation was found" is a valid and valuable conclusion. NEVER invent a correlation or a shared feature to force a unified story; a manufactured correlation is worse than reporting its absence.
 
-2.  **Formulate a Unified Narrative**: Based on this correlated and reconciled understanding, write a comprehensive 'detailed_analysis'. This narrative should explain how the local, atomic-scale features give rise to the observed bulk properties, or vice-versa.
+3.  **Generate synthesized claims** that genuinely depend on MORE THAN ONE dataset. Do not relabel a single-dataset finding as a synthesis.
 
-3.  **Generate Synthesized Claims**: From your unified narrative, generate a list of high-level 'scientific_claims' that are supported by the combined evidence from all techniques.
+4.  **List the caveats** — the limitations a reader must keep in mind when trusting this synthesis. Be specific and honest: what is INFERRED vs directly MEASURED (e.g. a correlation read from area fractions rather than pixel-level co-registration); what could NOT be established from the data; technique limitations that bound the conclusions (surface- vs bulk-sensitivity, Z-contrast insensitivity to oxidation state, area-averaging); and any assumptions made (e.g. that the datasets share a region without an explicit registration marker). If there are essentially no caveats, return an empty list.
 
 You MUST respond in a valid JSON format with the following keys:
 {
-    "detailed_analysis": "<Your comprehensive, synthesized scientific narrative that reconciles local and bulk findings>",
+    "detailed_analysis": "<reconciled narrative across the datasets; state explicitly where they correlate and where they do not>",
     "scientific_claims": [
         {
-            "claim": "<A high-level scientific claim based on the combined data>",
+            "claim": "<A high-level scientific claim supported by the COMBINED evidence>",
             "scientific_impact": "<The potential impact of this claim>",
             "has_anyone_question": "<A question for a literature search, formatted as 'Has anyone observed...'>",
             "keywords": ["<keyword1>", "<keyword2>"]
         }
-    ]
+    ],
+    "caveats": ["<a specific limitation/assumption a reader must keep in mind>", "..."]
 }
 """
 

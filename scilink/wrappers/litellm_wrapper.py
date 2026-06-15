@@ -74,6 +74,33 @@ try:
 except ImportError:
     Image = None
 
+
+# Model image APIs (Bedrock, direct Anthropic) reject any image whose larger
+# dimension exceeds 8000 px. A tall multi-panel synthesis montage can exceed it
+# and the whole request fails. Downscale only such oversized images; everything
+# at or under the limit is returned BYTE-IDENTICAL so normal requests are
+# unchanged.
+_MAX_IMAGE_DIM = 8000
+
+
+def _cap_image_bytes(raw: bytes) -> bytes:
+    """Return ``raw`` unchanged unless it is an image larger than
+    ``_MAX_IMAGE_DIM`` on a side, in which case return a downscaled PNG. Any
+    failure (no PIL, non-image, undecodable) returns the input untouched."""
+    if not Image or not raw:
+        return raw
+    try:
+        im = Image.open(io.BytesIO(raw))
+        if max(im.size) <= _MAX_IMAGE_DIM:  # common case: identical passthrough
+            return raw
+        im = im.copy()
+        im.thumbnail((_MAX_IMAGE_DIM, _MAX_IMAGE_DIM))
+        out = io.BytesIO()
+        im.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:  # noqa: BLE001 - never let capping break a request
+        return raw
+
 try:
     import litellm
     LITELLM_AVAILABLE = True
@@ -414,17 +441,24 @@ class LiteLLMGenerativeModel:
             
             elif Image and isinstance(part, Image.Image):
                 buf = io.BytesIO()
-                part.save(buf, format="PNG")
+                img = part
+                if max(part.size) > _MAX_IMAGE_DIM:   # downscale only if oversized
+                    img = part.copy()
+                    img.thumbnail((_MAX_IMAGE_DIM, _MAX_IMAGE_DIM))
+                img.save(buf, format="PNG")
                 b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
                 converted.append({
                     "type": "image_url",
                     "image_url": {"url": f"data:image/png;base64,{b64}"}
                 })
-            
+
             elif isinstance(part, dict):
                 if "mime_type" in part and "data" in part:
                     data = part["data"]
                     if isinstance(data, bytes):
+                        # Cap oversized image bytes (no-op / identical otherwise).
+                        if str(part.get("mime_type", "")).startswith("image/"):
+                            data = _cap_image_bytes(data)
                         b64 = base64.b64encode(data).decode("utf-8")
                     else:
                         b64 = data

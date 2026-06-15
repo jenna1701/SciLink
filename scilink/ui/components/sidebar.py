@@ -137,7 +137,7 @@ def _render_hpc_connection() -> None:
             if st.button(
                 "Disconnect",
                 key="sidebar_hpc_disconnect",
-                use_container_width=True,
+                width="stretch",
             ):
                 conn.disconnect()
                 st.session_state.hpc_connection = None
@@ -202,7 +202,7 @@ def _render_hpc_connection() -> None:
         if st.button(
             "Connect",
             disabled=not (hostname and username),
-            use_container_width=True,
+            width="stretch",
             key="sidebar_hpc_connect",
         ):
             profile = HPCProfile(
@@ -433,7 +433,7 @@ def render_sidebar() -> None:
                     if st.button(
                         "Resume Session",
                         disabled=not consent,
-                        use_container_width=True,
+                        width="stretch",
                         key="resume_session_btn",
                     ):
                         _r_embed_preset = st.session_state.get("cfg_embedding_preset", "")
@@ -523,7 +523,7 @@ def render_sidebar() -> None:
 
         # ── Quit button (always visible at bottom) ────────────
         st.divider()
-        if st.button("Quit App", use_container_width=True):
+        if st.button("Quit App", width="stretch"):
             # Stop any running agent thread
             task = st.session_state.get("chat_task")
             if task and task.is_running:

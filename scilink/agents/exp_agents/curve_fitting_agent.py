@@ -307,6 +307,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         max_model_retries: Optional[int] = None,
         outlier_sigma: Optional[float] = None,
         max_verification_iterations: Optional[int] = None,
+        # Annealing schedule start level for THIS run (None/0 = current
+        # behavior: start frozen at T=0 and escalate adaptively). A re-run may
+        # start higher (e.g. hot) so it does not re-obey early constraint stages
+        # a prior run already found inadequate.
+        starting_annealing_level: Optional[int] = None,
         quality_gate: "QualityGate | dict | None" = None,
         # Number of independent anchor-fit attempts run in parallel; an LLM
         # judge compares finished fits (R² + fit plots) and locks the winner.
@@ -687,6 +692,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "analysis_hints": hints,
             "analysis_objective": objective,
             "task_mode": effective_task_mode,
+            # Annealing schedule start level (None/0 = start frozen at T=0).
+            "_starting_annealing_level": starting_annealing_level,
 
             # Auxiliary reference data
             **aux_state,
