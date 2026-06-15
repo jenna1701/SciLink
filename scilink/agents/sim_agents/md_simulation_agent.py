@@ -132,31 +132,45 @@ class MDSimulationAgent(SimulationAgent):
             except Exception as e:
                 self.logger.warning(f"Tool analysis failed: {e}")
 
+        # Generic ASE read first — handles the engine-neutral coordinate formats
+        # structure generation emits (extxyz / xyz / cif / pdb) as well as POSCAR.
+        try:
+            from ase.io import read as _ase_read
+            atoms = _ase_read(structure_file)
+            if len(atoms) > 0:
+                return self._info_from_atoms(atoms)
+        except Exception:
+            pass
+
+        # LAMMPS data files (ASE can't auto-detect these by extension).
         try:
             from ase.io.lammpsdata import read_lammps_data
             atoms = read_lammps_data(structure_file, style="full", units="real")
-            ec = {}
-            for s in atoms.get_chemical_symbols():
-                ec[s] = ec.get(s, 0) + 1
-            return {
-                "atom_count": len(atoms),
-                "elements": sorted(ec.keys()),
-                "element_counts": ec,
-                "box_dimensions": atoms.get_cell().diagonal().tolist(),
-                "has_water": (
-                    "O" in ec and "H" in ec
-                    and ec.get("H", 0) >= 2 * ec.get("O", 0)
-                ),
-                "has_ions": any(
-                    x in ec for x in ["Na", "Cl", "K", "Ca", "Mg"]
-                ),
-                "has_organic": "C" in ec,
-                "system_category": "unknown",
-            }
+            return self._info_from_atoms(atoms)
         except Exception:
             pass
 
         return self._llm_analyze_structure(structure_file)
+
+    @staticmethod
+    def _info_from_atoms(atoms) -> Dict[str, Any]:
+        """Summarize an ase.Atoms into the system-info dict (engine-neutral)."""
+        ec: Dict[str, int] = {}
+        for s in atoms.get_chemical_symbols():
+            ec[s] = ec.get(s, 0) + 1
+        return {
+            "atom_count": len(atoms),
+            "elements": sorted(ec.keys()),
+            "element_counts": ec,
+            "box_dimensions": atoms.get_cell().diagonal().tolist(),
+            "has_water": (
+                "O" in ec and "H" in ec
+                and ec.get("H", 0) >= 2 * ec.get("O", 0)
+            ),
+            "has_ions": any(x in ec for x in ["Na", "Cl", "K", "Ca", "Mg"]),
+            "has_organic": "C" in ec,
+            "system_category": "unknown",
+        }
 
     def _llm_analyze_structure(self, path: str) -> Dict[str, Any]:
         with open(path) as f:
