@@ -44,6 +44,26 @@ class QualityGate:
     accept_threshold: float = 0.95
     hard_reject_threshold: float = 0.90
     direction: str = "higher_is_better"
+    # Whether the LLM physics verifier runs on top of the numeric gate.
+    # True for goodness-of-fit metrics (r_squared, peak_region_r2, BIC, …) — the
+    # verifier inspects the plot/residuals/parameters for physics problems a
+    # number can't catch. False for *workflow-scoring* gates (e.g. xrd's
+    # figure_of_merit), where the skill's own scoring tool IS the verification
+    # and the goodness-of-fit-shaped prompt does not apply.
+    physical_review: bool = True
+
+    @property
+    def label(self) -> str:
+        """Human label for the metric in prompts/messages."""
+        return "R²" if self.metric == "r_squared" else self.metric
+
+    @property
+    def accept_cmp(self) -> str:
+        return "≥" if self.direction == "higher_is_better" else "≤"
+
+    @property
+    def reject_cmp(self) -> str:
+        return "<" if self.direction == "higher_is_better" else ">"
 
     def __post_init__(self) -> None:
         if self.direction not in _DIRECTIONS:
@@ -225,6 +245,7 @@ def from_mapping(data: dict) -> QualityGate:
             "hard_reject_threshold", R_SQUARED_DEFAULT.hard_reject_threshold
         )),
         direction=str(data.get("direction", R_SQUARED_DEFAULT.direction)),
+        physical_review=bool(data.get("physical_review", R_SQUARED_DEFAULT.physical_review)),
     )
 
 

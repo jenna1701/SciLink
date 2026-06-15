@@ -5,6 +5,7 @@ quality_gate:
   accept_threshold: 0.70
   hard_reject_threshold: 0.40
   direction: higher_is_better
+  physical_review: false   # workflow-scoring gate: score_xrd_match_robust IS the verification
 ---
 # XRD Structure Matching Skill
 
