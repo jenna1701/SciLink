@@ -123,17 +123,25 @@ div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) {
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div {
     margin-top: -2rem !important;
 }
-/* Mode selector — keep the buttons on one row.
-   Streamlit columns are flex items with a built-in min-width and the row
-   wraps by default; at higher OS display scaling / narrower windows the
-   buttons' combined min-width exceeds the centered column and the row wraps
-   (reproduces on some machines, not others). Force no-wrap and let the
-   columns shrink so the buttons stay on a single line. */
+/* Mode selector — full labels at EVERY width.
+   Each button sizes to its label (never narrower, so no "Analyze"->"Analy"
+   truncation or icon-cramming), and the row centers and wraps to a second
+   line only when the window is genuinely too narrow to fit them — rather than
+   forcing them onto one line and shrinking them into a mess. */
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] {
-    flex-wrap: nowrap !important;
+    flex-wrap: wrap !important;
+    justify-content: center !important;
+    gap: 8px !important;
 }
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-    min-width: 0 !important;
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: max-content !important;
+}
+div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div .stButton > button {
+    white-space: nowrap !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
 }
 /* Sidebar buttons — original purple */
 section[data-testid="stSidebar"] .stButton > button {
@@ -676,17 +684,25 @@ div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) {
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div {
     margin-top: -2rem !important;
 }
-/* Mode selector — keep the buttons on one row.
-   Streamlit columns are flex items with a built-in min-width and the row
-   wraps by default; at higher OS display scaling / narrower windows the
-   buttons' combined min-width exceeds the centered column and the row wraps
-   (reproduces on some machines, not others). Force no-wrap and let the
-   columns shrink so the buttons stay on a single line. */
+/* Mode selector — full labels at EVERY width.
+   Each button sizes to its label (never narrower, so no "Analyze"->"Analy"
+   truncation or icon-cramming), and the row centers and wraps to a second
+   line only when the window is genuinely too narrow to fit them — rather than
+   forcing them onto one line and shrinking them into a mess. */
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] {
-    flex-wrap: nowrap !important;
+    flex-wrap: wrap !important;
+    justify-content: center !important;
+    gap: 8px !important;
 }
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-    min-width: 0 !important;
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: max-content !important;
+}
+div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div .stButton > button {
+    white-space: nowrap !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
 }
 /* Mode selector secondary buttons — outlined purple */
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div .stButton > button[kind="secondary"] {
