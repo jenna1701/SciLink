@@ -164,36 +164,106 @@ def describe_columns(data, names=None):
             "per_column": per_column, "preview_rows": arr[:5].tolist()}
 
 
+def _hdr_isnum(s):
+    cands = [s]
+    if s.count(".") > 1:           # drop pandas '.N' duplicate-name suffix
+        cands.append(s.rsplit(".", 1)[0])
+    for c in cands:
+        try:
+            float(c); return True
+        except ValueError:
+            pass
+    return False
+
+
+def _recover_commented_header(data_path, ext):
+    """Recover a column-header row that sits behind a comment marker.
+
+    Format-agnostic ("header row adjacent to the data"): find the first numeric
+    data row, then test the nearest non-blank line above it as a header after
+    stripping any leading comment punctuation (``#``/``##``/``%``/``;``/``//``).
+    Works for any delimiter / column count. Returns names or None — None when the
+    line above the data is not a plausible header (token-count mismatch or mostly
+    numeric), so a headerless file or a trailing metadata line never yields a
+    spurious header. Used only as a fallback after the plain pandas read finds no
+    usable header (e.g. instrument exports whose column line is itself ``#``-led).
+    """
+    import re as _re
+
+    def split_delim(s):
+        if ext == ".csv":
+            return [t.strip() for t in s.split(",")]
+        if ext == ".tsv":
+            return [t.strip() for t in s.split("\t")]
+        return s.split()
+
+    def is_comment(line):
+        return line.strip().startswith(("#", "%", ";", "//"))
+
+    try:
+        with open(data_path, "r", errors="replace") as fh:
+            raw = [ln.rstrip("\n") for ln in fh.readlines()[:200]]
+    except OSError:
+        return None
+
+    # First numeric data row: non-blank, non-comment, >=2 tokens, mostly numeric.
+    data_idx, ncols = None, None
+    for i, ln in enumerate(raw):
+        if not ln.strip() or is_comment(ln):
+            continue
+        toks = split_delim(ln.strip())
+        if len(toks) >= 2 and sum(_hdr_isnum(t) for t in toks) >= 0.8 * len(toks):
+            data_idx, ncols = i, len(toks)
+            break
+    if not data_idx:        # None (no data) or 0 (data on line 0) → no header above
+        return None
+
+    # Candidate header = nearest non-blank line above the data block, with any
+    # leading comment punctuation stripped.
+    for j in range(data_idx - 1, -1, -1):
+        if not raw[j].strip():
+            continue
+        stripped = _re.sub(r"^\s*(?:#+|%+|;+|//+)\s*", "", raw[j].strip())
+        cand = split_delim(stripped)
+        if (len(cand) == ncols and all(t for t in cand)
+                and sum(_hdr_isnum(t) for t in cand) * 2 < len(cand)):
+            return cand
+        return None         # nearest line above data isn't a plausible header
+    return None
+
+
 def sniff_column_names(data_path):
     """Best-effort header sniff for a delimited text file → column names or None.
 
     None for headerless files (every header token parses as a number) and for
-    formats without a textual header (.npy / binary)."""
+    formats without a textual header (.npy / binary). When the plain read finds
+    no usable header — because the column-name row is itself hidden behind a
+    comment marker (common in instrument exports, e.g. a ``##Temp\\tMass`` line) —
+    falls back to recovering that adjacent header row, which the comment-stripping
+    read would otherwise discard."""
     ext = os.path.splitext(str(data_path))[1].lower()
     if ext not in (".csv", ".tsv", ".dat", ".txt"):
         return None
+    # Primary path (unchanged): handles every file whose header row is NOT hidden
+    # behind a comment marker — plain CSV, #-metadata + plain header, units rows,
+    # pandas duplicate-name suffixes — exactly as before.
     try:
         import pandas as pd
         sep = "\t" if ext == ".tsv" else ("," if ext == ".csv" else r"\s+")
         df = pd.read_csv(data_path, sep=sep, comment="#", nrows=5, engine="python")
         cols = [str(c) for c in df.columns]
-
-        def _isnum(s):
-            cands = [s]
-            if s.count(".") > 1:           # drop pandas '.N' duplicate-name suffix
-                cands.append(s.rsplit(".", 1)[0])
-            for c in cands:
-                try:
-                    float(c); return True
-                except ValueError:
-                    pass
-            return False
         # If most "names" parse as numbers, there was no header row (the data row
         # was misread as the header) → positional names are the safe choice.
-        numeric = sum(_isnum(c) for c in cols)
-        return None if numeric * 2 >= len(cols) else cols
+        numeric = sum(_hdr_isnum(c) for c in cols)
+        # A header whose first cell starts with a non-# comment marker (%, ;, //)
+        # is a comment line pandas misread (it only strips #) → defer to recovery.
+        looks_commented = bool(cols) and cols[0].strip().startswith(("%", ";", "//"))
+        if numeric * 2 < len(cols) and not looks_commented:
+            return cols
     except Exception:
-        return None
+        pass
+    # Recovery path: only reached when the primary read found no usable header.
+    return _recover_commented_header(data_path, ext)
 
 
 def load_curve_data(data_path: str, auto_orient: bool = True,
