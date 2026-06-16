@@ -416,9 +416,49 @@ def _file_paths(input_path: Path, output_dir: Path) -> dict:
     }
 
 
+# Extensions whose bytes are human-readable text worth showing the split LLM
+# verbatim. Binary containers (.npy/.npz/.h5/.mat/.tif) surface their metadata
+# structurally in the probe, so a "raw head" is meaningless for them.
+_TEXT_HEAD_EXTS = {".csv", ".tsv", ".dat", ".txt", ".asc", ".xy", ".prn"}
+_HEAD_MAX_LINES = 60
+_HEAD_MAX_CHARS = 4000
+
+
+def _raw_text_head(input_path: Path) -> str:
+    """First lines of a text-like file, verbatim, for the split prompt.
+
+    Lets the codegen LLM SEE the metadata/comment block and the column-name row
+    (which the structural probe omits), so the generated split can separate data
+    from metadata and preserve column names instead of writing the script blind.
+    Returns "" for binary/container formats (their metadata is in the probe) or
+    on read error. Capped by lines AND chars so the head stays small regardless
+    of file size — the LLM reads STRUCTURE here, never bulk data values."""
+    if input_path.suffix.lower() not in _TEXT_HEAD_EXTS:
+        return ""
+    try:
+        lines = []
+        with open(input_path, "r", errors="replace") as fh:
+            for _ in range(_HEAD_MAX_LINES):
+                ln = fh.readline()
+                if not ln:
+                    break
+                lines.append(ln.rstrip("\n"))
+        return "\n".join(lines)[:_HEAD_MAX_CHARS]
+    except OSError:
+        return ""
+
+
 def _build_prompt(probe, input_path: Path) -> str:
     probe_str = json.dumps(probe, indent=2, default=str) if probe else \
         f"(no probe) extension={input_path.suffix}, size={input_path.stat().st_size} bytes"
+    head = _raw_text_head(input_path)
+    if head:
+        probe_str += (
+            "\n\nRaw file head (first lines, verbatim — use it to locate the "
+            "metadata/comment block, the column-name row, and where the numeric "
+            "data starts, and to preserve column names; do NOT assume the data "
+            "continues in this exact form beyond the head):\n" + head
+        )
     return _PROMPT.format(probe=probe_str)
 
 
