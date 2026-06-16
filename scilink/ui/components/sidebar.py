@@ -535,15 +535,14 @@ def render_sidebar() -> None:
                     task.feedback_request.event.set()
             # Inject JS to replace the page with a goodbye message,
             # then kill the server after a short delay.
-            import streamlit.components.v1 as components
-            components.html(
+            st.html(
                 '<script>'
                 'window.parent.document.body.innerHTML = '
                 '\'<div style="display:flex;align-items:center;justify-content:center;'
                 'height:100vh;font-family:sans-serif;color:#888;background:#0e1117;">'
                 '<h2>Server stopped. You can close this window.</h2></div>\';'
                 '</script>',
-                height=1,
+                unsafe_allow_javascript=True,
             )
             import time, signal
             time.sleep(1)

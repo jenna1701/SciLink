@@ -1399,15 +1399,14 @@ _COLLISION_JS = """
 
 def inject_theme() -> None:
     """Inject the Material Design CSS into the current page."""
-    import streamlit.components.v1 as components
-
     theme_mode = st.session_state.get("theme_mode", "dark")
     css = _MATERIAL_CSS_DARK if theme_mode == "dark" else _MATERIAL_CSS_LIGHT
     st.markdown(css, unsafe_allow_html=True)
 
-    # Force-restyle widgets via JS injected through components.html()
-    # (st.markdown strips <script> tags; components.html() runs in an
-    # iframe so we reach the parent document via window.parent.document).
+    # Force-restyle widgets via JS injected through st.html(unsafe_allow_javascript=True)
+    # (st.markdown strips <script> tags). st.html runs inline in the main
+    # document — not an iframe — so window.parent resolves to the app window
+    # and window.parent.document is the app document itself.
     if theme_mode == "light":
         _LIGHT_WIDGET_JS = """<script>
 (function(){
@@ -1439,11 +1438,11 @@ def inject_theme() -> None:
         .observe(doc.body, {childList:true, subtree:true, attributes:true});
 })();
 </script>"""
-        components.html(_LIGHT_WIDGET_JS, height=1)
+        st.html(_LIGHT_WIDGET_JS, unsafe_allow_javascript=True)
     else:
         # Keep DOM slot count stable; also undo any inline styles
         # left by the light-mode observer on the stop button.
-        components.html("""<script>
+        st.html("""<script>
 (function(){
     var doc = window.parent.document;
     function cleanup(){
@@ -1459,7 +1458,7 @@ def inject_theme() -> None:
     new MutationObserver(cleanup)
         .observe(doc.body, {childList:true, subtree:true});
 })();
-</script>""", height=1)
+</script>""", unsafe_allow_javascript=True)
 
     vibe = st.session_state.get("vibe_theme", "Professional")
 
@@ -1486,7 +1485,7 @@ def inject_theme() -> None:
         unsafe_allow_html=True,
     )
     # Slot 2: collision JS (always present, no-op script when inactive)
-    components.html(
+    st.html(
         _COLLISION_JS if use_collision_js else "<script>/* noop */</script>",
-        height=1,
+        unsafe_allow_javascript=True,
     )
