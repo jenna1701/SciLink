@@ -86,11 +86,23 @@ def _choose_xy_indices(arr, system_info, column_names, log):
                            next((i for i in range(n) if i != x_guess), None))
             return x_guess, y_guess
 
-    for i in range(n):  # monotonic-column heuristic
-        col = arr[:, i]
-        if col.size >= 2 and np.all(np.isfinite(col)) and \
-                (np.all(np.diff(col) > 0) or np.all(np.diff(col) < 0)):
-            return i, next(j for j in range(n) if j != i)
+    # Monotonic-column heuristic (last-resort fallback). A monotonic column is
+    # almost always an axis (temperature, time, index), so use it as X — but pick
+    # a NON-monotonic column (a varying signal) as Y rather than blindly taking
+    # the next column, which is often a second axis (e.g. a time channel beside
+    # temperature). This only runs when there is no name signal and no LLM
+    # column_mapping; when names are known the LLM owns this choice, so the job
+    # here is just to avoid the catastrophic "axis as Y" guess.
+    def _is_mono(col):
+        return bool(col.size >= 2 and np.all(np.isfinite(col))
+                    and (np.all(np.diff(col) > 0) or np.all(np.diff(col) < 0)))
+
+    mono = [i for i in range(n) if _is_mono(arr[:, i])]
+    if mono:
+        xi = mono[0]
+        yi = next((j for j in range(n) if j != xi and j not in mono),
+                  next(j for j in range(n) if j != xi))
+        return xi, yi
 
     return 0, 1  # default: first two columns
 
