@@ -1953,6 +1953,13 @@ class HumanFeedbackRefinementController:
             f"Parameters: {', '.join(state.get('parameters_to_extract', []))}\n"
             f"Strategy: {state.get('fitting_strategy', 'N/A')}"
         )
+        # For >2-column inputs, show the currently selected columns so the
+        # feedback (e.g. "use the other columns") is anchored to what is wrong.
+        if state.get("column_info") and state.get("column_mapping"):
+            current_plan += (
+                f"\nColumn Mapping: {json.dumps(state['column_mapping'])}"
+                f" — {state.get('column_mapping_note', '')}"
+            )
 
         prompt = [
             self.instructions,
@@ -1964,6 +1971,7 @@ class HumanFeedbackRefinementController:
             f"\n## User Feedback\nAdjust the plan based on this feedback: \"{feedback}\"",
         ]
 
+        _append_column_structure(prompt, state)
         _append_objective_context(prompt, state)
         _append_fit_domain_guidance(prompt, state)
 
@@ -2006,6 +2014,21 @@ class HumanFeedbackRefinementController:
         state["parameters_to_extract"] = result.get("parameters_to_extract", state.get("parameters_to_extract", []))
         state["fitting_strategy"] = result.get("fitting_strategy", state.get("fitting_strategy"))
         state["literature_query"] = result.get("literature_query", state.get("literature_query"))
+
+        # Re-extract the column decision so a feedback-corrected X/Y choice is
+        # honored at lock time. Mirrors _plan_analysis; guarded so a refinement
+        # that omits column_mapping keeps the prior selection rather than nulling
+        # it (the locked fit reads state["column_mapping"] via _resolve_column_mapping).
+        if state.get("column_info"):
+            state["column_mapping"] = result.get("column_mapping", state.get("column_mapping"))
+            state["column_mapping_note"] = result.get(
+                "column_mapping_note", state.get("column_mapping_note", "")
+            )
+            if state.get("column_mapping"):
+                self.logger.info(
+                    f"  Column mapping (refined): {state['column_mapping']} "
+                    f"— {state['column_mapping_note']}"
+                )
 
         # Re-extract series plan (may have been updated or removed)
         self._extract_series_plan(state, result)
