@@ -781,9 +781,11 @@ class SimulationOrchestratorTools:
             outstanding_issues = val_result.get("all_identified_issues", []) or []
 
             # Engine-neutral: take the structure path from the result and
-            # build the input-files map from the generated inputs.
+            # build the input-files map from the generated inputs. The defensive
+            # fallback uses the engine-neutral default filename (generation emits
+            # extended XYZ), not a VASP POSCAR.
             structure_path = Path(
-                structure_gen.get("final_structure_path") or (workdir / "POSCAR")
+                structure_gen.get("final_structure_path") or (workdir / "structure.extxyz")
             )
             input_generation = result.get("input_generation", {}) or {}
             input_files = {

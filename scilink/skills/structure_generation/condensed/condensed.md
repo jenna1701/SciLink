@@ -1,12 +1,12 @@
 ---
-description: Condensed-phase / solvated-box structure generation — liquids, solutions, explicitly-solvated solutes, amorphous cells, and interfaces at a target density via Packmol (incl. pymatgen's wrapper) / OpenMM / mBuild / ASE, written as a periodic VASP5 POSCAR. For classical MD (LAMMPS, GROMACS, OpenMM).
-output_format: POSCAR
+description: Condensed-phase / solvated-box structure generation — liquids, solutions, explicitly-solvated solutes, amorphous cells, and interfaces at a target density via Packmol (incl. pymatgen's wrapper) / OpenMM / mBuild / ASE, written as engine-neutral extended XYZ. For classical MD (LAMMPS, GROMACS, OpenMM).
+output_format: extxyz
 ---
 ## Overview
 
 Build **periodic condensed-phase** systems for classical MD (LAMMPS, GROMACS, OpenMM): bulk
 liquids, solutions, explicitly-solvated solutes, amorphous cells, and liquid/solid interfaces.
-Output a periodic **POSCAR** (orthorhombic/cubic cell + all atoms). The goal is the right
+Output periodic **extended XYZ** (orthorhombic/cubic cell + PBC + all atoms). The goal is the right
 number of molecules at a realistic **density**, packed into a periodic box with no severe
 overlaps — a sound *initial* configuration that MD equilibration will relax.
 
@@ -60,9 +60,10 @@ fallback for when no packing library is available.
   molecule into the cell as a rigid unit (shift by one reference atom's image), never per-atom
   (`positions % L` applied atom-by-atom splits a molecule across the boundary).
 - **Cell & PBC:** set an orthorhombic/cubic `cell` and `pbc=True` sized to the target density.
-- **Output:** write a periodic POSCAR, e.g.
-  `ase.io.write("POSCAR", atoms, format="vasp", vasp5=True, direct=True)`, then print the exact
-  line `STRUCTURE_SAVED:POSCAR`.
+- **Output:** write engine-neutral periodic **extended XYZ** (carries the cell + PBC), e.g.
+  `ase.io.write("structure.extxyz", atoms, format="extxyz")`, then print the exact
+  line `STRUCTURE_SAVED:structure.extxyz`. Do not write a VASP POSCAR here — the engine-native
+  input (e.g. a LAMMPS data file) is produced by the downstream force-field / engine step.
 
 ## Validation
 
