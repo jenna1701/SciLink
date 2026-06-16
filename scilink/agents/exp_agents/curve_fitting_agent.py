@@ -577,21 +577,32 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         else:
             try:
                 first_spectrum = load_curve_data(spectrum_paths[0], system_info=system_info)
-                first_spectrum_name = Path(spectrum_paths[0]).stem
-                # Capture the raw column structure for the planner (best-effort);
-                # the per-spectrum fit re-loads lazily with the locked mapping.
-                try:
-                    _raw0 = load_curve_data(spectrum_paths[0], auto_orient=False)
-                    column_info = describe_columns(
-                        _raw0, names=sniff_column_names(spectrum_paths[0]))
-                except Exception:
-                    column_info = None
             except Exception as e:
-                return {
-                    "status": "error",
-                    "error": {"error": "Failed to load spectrum", "details": str(e)},
-                    "output_directory": str(self.output_dir)
-                }
+                # Deterministic load failed — e.g. a metadata block above a plain
+                # (non-#) header that np.loadtxt's fixed skiprows attempts can't
+                # skip. Rather than grow the deterministic attempt-ladder for every
+                # format, let the LLM normalizer split metadata from the numeric
+                # table into a clean file, then retry. LLM proposes the parse, the
+                # round-trip check verifies it (lossless); on any failure we keep
+                # the original error.
+                clean = self._normalize_messy_file(spectrum_paths[0])
+                if not clean:
+                    return {
+                        "status": "error",
+                        "error": {"error": "Failed to load spectrum", "details": str(e)},
+                        "output_directory": str(self.output_dir)
+                    }
+                spectrum_paths[0] = clean  # downstream per-spectrum loads use the clean file
+                first_spectrum = load_curve_data(clean, system_info=system_info)
+            first_spectrum_name = Path(spectrum_paths[0]).stem
+            # Capture the raw column structure for the planner (best-effort);
+            # the per-spectrum fit re-loads lazily with the locked mapping.
+            try:
+                _raw0 = load_curve_data(spectrum_paths[0], auto_orient=False)
+                column_info = describe_columns(
+                    _raw0, names=sniff_column_names(spectrum_paths[0]))
+            except Exception:
+                column_info = None
         
         # No separate preprocessing: the fit script owns preprocessing (see
         # docs/preprocessing_in_fit_loop.md). The planner sees the raw first
@@ -899,6 +910,37 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "y_std": float(np.nanstd(y)),
             "has_nans": bool(np.any(np.isnan(curve_data))),
         }
+
+    def _normalize_messy_file(self, path) -> str | None:
+        """Split a combined data+metadata file the deterministic loader couldn't
+        read into a clean data file, returning that path (or None).
+
+        Reuses the meta agent's lossless, round-trip-verified split (LLM proposes
+        the parse from the raw file head, code verifies losslessness) — so the
+        long tail of instrument-export layouts is handled by the model instead of
+        an ever-growing deterministic attempt-ladder. The data file it writes is
+        a clean headed CSV, which the deterministic loader then reads normally.
+        """
+        try:
+            from ..meta_agent.meta_orchestrator_tools import _probe_file
+            from ...utils.file_prep import prepare_inputs
+            try:
+                probe = _probe_file(Path(path))
+            except Exception:  # noqa: BLE001 - probe is best-effort context
+                probe = None
+            out_dir = self.output_dir / "normalized"
+            res = prepare_inputs(Path(path), model=self.model, executor=self.executor,
+                                 output_dir=out_dir, probe=probe,
+                                 logger=self.logger, max_retries=2)
+            if res.get("status") == "success":
+                self.logger.info(
+                    f"  🔧 Normalized unreadable file via LLM split → {res['data_path']}"
+                )
+                return res["data_path"]
+            self.logger.warning(f"  File normalization did not verify: {res.get('message','')[:160]}")
+        except Exception as e:  # noqa: BLE001 - normalization is a fallback, never fatal
+            self.logger.warning(f"  File normalization failed: {e}")
+        return None
 
     def _load_auxiliary_items(self, auxiliary_data, auxiliary_label) -> dict:
         """Load one or several auxiliary datasets into the multi-aux state.
