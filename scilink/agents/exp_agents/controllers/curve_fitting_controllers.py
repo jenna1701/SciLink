@@ -3032,6 +3032,18 @@ configured acceptance target:
 **Accept if:**
 - {metric_label} {accept_cmp} {accept_threshold:.2f} AND residuals are mostly random noise AND main data features are captured
 
+**Stop on plateau (convergence):** the PREVIOUS VERIFICATION ATTEMPTS section
+below lists {metric_label} per iteration. If {metric_label} is already
+{accept_cmp} {accept_threshold:.2f} AND it has plateaued — your recommended
+changes over the last couple of iterations are no longer meaningfully improving it
+— then the fit is as good as this model and data will give: set
+`fit_acceptable: true`, `recommended_action: "none"`, and record any remaining
+residual concern in `overall_assessment` so the user is informed, instead of
+rejecting again. Continuing to refine a plateaued, above-threshold fit is wasted
+effort or overfitting. (Does NOT apply below the accept threshold, nor when a
+prominent data feature is still entirely unmodelled — there a different change may
+still help, so keep refining.)
+
 **Reject if:**
 - {metric_label} {reject_cmp} {reject_threshold:.2f} (hard-reject floor — numerical fit is too poor)
 - Major systematic residual pattern across ENTIRE spectrum (any {metric_label})
