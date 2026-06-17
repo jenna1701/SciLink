@@ -195,6 +195,73 @@ def _format_residual_diagnostics(diag) -> str:
     return "\n".join(lines)
 
 
+def _render_region_zoom_panels(x, y, fit, diag, max_panels: int = 3,
+                               rms_floor: float = 1.5, pad_frac: float = 0.15):
+    """Zoomed, locally-rescaled views of the most systematic residual regions.
+
+    The numeric residual diagnostics tell the verifier *where* the misfit is; the
+    full-range plot squashes the corresponding fine structure under a tall peak so
+    the verifier can't *see* what's missing. For each flagged window (already
+    sorted by severity) this crops the data + fit + residual to that x-range and
+    rescales the y-axis to the local data, so an unmodeled maximum/shoulder
+    becomes visible. The x-axis is the TRUE data axis and the title states the
+    real x-range, so the verifier can reference/seed components at correct
+    positions. Returns ``[(label, png_bytes), ...]`` (empty if nothing systematic
+    or inputs can't be rendered — the caller degrades gracefully).
+    """
+    if not diag or not diag.get("worst_windows"):
+        return []
+    try:
+        from io import BytesIO
+        from matplotlib import pyplot as plt
+        x = np.asarray(x, float).ravel()
+        y = np.asarray(y, float).ravel()
+        fit = np.asarray(fit, float)
+        if fit.ndim == 2:
+            fit = fit[:, -1]
+        fit = fit.ravel()
+        if not (x.shape[0] == y.shape[0] == fit.shape[0]):
+            return []
+        order = np.argsort(x)
+        x, y, fit = x[order], y[order], fit[order]
+        panels = []
+        for w in diag["worst_windows"]:
+            if len(panels) >= max_panels:
+                break
+            if float(w.get("rms_over_noise", 0.0)) < rms_floor:
+                continue
+            lo, hi = float(w["x_lo"]), float(w["x_hi"])
+            pad = (hi - lo) * pad_frac
+            mask = (x >= lo - pad) & (x <= hi + pad)
+            if int(mask.sum()) < 4:
+                continue
+            xs, ys, fs = x[mask], y[mask], fit[mask]
+            fig, (ax1, ax2) = plt.subplots(
+                2, 1, figsize=(6, 4.2), sharex=True,
+                gridspec_kw={"height_ratios": [3, 1]})
+            ax1.plot(xs, ys, "o", ms=3, color="#1f77b4", label="Data")
+            ax1.plot(xs, fs, "-", lw=1.8, color="#d62728", label="Fit")
+            ax1.legend(loc="best", fontsize=8)
+            ax1.set_ylabel("Intensity")
+            ax1.set_title(
+                f"Region {lo:.1f}–{hi:.1f} (true x axis)  |  "
+                f"RMS/noise={float(w.get('rms_over_noise', 0.0)):.1f}, "
+                f"{int(w.get('sign_changes', 0))} sign-changes",
+                fontsize=9)
+            ax2.plot(xs, ys - fs, "-", lw=1.0, color="#555555")
+            ax2.axhline(0, color="k", lw=0.7)
+            ax2.set_ylabel("Residual")
+            ax2.set_xlabel("x (data axis)")
+            fig.tight_layout()
+            buf = BytesIO()
+            fig.savefig(buf, format="png", dpi=110)
+            plt.close(fig)
+            panels.append((f"Region {lo:.1f}–{hi:.1f}", buf.getvalue()))
+        return panels
+    except Exception:
+        return []
+
+
 def _active_skill_names(state: dict) -> list[str]:
     """Return names of all currently-loaded skills from a pipeline state dict.
 
@@ -330,8 +397,13 @@ def build_verification_prompt_with_history(
     
     for i, prev in enumerate(previous_iterations, 1):
         lines.append(f"\n### Attempt {i}")
-        r2 = prev.get('r_squared')
-        lines.append(f"- R² = {r2:.4f}" if r2 is not None else "- R² = N/A")
+        label = prev.get('metric_label', 'R²')
+        mv = prev.get('metric_value', prev.get('r_squared'))
+        bm = prev.get('best_metric_value', prev.get('best_so_far'))
+        parts = [f"{label} = {mv:.4f}" if mv is not None else f"{label} = N/A"]
+        if bm is not None:
+            parts.append(f"best-so-far = {bm:.4f}")
+        lines.append("- " + " | ".join(parts))
         lines.append(f"- Config: {prev.get('config_used', {}).get('physical_model', 'N/A')}")
         lines.append(f"- Assessment: {prev.get('overall_assessment', 'N/A')}")
         
@@ -356,7 +428,11 @@ def build_verification_prompt_with_history(
     lines.extend([
         "\n\n## IMPORTANT",
         "1. Check if previous issues were RESOLVED or still PERSIST",
-        "2. If a fix didn't work, suggest something DIFFERENT",
+        "2. If a fix didn't work AND the best metric is still below the accept "
+        "threshold, suggest something DIFFERENT. But if the best is already above "
+        "the accept threshold and has not improved for the last 2 iterations, do "
+        "NOT propose another change — accept and record any remaining concern as a "
+        "caveat (the plateau/convergence rule takes precedence).",
         "3. If a previous fix was NOT applied due to an API error, "
         "re-suggest it or propose an alternative",
     ])
@@ -2853,6 +2929,7 @@ Your guidance: '''
         # is absent (older/refit scripts) so this never breaks the fit path.
         fit_quality = dict(fit_results.get("fit_quality", {}) or {})
         residual_diag = None
+        residual_zoom_panels = []
         try:
             fit_path = Path(item_dir) / FIT_NAME
             if fit_path.exists():
@@ -2881,6 +2958,12 @@ Your guidance: '''
                         except Exception:
                             pass
                 residual_diag = _residual_diagnostics(xx, yy, fit_arr)
+                # Zoomed, locally-rescaled views of the flagged regions so the
+                # verifier can SEE unmodeled fine structure (e.g. crystal-field
+                # sub-peaks) the full-range plot squashes. x-axis is the true
+                # data axis so seed positions it suggests are correct.
+                residual_zoom_panels = _render_region_zoom_panels(
+                    xx, yy, fit_arr, residual_diag)
 
                 # Trust the saved fit over a broken self-reported R². The
                 # self-report is computed inside the (LLM-generated) script and
@@ -2919,6 +3002,7 @@ Your guidance: '''
             "visualization_path": run["visualization_path"],
             "visualization_bytes": run["visualization_bytes"],
             "residual_diagnostics": residual_diag,
+            "residual_zoom_panels": residual_zoom_panels,
             "statistics": stats,
             "script": script,
             "script_errors": script_errors,
@@ -2957,6 +3041,18 @@ configured acceptance target:
 **Accept if:**
 - {metric_label} {accept_cmp} {accept_threshold:.2f} AND residuals are mostly random noise AND main data features are captured
 
+**Stop on plateau (convergence):** the PREVIOUS VERIFICATION ATTEMPTS section
+below lists, per iteration, the metric that drives acceptance ({metric_label}) —
+its value that step and the best-so-far. Track the best, not the latest (which can
+regress). **Plateau = the last two iterations produced no new best**, where
+"improvement" is judged relative to the accept threshold ({accept_threshold:.2f}):
+once the best sits comfortably past the threshold, a change small compared to its
+margin beyond the threshold does not count as a new best. When the best
+{metric_label} is {accept_cmp} {accept_threshold:.2f} AND it has plateaued in this
+sense, the fit has converged: set `fit_acceptable: true`, `recommended_action:
+"none"`, and record any remaining residual concern in `overall_assessment` as a
+caveat for the user, rather than continuing to refine.
+
 **Reject if:**
 - {metric_label} {reject_cmp} {reject_threshold:.2f} (hard-reject floor — numerical fit is too poor)
 - Major systematic residual pattern across ENTIRE spectrum (any {metric_label})
@@ -2984,6 +3080,24 @@ configured acceptance target:
 accept floor, give only the physics reason for rejection (the systematic
 residual, missed feature, or unphysical parameter), never the {metric_label} value, so the
 report stays factually correct.
+
+**Residual adequacy — the goal is residuals consistent with noise, i.e.
+*structureless* (no coherent shape, trend, or repeated oscillation), NOT residuals
+driven toward zero.** Once the residuals carry no systematic structure, the fit is
+as good as the data supports: accept it, and do not add components or keep retuning
+to shrink residual amplitude further (that is overfitting). It is the *structure*
+of a residual, not its amplitude or σ-multiple, that signals a real deficiency —
+reject only for a *structured* residual (a coherent local oscillation =
+under-resolved structure per above, or a global trend) or a genuine physics defect.
+
+For **count / shot-noise-limited data** (photon- or electron-counting — EELS, XPS,
+XRD, raw spectroscopy counts), refine this further: the noise grows with the
+signal (≈√counts), so a structured residual sitting on a tall, bright peak that is
+only a fraction of a percent of the local signal is within counting statistics —
+its large σ-multiple overstates it, so don't chase it with extra components. This
+refinement applies ONLY to count data; for **constant-noise data** (normalized,
+derivative, or processed signals with roughly uniform noise across the spectrum) a
+structured many-σ residual is significant at any signal level — do not discount it.
 
 **Do NOT reject for:**
 - Ambiguous or subtle features — but distinguish "subtle" (small, noise-level,
@@ -3057,12 +3171,14 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
         "If you believe a model change is necessary, suggest it, but explain "
         "why a parameter-level fix is insufficient.\n",
         # T=2  hot: full freedom, justify from data.
-        "\n**Plan constraint (open — previous iterations could not fix the fit):**\n"
-        "You have full freedom to suggest any change the data warrants, "
-        "from small parameter adjustments to a completely different model. "
-        "Choose the scale of change that fits the remaining issues. "
-        "The only requirement is that you justify every deviation from the "
-        "original plan based on what you observe in the data and residuals.\n",
+        "\n**Plan constraint (open):**\n"
+        "Earlier iterations stayed within tighter model constraints. If the fit "
+        "still needs work, you now have full freedom to suggest any change the data "
+        "warrants, from small parameter adjustments to a completely different model; "
+        "justify every deviation from what you observe in the data and residuals. "
+        "This freedom does NOT oblige a change: if the best metric is already above "
+        "the accept threshold and has plateaued, accept per the plateau rule instead "
+        "of proposing further changes.\n",
     )
 
     # Same annealing applied to domain skill strictness during fitting.
@@ -3313,6 +3429,26 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
             "with location 'preprocessing' and set recommended_action to 'none' — "
             "recorded as a caveat, not a refit trigger."
         )
+        # Per-region zoom panels: the flagged residual windows rendered zoomed and
+        # locally y-rescaled, so fine structure squashed on the full-range plot is
+        # visible. This turns the residual-diagnostics "where" into a "what" the
+        # model can see, and disambiguates add-a-component vs retune-the-shape.
+        zoom_panels = fit_result.get("residual_zoom_panels") or []
+        if zoom_panels:
+            prompt_parts.append(
+                "\n\n**RESOLVED RESIDUAL REGIONS** — each flagged window below is "
+                "zoomed and y-rescaled to its local range (x-axis is the TRUE data "
+                "axis). For each, look at the DATA (blue) vs FIT (red): if the data "
+                "shows a maximum or shoulder the fit does NOT cover, the model is "
+                "UNDER-RESOLVED there — ADD a component seeded at that x position "
+                "(report the position in recommended_action). Only retune "
+                "width/shape if the feature is already modelled. Do not treat a "
+                "clearly-real maximum as noise."
+            )
+            for label, png in zoom_panels:
+                prompt_parts.append(f"\n_{label}_")
+                prompt_parts.append({"mime_type": "image/png", "data": png})
+
         # Original (raw) data for reference.
         if state.get("original_plot_bytes"):
             prompt_parts.append("\n\n**ORIGINAL (RAW) DATA for reference:**")
@@ -3839,9 +3975,28 @@ Return JSON with:
                             best_verification = verification
                             best_ever_rejected = best_ever_rejected or _was_rejected
 
+                        # Surface the GATE's driving metric (not always R²) per
+                        # iteration, so the verifier judges the plateau on the
+                        # actual acceptance metric — its value this step and the
+                        # best-so-far. For the r_squared gate these are just R².
+                        _g = _gate(state)
+                        if _g is not None and getattr(_g, "metric", "r_squared") != "r_squared":
+                            try:
+                                _cur_metric = _g.extract(current_result.get("fit_quality"))
+                                _best_metric = _g.extract(best_result.get("fit_quality"))
+                                _metric_label = _g.label
+                            except Exception:
+                                _cur_metric, _best_metric, _metric_label = current_r2, best_r2, "R²"
+                        else:
+                            _cur_metric, _best_metric, _metric_label = current_r2, best_r2, "R²"
+
                         # Store in history for next iteration's context
                         verification_history.append({
                             "r_squared": current_r2,
+                            "best_so_far": best_r2,
+                            "metric_value": _cur_metric,
+                            "best_metric_value": _best_metric,
+                            "metric_label": _metric_label,
                             "config_used": state.get("locked_fitting_config", {}),
                             "issues_found": verification.get("issues_found", []),
                             "overall_assessment": verification.get("overall_assessment", ""),
@@ -4268,7 +4423,14 @@ Return JSON with:
                 verification_history, judge_result,
                 best_result.get("script_errors"),
             )
-            self.logger.warning(f"⚠️ Proceeding with best available fit (R² = {best_r2:.4f})")
+            if best_r2 >= self.r2_threshold:
+                self.logger.info(
+                    f"✅ Accepting best available fit (R² = {best_r2:.4f} meets threshold {self.r2_threshold})"
+                )
+            else:
+                self.logger.warning(
+                    f"⚠️ Proceeding with best available fit (R² = {best_r2:.4f}, below threshold {self.r2_threshold})"
+                )
 
             if _is_anchor:
                 state["locked_fitting_config"] = best_config
