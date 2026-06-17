@@ -428,7 +428,11 @@ def build_verification_prompt_with_history(
     lines.extend([
         "\n\n## IMPORTANT",
         "1. Check if previous issues were RESOLVED or still PERSIST",
-        "2. If a fix didn't work, suggest something DIFFERENT",
+        "2. If a fix didn't work AND the best metric is still below the accept "
+        "threshold, suggest something DIFFERENT. But if the best is already above "
+        "the accept threshold and has not improved for the last 2 iterations, do "
+        "NOT propose another change — accept and record any remaining concern as a "
+        "caveat (the plateau/convergence rule takes precedence).",
         "3. If a previous fix was NOT applied due to an API error, "
         "re-suggest it or propose an alternative",
     ])
@@ -3167,12 +3171,14 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
         "If you believe a model change is necessary, suggest it, but explain "
         "why a parameter-level fix is insufficient.\n",
         # T=2  hot: full freedom, justify from data.
-        "\n**Plan constraint (open — previous iterations could not fix the fit):**\n"
-        "You have full freedom to suggest any change the data warrants, "
-        "from small parameter adjustments to a completely different model. "
-        "Choose the scale of change that fits the remaining issues. "
-        "The only requirement is that you justify every deviation from the "
-        "original plan based on what you observe in the data and residuals.\n",
+        "\n**Plan constraint (open):**\n"
+        "Earlier iterations stayed within tighter model constraints. If the fit "
+        "still needs work, you now have full freedom to suggest any change the data "
+        "warrants, from small parameter adjustments to a completely different model; "
+        "justify every deviation from what you observe in the data and residuals. "
+        "This freedom does NOT oblige a change: if the best metric is already above "
+        "the accept threshold and has plateaued, accept per the plateau rule instead "
+        "of proposing further changes.\n",
     )
 
     # Same annealing applied to domain skill strictness during fitting.
