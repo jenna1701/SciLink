@@ -4423,7 +4423,14 @@ Return JSON with:
                 verification_history, judge_result,
                 best_result.get("script_errors"),
             )
-            self.logger.warning(f"⚠️ Proceeding with best available fit (R² = {best_r2:.4f})")
+            if best_r2 >= self.r2_threshold:
+                self.logger.info(
+                    f"✅ Accepting best available fit (R² = {best_r2:.4f} meets threshold {self.r2_threshold})"
+                )
+            else:
+                self.logger.warning(
+                    f"⚠️ Proceeding with best available fit (R² = {best_r2:.4f}, below threshold {self.r2_threshold})"
+                )
 
             if _is_anchor:
                 state["locked_fitting_config"] = best_config
