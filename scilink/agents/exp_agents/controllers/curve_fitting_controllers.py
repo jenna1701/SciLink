@@ -397,8 +397,13 @@ def build_verification_prompt_with_history(
     
     for i, prev in enumerate(previous_iterations, 1):
         lines.append(f"\n### Attempt {i}")
-        r2 = prev.get('r_squared')
-        lines.append(f"- R² = {r2:.4f}" if r2 is not None else "- R² = N/A")
+        label = prev.get('metric_label', 'R²')
+        mv = prev.get('metric_value', prev.get('r_squared'))
+        bm = prev.get('best_metric_value', prev.get('best_so_far'))
+        parts = [f"{label} = {mv:.4f}" if mv is not None else f"{label} = N/A"]
+        if bm is not None:
+            parts.append(f"best-so-far = {bm:.4f}")
+        lines.append("- " + " | ".join(parts))
         lines.append(f"- Config: {prev.get('config_used', {}).get('physical_model', 'N/A')}")
         lines.append(f"- Assessment: {prev.get('overall_assessment', 'N/A')}")
         
@@ -3033,16 +3038,16 @@ configured acceptance target:
 - {metric_label} {accept_cmp} {accept_threshold:.2f} AND residuals are mostly random noise AND main data features are captured
 
 **Stop on plateau (convergence):** the PREVIOUS VERIFICATION ATTEMPTS section
-below lists {metric_label} per iteration. If {metric_label} is already
-{accept_cmp} {accept_threshold:.2f} AND it has plateaued — your recommended
-changes over the last couple of iterations are no longer meaningfully improving it
-— then the fit is as good as this model and data will give: set
-`fit_acceptable: true`, `recommended_action: "none"`, and record any remaining
-residual concern in `overall_assessment` so the user is informed, instead of
-rejecting again. Continuing to refine a plateaued, above-threshold fit is wasted
-effort or overfitting. (Does NOT apply below the accept threshold, nor when a
-prominent data feature is still entirely unmodelled — there a different change may
-still help, so keep refining.)
+below lists, per iteration, the metric that drives acceptance ({metric_label}) —
+its value that step and the best-so-far. Track the best, not the latest (which can
+regress). **Plateau = the last two iterations produced no new best**, where
+"improvement" is judged relative to the accept threshold ({accept_threshold:.2f}):
+once the best sits comfortably past the threshold, a change small compared to its
+margin beyond the threshold does not count as a new best. When the best
+{metric_label} is {accept_cmp} {accept_threshold:.2f} AND it has plateaued in this
+sense, the fit has converged: set `fit_acceptable: true`, `recommended_action:
+"none"`, and record any remaining residual concern in `overall_assessment` as a
+caveat for the user, rather than continuing to refine.
 
 **Reject if:**
 - {metric_label} {reject_cmp} {reject_threshold:.2f} (hard-reject floor — numerical fit is too poor)
@@ -3964,9 +3969,28 @@ Return JSON with:
                             best_verification = verification
                             best_ever_rejected = best_ever_rejected or _was_rejected
 
+                        # Surface the GATE's driving metric (not always R²) per
+                        # iteration, so the verifier judges the plateau on the
+                        # actual acceptance metric — its value this step and the
+                        # best-so-far. For the r_squared gate these are just R².
+                        _g = _gate(state)
+                        if _g is not None and getattr(_g, "metric", "r_squared") != "r_squared":
+                            try:
+                                _cur_metric = _g.extract(current_result.get("fit_quality"))
+                                _best_metric = _g.extract(best_result.get("fit_quality"))
+                                _metric_label = _g.label
+                            except Exception:
+                                _cur_metric, _best_metric, _metric_label = current_r2, best_r2, "R²"
+                        else:
+                            _cur_metric, _best_metric, _metric_label = current_r2, best_r2, "R²"
+
                         # Store in history for next iteration's context
                         verification_history.append({
                             "r_squared": current_r2,
+                            "best_so_far": best_r2,
+                            "metric_value": _cur_metric,
+                            "best_metric_value": _best_metric,
+                            "metric_label": _metric_label,
                             "config_used": state.get("locked_fitting_config", {}),
                             "issues_found": verification.get("issues_found", []),
                             "overall_assessment": verification.get("overall_assessment", ""),
