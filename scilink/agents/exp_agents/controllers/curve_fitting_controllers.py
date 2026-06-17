@@ -3990,8 +3990,8 @@ Return JSON with:
                             elif verified_r2 < R2_FLOOR:
                                 state["locked_fitting_config"] = best_config
                                 self.logger.info(
-                                    f"   Refit R² = {verified_r2:.4f} "
-                                    f"(best stays {best_r2:.4f} — below R² floor {R2_FLOOR:.2f})"
+                                    f"   Refit R² = {verified_r2:.4f} below R² floor "
+                                    f"{R2_FLOOR:.2f} → rejected (best stays {best_r2:.4f})"
                                 )
                             else:
                                 self.logger.info(
