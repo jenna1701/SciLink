@@ -195,6 +195,73 @@ def _format_residual_diagnostics(diag) -> str:
     return "\n".join(lines)
 
 
+def _render_region_zoom_panels(x, y, fit, diag, max_panels: int = 3,
+                               rms_floor: float = 1.5, pad_frac: float = 0.15):
+    """Zoomed, locally-rescaled views of the most systematic residual regions.
+
+    The numeric residual diagnostics tell the verifier *where* the misfit is; the
+    full-range plot squashes the corresponding fine structure under a tall peak so
+    the verifier can't *see* what's missing. For each flagged window (already
+    sorted by severity) this crops the data + fit + residual to that x-range and
+    rescales the y-axis to the local data, so an unmodeled maximum/shoulder
+    becomes visible. The x-axis is the TRUE data axis and the title states the
+    real x-range, so the verifier can reference/seed components at correct
+    positions. Returns ``[(label, png_bytes), ...]`` (empty if nothing systematic
+    or inputs can't be rendered — the caller degrades gracefully).
+    """
+    if not diag or not diag.get("worst_windows"):
+        return []
+    try:
+        from io import BytesIO
+        from matplotlib import pyplot as plt
+        x = np.asarray(x, float).ravel()
+        y = np.asarray(y, float).ravel()
+        fit = np.asarray(fit, float)
+        if fit.ndim == 2:
+            fit = fit[:, -1]
+        fit = fit.ravel()
+        if not (x.shape[0] == y.shape[0] == fit.shape[0]):
+            return []
+        order = np.argsort(x)
+        x, y, fit = x[order], y[order], fit[order]
+        panels = []
+        for w in diag["worst_windows"]:
+            if len(panels) >= max_panels:
+                break
+            if float(w.get("rms_over_noise", 0.0)) < rms_floor:
+                continue
+            lo, hi = float(w["x_lo"]), float(w["x_hi"])
+            pad = (hi - lo) * pad_frac
+            mask = (x >= lo - pad) & (x <= hi + pad)
+            if int(mask.sum()) < 4:
+                continue
+            xs, ys, fs = x[mask], y[mask], fit[mask]
+            fig, (ax1, ax2) = plt.subplots(
+                2, 1, figsize=(6, 4.2), sharex=True,
+                gridspec_kw={"height_ratios": [3, 1]})
+            ax1.plot(xs, ys, "o", ms=3, color="#1f77b4", label="Data")
+            ax1.plot(xs, fs, "-", lw=1.8, color="#d62728", label="Fit")
+            ax1.legend(loc="best", fontsize=8)
+            ax1.set_ylabel("Intensity")
+            ax1.set_title(
+                f"Region {lo:.1f}–{hi:.1f} (true x axis)  |  "
+                f"RMS/noise={float(w.get('rms_over_noise', 0.0)):.1f}, "
+                f"{int(w.get('sign_changes', 0))} sign-changes",
+                fontsize=9)
+            ax2.plot(xs, ys - fs, "-", lw=1.0, color="#555555")
+            ax2.axhline(0, color="k", lw=0.7)
+            ax2.set_ylabel("Residual")
+            ax2.set_xlabel("x (data axis)")
+            fig.tight_layout()
+            buf = BytesIO()
+            fig.savefig(buf, format="png", dpi=110)
+            plt.close(fig)
+            panels.append((f"Region {lo:.1f}–{hi:.1f}", buf.getvalue()))
+        return panels
+    except Exception:
+        return []
+
+
 def _active_skill_names(state: dict) -> list[str]:
     """Return names of all currently-loaded skills from a pipeline state dict.
 
@@ -2853,6 +2920,7 @@ Your guidance: '''
         # is absent (older/refit scripts) so this never breaks the fit path.
         fit_quality = dict(fit_results.get("fit_quality", {}) or {})
         residual_diag = None
+        residual_zoom_panels = []
         try:
             fit_path = Path(item_dir) / FIT_NAME
             if fit_path.exists():
@@ -2881,6 +2949,12 @@ Your guidance: '''
                         except Exception:
                             pass
                 residual_diag = _residual_diagnostics(xx, yy, fit_arr)
+                # Zoomed, locally-rescaled views of the flagged regions so the
+                # verifier can SEE unmodeled fine structure (e.g. crystal-field
+                # sub-peaks) the full-range plot squashes. x-axis is the true
+                # data axis so seed positions it suggests are correct.
+                residual_zoom_panels = _render_region_zoom_panels(
+                    xx, yy, fit_arr, residual_diag)
 
                 # Trust the saved fit over a broken self-reported R². The
                 # self-report is computed inside the (LLM-generated) script and
@@ -2919,6 +2993,7 @@ Your guidance: '''
             "visualization_path": run["visualization_path"],
             "visualization_bytes": run["visualization_bytes"],
             "residual_diagnostics": residual_diag,
+            "residual_zoom_panels": residual_zoom_panels,
             "statistics": stats,
             "script": script,
             "script_errors": script_errors,
@@ -3313,6 +3388,26 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
             "with location 'preprocessing' and set recommended_action to 'none' — "
             "recorded as a caveat, not a refit trigger."
         )
+        # Per-region zoom panels: the flagged residual windows rendered zoomed and
+        # locally y-rescaled, so fine structure squashed on the full-range plot is
+        # visible. This turns the residual-diagnostics "where" into a "what" the
+        # model can see, and disambiguates add-a-component vs retune-the-shape.
+        zoom_panels = fit_result.get("residual_zoom_panels") or []
+        if zoom_panels:
+            prompt_parts.append(
+                "\n\n**RESOLVED RESIDUAL REGIONS** — each flagged window below is "
+                "zoomed and y-rescaled to its local range (x-axis is the TRUE data "
+                "axis). For each, look at the DATA (blue) vs FIT (red): if the data "
+                "shows a maximum or shoulder the fit does NOT cover, the model is "
+                "UNDER-RESOLVED there — ADD a component seeded at that x position "
+                "(report the position in recommended_action). Only retune "
+                "width/shape if the feature is already modelled. Do not treat a "
+                "clearly-real maximum as noise."
+            )
+            for label, png in zoom_panels:
+                prompt_parts.append(f"\n_{label}_")
+                prompt_parts.append({"mime_type": "image/png", "data": png})
+
         # Original (raw) data for reference.
         if state.get("original_plot_bytes"):
             prompt_parts.append("\n\n**ORIGINAL (RAW) DATA for reference:**")
