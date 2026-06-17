@@ -3060,6 +3060,24 @@ accept floor, give only the physics reason for rejection (the systematic
 residual, missed feature, or unphysical parameter), never the {metric_label} value, so the
 report stays factually correct.
 
+**Residual adequacy — the goal is residuals consistent with noise, i.e.
+*structureless* (no coherent shape, trend, or repeated oscillation), NOT residuals
+driven toward zero.** Once the residuals carry no systematic structure, the fit is
+as good as the data supports: accept it, and do not add components or keep retuning
+to shrink residual amplitude further (that is overfitting). It is the *structure*
+of a residual, not its amplitude or σ-multiple, that signals a real deficiency —
+reject only for a *structured* residual (a coherent local oscillation =
+under-resolved structure per above, or a global trend) or a genuine physics defect.
+
+For **count / shot-noise-limited data** (photon- or electron-counting — EELS, XPS,
+XRD, raw spectroscopy counts), refine this further: the noise grows with the
+signal (≈√counts), so a structured residual sitting on a tall, bright peak that is
+only a fraction of a percent of the local signal is within counting statistics —
+its large σ-multiple overstates it, so don't chase it with extra components. This
+refinement applies ONLY to count data; for **constant-noise data** (normalized,
+derivative, or processed signals with roughly uniform noise across the spectrum) a
+structured many-σ residual is significant at any signal level — do not discount it.
+
 **Do NOT reject for:**
 - Ambiguous or subtle features — but distinguish "subtle" (small, noise-level,
   non-repeating) from "under-resolved" (localized, RMS ≫ noise, oscillating);
