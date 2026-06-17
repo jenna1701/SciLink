@@ -800,8 +800,10 @@ class MetaOrchestratorTools:
         # file into a data file + a metadata JSON. Round-trip verified; NEVER
         # used for analysis/computation — that is always delegated.
         def prepare_inputs(path) -> str:
+            import hashlib as _hashlib
             from ...utils.file_prep import (prepare_inputs as _split_file,
-                                            prepare_inputs_batch as _split_batch)
+                                            prepare_inputs_batch as _split_batch,
+                                            stage_pairs_flat as _stage_flat)
             from ...executors import ScriptExecutor, require_sandbox_approval
             paths = [path] if isinstance(path, str) else list(path or [])
             if not paths:
@@ -838,6 +840,22 @@ class MetaOrchestratorTools:
                 result = _split_batch(pths, model=self.orch.model, executor=executor,
                                       output_dir=out_dir, probes=probes,
                                       logger=self.logger, max_retries=2)
+                # Stage the verified pairs into ONE flat, stem-matched directory so
+                # the specialist can consume the whole batch as a series directory
+                # (run_analysis pairs each data file with its <stem>.json sidecar).
+                # Without this the model is left with scattered per-file subfolders
+                # and resorts to passing a path LIST, which the series loader rejects.
+                if result.get("status") in ("success", "partial"):
+                    try:
+                        key = _hashlib.sha1(
+                            "|".join(sorted(str(p) for p in pths)).encode()
+                        ).hexdigest()[:8]
+                        staged = _stage_flat(result.get("results", []),
+                                             out_dir / f"series_{key}")
+                        if staged["n"] > 1:
+                            result["prepared_dir"] = staged["staged_dir"]
+                    except Exception as e:  # noqa: BLE001
+                        self.logger.warning(f"Flat staging skipped: {e}")
             return json.dumps(result, default=str)
 
         self._register_tool(
@@ -849,8 +867,12 @@ class MetaOrchestratorTools:
                 "clean (data, metadata) pairs. Single file → returns data_path + "
                 "metadata_path. Pass a LIST of paths to split several SAME-TYPE files "
                 "in ONE call → returns a per-file 'results' list + a 'summary'; thread "
-                "the pairs into ONE batched delegation (never loop one delegation per "
-                "file). In batch mode a single split is generated and reused across "
+                "the pairs into ONE batched delegation. When >=2 files split, the result "
+                "also has a 'prepared_dir' — one flat folder of the cleaned data files "
+                "each beside its stem-matched sidecar JSON; pass that 'prepared_dir' "
+                "DIRECTORY as the delegation's data (do NOT pass the per-file data paths "
+                "as a list — the series loader takes a directory), and never loop one "
+                "delegation per file. In batch mode a single split is generated and reused across "
                 "structurally identical files (each still round-trip verified), so it "
                 "is cheaper and yields a uniform schema; a file that doesn't match "
                 "falls back to its own split. Use after inspect_uploads when a probe "
