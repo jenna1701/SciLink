@@ -4490,7 +4490,7 @@ Return JSON with:
         from ....utils.log_context import register_worker, unregister_worker
         _parent_thread = _threading.get_ident()
 
-        def _run_candidate(i: int) -> tuple:
+        def _run_candidate(i: int, tagged: bool = True) -> tuple:
             job_state = dict(state)
             job_state["locked_fitting_config"] = copy.deepcopy(spectrum_config)
             job_state["_candidate_tag"] = f"cand_{i:02d}"
@@ -4498,9 +4498,12 @@ Return JSON with:
                 f"{CANDIDATES_DIR_NAME}/cand_{i:02d}"
             )
             job_state["_suppress_human_feedback"] = True
-            # Attribute this worker's log records to the calling (chat)
-            # thread with a candidate prefix (UI verbose panel + CLI).
-            register_worker(_parent_thread, f"cand_{i:02d}")
+            # Attribute this worker's log records to the calling (chat) thread
+            # with a candidate prefix (UI verbose panel + CLI) — but only when
+            # several candidates run concurrently. A lone candidate (escalation
+            # probe or single non-escalation attempt) stays unprefixed.
+            if tagged:
+                register_worker(_parent_thread, f"cand_{i:02d}")
             try:
                 result = self._fit_with_quality_control(
                     state=job_state, curve_data=curve_data,
@@ -4516,9 +4519,12 @@ Return JSON with:
 
         def _run_attempts(indices) -> None:
             indices = list(indices)
+            # Prefix worker logs with the candidate tag only when more than one
+            # candidate runs at once; a single candidate stays unprefixed.
+            tagged = len(indices) > 1
             with ThreadPoolExecutor(max_workers=min(len(indices), 6)) as pool:
                 future_to_attempt = {
-                    pool.submit(_run_candidate, i): i for i in indices
+                    pool.submit(_run_candidate, i, tagged): i for i in indices
                 }
                 done_count = 0
                 for future in as_completed(future_to_attempt):

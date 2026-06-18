@@ -3899,7 +3899,7 @@ Return JSON with:
         from ....utils.log_context import register_worker, unregister_worker
         _parent_thread = _threading.get_ident()
 
-        def _run_candidate(i: int) -> tuple:
+        def _run_candidate(i: int, tagged: bool = True) -> tuple:
             # Shallow-copy state per attempt (cheap; shared fields are
             # read-only) but deep-copy the locked config: the QC loop refines
             # it in place per attempt and the winner's refinement must win.
@@ -3910,11 +3910,13 @@ Return JSON with:
                 f"{CANDIDATES_DIR_NAME}/cand_{i:02d}"
             )
             job_state["_suppress_human_feedback"] = True
-            # Attribute this worker's log records to the calling (chat)
-            # thread with a candidate prefix, so the detailed verification
-            # narration stays visible in the UI verbose panel and the CLI
-            # interleave is attributable.
-            register_worker(_parent_thread, f"cand_{i:02d}")
+            # Attribute this worker's log records to the calling (chat) thread
+            # with a candidate prefix so interleaved narration is attributable —
+            # but ONLY when several candidates run concurrently. A lone candidate
+            # (the escalation probe, or a single non-escalation attempt) needs no
+            # attribution, so its logs stay clean and unprefixed.
+            if tagged:
+                register_worker(_parent_thread, f"cand_{i:02d}")
             try:
                 result = self._execute_and_verify(
                     state=job_state, image_data=image_data,
@@ -3929,9 +3931,13 @@ Return JSON with:
 
         def _run_attempts(indices) -> None:
             indices = list(indices)
+            # Prefix worker logs with the candidate tag only when more than one
+            # candidate runs at once (interleaved output needs attribution);
+            # a single candidate stays unprefixed.
+            tagged = len(indices) > 1
             with ThreadPoolExecutor(max_workers=min(len(indices), 6)) as pool:
                 future_to_attempt = {
-                    pool.submit(_run_candidate, i): i for i in indices
+                    pool.submit(_run_candidate, i, tagged): i for i in indices
                 }
                 done_count = 0
                 for future in as_completed(future_to_attempt):
