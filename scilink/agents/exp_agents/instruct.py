@@ -3067,7 +3067,8 @@ that fails.
 When a registered tool already does the hard step (e.g. `run_fft_nmf_analysis`
 with a window size tuned to the spatial scale of the features of interest
 for disorder / defect / multi-phase analysis, or `run_sam_analysis` for
-instance segmentation), a single tool call followed by a simple post-
+instance segmentation of touching/overlapping objects that classical
+detection and splitting cannot separate), a single tool call followed by a simple post-
 processing step is already a complete pipeline. Do not pad it with
 additional processing steps for the sake of thoroughness — the tool
 output plus a focused interpretation is the deliverable.
