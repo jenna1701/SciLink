@@ -3899,7 +3899,7 @@ Return JSON with:
         from ....utils.log_context import register_worker, unregister_worker
         _parent_thread = _threading.get_ident()
 
-        def _run_candidate(i: int) -> tuple:
+        def _run_candidate(i: int, tagged: bool = True) -> tuple:
             # Shallow-copy state per attempt (cheap; shared fields are
             # read-only) but deep-copy the locked config: the QC loop refines
             # it in place per attempt and the winner's refinement must win.
@@ -3910,11 +3910,12 @@ Return JSON with:
                 f"{CANDIDATES_DIR_NAME}/cand_{i:02d}"
             )
             job_state["_suppress_human_feedback"] = True
-            # Attribute this worker's log records to the calling (chat)
-            # thread with a candidate prefix, so the detailed verification
-            # narration stays visible in the UI verbose panel and the CLI
-            # interleave is attributable.
-            register_worker(_parent_thread, f"cand_{i:02d}")
+            # Always register so this worker's log records route to the calling
+            # (chat) thread and stay visible in the UI verbose panel. The [cand]
+            # PREFIX, however, is added only when several candidates run
+            # concurrently (interleaved output needs attribution); a lone
+            # candidate keeps clean, unprefixed — but still visible — logs.
+            register_worker(_parent_thread, f"cand_{i:02d}", prefix=tagged)
             try:
                 result = self._execute_and_verify(
                     state=job_state, image_data=image_data,
@@ -3929,9 +3930,13 @@ Return JSON with:
 
         def _run_attempts(indices) -> None:
             indices = list(indices)
+            # Prefix worker logs with the candidate tag only when more than one
+            # candidate runs at once (interleaved output needs attribution);
+            # a single candidate stays unprefixed.
+            tagged = len(indices) > 1
             with ThreadPoolExecutor(max_workers=min(len(indices), 6)) as pool:
                 future_to_attempt = {
-                    pool.submit(_run_candidate, i): i for i in indices
+                    pool.submit(_run_candidate, i, tagged): i for i in indices
                 }
                 done_count = 0
                 for future in as_completed(future_to_attempt):
@@ -4076,24 +4081,18 @@ Return JSON with:
         )
 
         # --- Join approval (CO_PILOT/AUTOPILOT) ---
+        # Only prompt when there is more than one candidate to compare. A single
+        # fast-accepted candidate (the escalation probe that passed the gate, or
+        # a single non-escalation attempt) just proceeds — the best-of-N
+        # comparison menu is meaningless for one result.
         if (
             self.enable_human_feedback
             and not state.get("_suppress_human_feedback")
+            and len(candidates) > 1
         ):
             choice = self._get_bestofn_join_approval(
-                candidates, winner, judge_info,
-                allow_more=(escalation and not escalated
-                            and len(candidates) < n),
+                candidates, winner, judge_info, allow_more=False,
             )
-            if choice == "more":
-                escalated = True
-                _run_attempts(range(1, n))
-                winner, judge_info = _select()
-                if winner is None:
-                    return candidates[0]["result"]
-                choice = self._get_bestofn_join_approval(
-                    candidates, winner, judge_info, allow_more=False
-                )
             if isinstance(choice, int):
                 winner = next(
                     c for c in candidates if c["attempt"] == choice
@@ -4219,31 +4218,34 @@ Return JSON with:
                 )
             print("-" * 60)
 
-            response = input(
-                f"\nYour choice (Enter = accept candidate "
-                f"{winner['attempt']}): "
-            ).strip()
+            for _ in range(3):
+                response = input(
+                    f"\nYour choice (Enter = accept candidate "
+                    f"{winner['attempt']}): "
+                ).strip()
 
-            if not response:
-                return None
-            if allow_more and response.lower() == "more":
-                print("Running the remaining candidates...")
-                return "more"
-            if response.isdigit():
-                idx = int(response)
-                ok = any(
-                    c["attempt"] == idx and c["success"]
-                    for c in candidates
-                )
-                if ok:
-                    print(f"Using candidate {idx}.")
-                    return idx
+                if not response:
+                    return None
+                if allow_more and response.lower() == "more":
+                    print("Running the remaining candidates...")
+                    return "more"
+                if response.isdigit():
+                    idx = int(response)
+                    if any(c["attempt"] == idx and c["success"]
+                           for c in candidates):
+                        print(f"Using candidate {idx}.")
+                        return idx
+                    print(f"No successful candidate {idx} to use.")
+                    continue
+                # SELECTION step, not a refine step: do not silently discard
+                # unrecognized free text — re-prompt with the valid options so
+                # the input is never quietly dropped.
                 print(
-                    f"No successful candidate {idx}; accepting the "
-                    f"judge's pick."
+                    "Unrecognized input. Press Enter to accept candidate "
+                    f"{winner['attempt']}, or type a candidate number"
+                    + (" or 'more'" if allow_more else "") + "."
                 )
-                return None
-            print("Unrecognized input; accepting the judge's pick.")
+            print("No valid choice entered; accepting the judge's pick.")
             return None
         finally:
             for p in review_paths:

@@ -22,17 +22,24 @@ import logging
 import threading
 from typing import Dict, Tuple
 
-# worker thread id -> (parent thread id, candidate tag)
-_WORKERS: Dict[int, Tuple[int, str]] = {}
+# worker thread id -> (parent thread id, candidate tag, prefix messages?)
+_WORKERS: Dict[int, Tuple[int, str, bool]] = {}
 _LOCK = threading.Lock()
 _FILTER_INSTALLED = False
 
 
-def register_worker(parent_thread_id: int, tag: str) -> None:
-    """Register the CURRENT thread as a fan-out worker of ``parent_thread_id``."""
+def register_worker(parent_thread_id: int, tag: str, prefix: bool = True) -> None:
+    """Register the CURRENT thread as a fan-out worker of ``parent_thread_id``.
+
+    ``prefix`` controls ONLY the cosmetic ``[tag]`` log prefix. Thread routing
+    (``effective_thread``, which is how the UI verbose panel keeps a worker's
+    narration visible by attributing it to the parent chat thread) is ALWAYS
+    active — so a single candidate's logs stay visible even with ``prefix=False``;
+    only the redundant tag is dropped.
+    """
     _install_prefix_filter()
     with _LOCK:
-        _WORKERS[threading.get_ident()] = (parent_thread_id, tag)
+        _WORKERS[threading.get_ident()] = (parent_thread_id, tag, prefix)
 
 
 def unregister_worker() -> None:
@@ -64,7 +71,7 @@ def _install_prefix_filter() -> None:
         def factory(*args, **kwargs):
             record = previous_factory(*args, **kwargs)
             entry = _WORKERS.get(record.thread)
-            if entry:
+            if entry and entry[2]:          # entry[2] = prefix?  (routing is separate)
                 record.msg = f"[{entry[1]}] {record.msg}"
             return record
 
