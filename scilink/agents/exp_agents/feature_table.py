@@ -103,10 +103,13 @@ def _curve_fit_rows(output_dir: Path) -> List[Dict[str, Any]]:
         if not isinstance(r, dict) or not r.get("success"):
             continue
         row: Dict[str, Any] = {"unit": r.get("name") or f"index_{r.get('index')}"}
-        # series_metadata first (manifest/series conditions), then sidecars so a
-        # real per-file sidecar overrides the coarser series list on conflict.
-        row.update(_series_conditions(series_meta, r.get("index"), r.get("data_path")))
-        row.update(_sidecar_conditions(r.get("data_path")))
+        # A per-file sidecar is the authoritative, complete per-unit condition
+        # record; fall back to the coarser series_metadata ONLY for units without
+        # one. Using it as a strict fallback (not an additive layer) avoids
+        # double-counting the same control variable under different names — e.g.
+        # sidecar 'temperature_C' alongside a series 'temperature' column.
+        row.update(_sidecar_conditions(r.get("data_path"))
+                   or _series_conditions(series_meta, r.get("index"), r.get("data_path")))
         row.update(_flatten_scalars(r.get("parameters")))
         row.update(_flatten_scalars(r.get("fit_quality"), "fit_"))
         rows.append(row)
@@ -130,8 +133,10 @@ def _image_series_rows(output_dir: Path) -> List[Dict[str, Any]]:
         if not isinstance(r, dict) or not r.get("success"):
             continue
         row: Dict[str, Any] = {"unit": r.get("name") or f"index_{r.get('index')}"}
-        row.update(_series_conditions(series_meta, r.get("index"), r.get("data_path")))
-        row.update(_sidecar_conditions(r.get("data_path")))
+        # Sidecar is authoritative per unit; series_metadata is a strict fallback
+        # for units lacking one (see _curve_fit_rows for the rationale).
+        row.update(_sidecar_conditions(r.get("data_path"))
+                   or _series_conditions(series_meta, r.get("index"), r.get("data_path")))
         row.update(_flatten_scalars(r.get("extracted_features")))
         row.update(_flatten_scalars(r.get("quality_metrics"), "quality_"))
         rows.append(row)

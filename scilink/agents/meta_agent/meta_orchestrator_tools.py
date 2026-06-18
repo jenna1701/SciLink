@@ -794,6 +794,84 @@ class MetaOrchestratorTools:
             required=[],
         )
 
+        # ----- materialize_sidecars (manifest -> per-file sidecar JSONs) -------
+        # Conditions supplied as a free-text manifest reach the specialist only as
+        # prose unless turned into per-file sidecars; this writes <stem>.json next
+        # to each data file so the analysis feature table gets a column per
+        # condition. Deterministic, additive, and NEVER overwrites an existing
+        # sidecar (so genuine per-file metadata can't be clobbered).
+        def materialize_sidecars(conditions, data_dir: str = None) -> str:
+            if isinstance(conditions, str):
+                try:
+                    conditions = json.loads(conditions)
+                except Exception:
+                    return json.dumps({"status": "error", "message":
+                                       "conditions must be a JSON object {filename: {key: value}}"})
+            if not isinstance(conditions, dict) or not conditions:
+                return json.dumps({"status": "error", "message":
+                                   "conditions must be a non-empty {filename: {key: value}} mapping"})
+            base = Path(data_dir) if data_dir else None
+            written, skipped, unresolved = [], [], []
+            for fname, cond in conditions.items():
+                if not isinstance(cond, dict):
+                    unresolved.append(f"{fname} (conditions not an object)")
+                    continue
+                p = Path(fname)
+                cands = [p] if p.is_absolute() else (
+                    ([base / fname] if base is not None else []) + [Path.cwd() / fname])
+                target = next((c for c in cands if c.is_file()), None)
+                if target is None:
+                    unresolved.append(str(fname))
+                    continue
+                sidecar = target.with_suffix(".json")
+                if sidecar.exists():                       # never clobber real metadata
+                    skipped.append(str(sidecar))
+                    continue
+                scalars = {k: v for k, v in cond.items()
+                           if isinstance(v, (int, float, str, bool))}
+                sidecar.write_text(json.dumps(scalars, indent=2))
+                written.append(str(sidecar))
+            return json.dumps({
+                "status": "success" if written or skipped else "error",
+                "sidecars_written": len(written), "paths": written,
+                "skipped_existing": skipped, "unresolved": unresolved,
+            })
+
+        self._register_tool(
+            func=materialize_sidecars,
+            name="materialize_sidecars",
+            description=(
+                "Write per-file sidecar metadata JSONs from a conditions MANIFEST the "
+                "user supplied as free text (a .txt/.csv/README mapping each data file "
+                "to its experimental conditions, e.g. 'filename, temperature, pH'). Pass "
+                "`conditions` as a JSON object {data_filename: {condition_key: value, "
+                "...}} that you read from the manifest, plus `data_dir` (the folder "
+                "holding the data files). It writes <stem>.json next to each data file so "
+                "the analysis specialist's feature table gains one COLUMN per condition — "
+                "conditions quoted only in the delegation task text do NOT become feature "
+                "columns (which downstream optimization needs as inputs). Use this BEFORE "
+                "delegating whenever per-file conditions arrive as a manifest and the data "
+                "files have no matching sidecar JSONs. It never overwrites an existing "
+                "sidecar, and only records conditions — it never transforms data."
+            ),
+            parameters={
+                "conditions": {
+                    "type": "object",
+                    "description": (
+                        "{data_filename: {condition_key: value}} read from the manifest; "
+                        "values are scalars (numbers or strings). Filenames may be bare "
+                        "(resolved against data_dir) or absolute."
+                    ),
+                },
+                "data_dir": {
+                    "type": "string",
+                    "description": "Absolute path to the folder holding the data files "
+                                   "(used to resolve bare filenames).",
+                },
+            },
+            required=["conditions"],
+        )
+
         # ----- prepare_inputs (lossless data/metadata split) ------------------
         # The meta's ONLY code-generation surface, restricted to LOSSLESS file
         # repackaging before delegation: split a single combined data+metadata

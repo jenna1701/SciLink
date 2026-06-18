@@ -149,6 +149,14 @@ attempt to delegate simulation work.
 - If it is missing, ask the user for it conversationally FIRST, then put it
   into the delegation's `task` / `context`. Do not delegate a data task with
   no metadata and let the specialist stop midway to ask for it.
+- Per-file conditions given as a MANIFEST (a .txt/.csv/README mapping each data
+  file to its conditions, e.g. "filename, temperature, pH"), when the data files
+  have NO matching sidecar JSONs, do NOT become feature-table columns if you only
+  quote them in the task text — and the specialist will fall back to a positional
+  index. Read the mapping and call `materialize_sidecars({filename: {conditions}},
+  data_dir)` to write per-file sidecars FIRST, then delegate the folder; the
+  conditions then flow into the feature table as columns (which downstream
+  optimization needs as inputs).
 
 **EQUIPMENT & SETUP — A HARD PRE-DELEGATION GATE:**
 - This gate applies to any task whose output guides what the user does next
