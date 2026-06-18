@@ -4498,12 +4498,11 @@ Return JSON with:
                 f"{CANDIDATES_DIR_NAME}/cand_{i:02d}"
             )
             job_state["_suppress_human_feedback"] = True
-            # Attribute this worker's log records to the calling (chat) thread
-            # with a candidate prefix (UI verbose panel + CLI) — but only when
-            # several candidates run concurrently. A lone candidate (escalation
-            # probe or single non-escalation attempt) stays unprefixed.
-            if tagged:
-                register_worker(_parent_thread, f"cand_{i:02d}")
+            # Always register so this worker's log records route to the calling
+            # (chat) thread and stay visible in the UI verbose panel. The [cand]
+            # PREFIX is added only when several candidates run concurrently; a
+            # lone candidate keeps clean, unprefixed — but still visible — logs.
+            register_worker(_parent_thread, f"cand_{i:02d}", prefix=tagged)
             try:
                 result = self._fit_with_quality_control(
                     state=job_state, curve_data=curve_data,

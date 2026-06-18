@@ -3910,13 +3910,12 @@ Return JSON with:
                 f"{CANDIDATES_DIR_NAME}/cand_{i:02d}"
             )
             job_state["_suppress_human_feedback"] = True
-            # Attribute this worker's log records to the calling (chat) thread
-            # with a candidate prefix so interleaved narration is attributable —
-            # but ONLY when several candidates run concurrently. A lone candidate
-            # (the escalation probe, or a single non-escalation attempt) needs no
-            # attribution, so its logs stay clean and unprefixed.
-            if tagged:
-                register_worker(_parent_thread, f"cand_{i:02d}")
+            # Always register so this worker's log records route to the calling
+            # (chat) thread and stay visible in the UI verbose panel. The [cand]
+            # PREFIX, however, is added only when several candidates run
+            # concurrently (interleaved output needs attribution); a lone
+            # candidate keeps clean, unprefixed — but still visible — logs.
+            register_worker(_parent_thread, f"cand_{i:02d}", prefix=tagged)
             try:
                 result = self._execute_and_verify(
                     state=job_state, image_data=image_data,
