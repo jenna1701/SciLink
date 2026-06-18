@@ -794,14 +794,94 @@ class MetaOrchestratorTools:
             required=[],
         )
 
+        # ----- materialize_sidecars (manifest -> per-file sidecar JSONs) -------
+        # Conditions supplied as a free-text manifest reach the specialist only as
+        # prose unless turned into per-file sidecars; this writes <stem>.json next
+        # to each data file so the analysis feature table gets a column per
+        # condition. Deterministic, additive, and NEVER overwrites an existing
+        # sidecar (so genuine per-file metadata can't be clobbered).
+        def materialize_sidecars(conditions, data_dir: str = None) -> str:
+            if isinstance(conditions, str):
+                try:
+                    conditions = json.loads(conditions)
+                except Exception:
+                    return json.dumps({"status": "error", "message":
+                                       "conditions must be a JSON object {filename: {key: value}}"})
+            if not isinstance(conditions, dict) or not conditions:
+                return json.dumps({"status": "error", "message":
+                                   "conditions must be a non-empty {filename: {key: value}} mapping"})
+            base = Path(data_dir) if data_dir else None
+            written, skipped, unresolved = [], [], []
+            for fname, cond in conditions.items():
+                if not isinstance(cond, dict):
+                    unresolved.append(f"{fname} (conditions not an object)")
+                    continue
+                p = Path(fname)
+                cands = [p] if p.is_absolute() else (
+                    ([base / fname] if base is not None else []) + [Path.cwd() / fname])
+                target = next((c for c in cands if c.is_file()), None)
+                if target is None:
+                    unresolved.append(str(fname))
+                    continue
+                sidecar = target.with_suffix(".json")
+                if sidecar.exists():                       # never clobber real metadata
+                    skipped.append(str(sidecar))
+                    continue
+                scalars = {k: v for k, v in cond.items()
+                           if isinstance(v, (int, float, str, bool))}
+                sidecar.write_text(json.dumps(scalars, indent=2))
+                written.append(str(sidecar))
+            return json.dumps({
+                "status": "success" if written or skipped else "error",
+                "sidecars_written": len(written), "paths": written,
+                "skipped_existing": skipped, "unresolved": unresolved,
+            })
+
+        self._register_tool(
+            func=materialize_sidecars,
+            name="materialize_sidecars",
+            description=(
+                "Write per-file sidecar metadata JSONs from a conditions MANIFEST the "
+                "user supplied as free text (a .txt/.csv/README mapping each data file "
+                "to its experimental conditions, e.g. 'filename, temperature, pH'). Pass "
+                "`conditions` as a JSON object {data_filename: {condition_key: value, "
+                "...}} that you read from the manifest, plus `data_dir` (the folder "
+                "holding the data files). It writes <stem>.json next to each data file so "
+                "the analysis specialist's feature table gains one COLUMN per condition — "
+                "conditions quoted only in the delegation task text do NOT become feature "
+                "columns (which downstream optimization needs as inputs). Use this BEFORE "
+                "delegating whenever per-file conditions arrive as a manifest and the data "
+                "files have no matching sidecar JSONs. It never overwrites an existing "
+                "sidecar, and only records conditions — it never transforms data."
+            ),
+            parameters={
+                "conditions": {
+                    "type": "object",
+                    "description": (
+                        "{data_filename: {condition_key: value}} read from the manifest; "
+                        "values are scalars (numbers or strings). Filenames may be bare "
+                        "(resolved against data_dir) or absolute."
+                    ),
+                },
+                "data_dir": {
+                    "type": "string",
+                    "description": "Absolute path to the folder holding the data files "
+                                   "(used to resolve bare filenames).",
+                },
+            },
+            required=["conditions"],
+        )
+
         # ----- prepare_inputs (lossless data/metadata split) ------------------
         # The meta's ONLY code-generation surface, restricted to LOSSLESS file
         # repackaging before delegation: split a single combined data+metadata
         # file into a data file + a metadata JSON. Round-trip verified; NEVER
         # used for analysis/computation — that is always delegated.
         def prepare_inputs(path) -> str:
+            import hashlib as _hashlib
             from ...utils.file_prep import (prepare_inputs as _split_file,
-                                            prepare_inputs_batch as _split_batch)
+                                            prepare_inputs_batch as _split_batch,
+                                            stage_pairs_flat as _stage_flat)
             from ...executors import ScriptExecutor, require_sandbox_approval
             paths = [path] if isinstance(path, str) else list(path or [])
             if not paths:
@@ -838,6 +918,22 @@ class MetaOrchestratorTools:
                 result = _split_batch(pths, model=self.orch.model, executor=executor,
                                       output_dir=out_dir, probes=probes,
                                       logger=self.logger, max_retries=2)
+                # Stage the verified pairs into ONE flat, stem-matched directory so
+                # the specialist can consume the whole batch as a series directory
+                # (run_analysis pairs each data file with its <stem>.json sidecar).
+                # Without this the model is left with scattered per-file subfolders
+                # and resorts to passing a path LIST, which the series loader rejects.
+                if result.get("status") in ("success", "partial"):
+                    try:
+                        key = _hashlib.sha1(
+                            "|".join(sorted(str(p) for p in pths)).encode()
+                        ).hexdigest()[:8]
+                        staged = _stage_flat(result.get("results", []),
+                                             out_dir / f"series_{key}")
+                        if staged["n"] > 1:
+                            result["prepared_dir"] = staged["staged_dir"]
+                    except Exception as e:  # noqa: BLE001
+                        self.logger.warning(f"Flat staging skipped: {e}")
             return json.dumps(result, default=str)
 
         self._register_tool(
@@ -849,8 +945,12 @@ class MetaOrchestratorTools:
                 "clean (data, metadata) pairs. Single file → returns data_path + "
                 "metadata_path. Pass a LIST of paths to split several SAME-TYPE files "
                 "in ONE call → returns a per-file 'results' list + a 'summary'; thread "
-                "the pairs into ONE batched delegation (never loop one delegation per "
-                "file). In batch mode a single split is generated and reused across "
+                "the pairs into ONE batched delegation. When >=2 files split, the result "
+                "also has a 'prepared_dir' — one flat folder of the cleaned data files "
+                "each beside its stem-matched sidecar JSON; pass that 'prepared_dir' "
+                "DIRECTORY as the delegation's data (do NOT pass the per-file data paths "
+                "as a list — the series loader takes a directory), and never loop one "
+                "delegation per file. In batch mode a single split is generated and reused across "
                 "structurally identical files (each still round-trip verified), so it "
                 "is cheaper and yields a uniform schema; a file that doesn't match "
                 "falls back to its own split. Use after inspect_uploads when a probe "
