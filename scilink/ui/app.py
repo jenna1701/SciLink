@@ -28,27 +28,65 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text or "")
 
 
+# 💭 reasoning colors. Meta and specialist both print the SAME 💭 glyph; a
+# meta-delegated specialist tags its line with an invisible U+2063 marker so its
+# reasoning renders in a distinct (warm) color from the meta's own (cool) 💭,
+# without changing the visible glyph. The marker is stripped before display.
+_THOUGHT_MARK = "\u2063"           # INVISIBLE SEPARATOR — specialist source tag
+_META_THOUGHT_COLOR = "#6ec1e4"    # muted cyan — meta's own deliberation
+_SPECIALIST_THOUGHT_COLOR = "#c9a06a"  # muted amber — a delegated specialist
+_HANDOFF_COLOR = "#f0c674"         # bright gold — meta -> specialist handoff banner
+
+# Meta handoff announcements (printed by MetaOrchestratorTools): the meta
+# delegating to / fusing specialists. Matched on emoji+phrase so a generic
+# 🧪/📋 structural header elsewhere is not mistaken for a handoff.
+_HANDOFF_PREFIXES = ("🧪 Delegating to", "📋 Delegating to", "🧬 Fusing delegations")
+
+
 def _log_to_html(text: str) -> str:
     """ANSI-strip a captured log and HTML-escape it. The agent's 💭 reasoning
-    lines render dim+italic (a muted aside); the 🤖 answer header renders
-    bold+bright (the deliverable) — the HTML equivalents of the terminal styling."""
+    lines render dim+italic (a muted aside) and the 🤖 answer header bold+bright
+    — cool cyan for the meta, warm amber for a meta-delegated specialist (both
+    tagged by an invisible U+2063 marker, so a specialist's reasoning AND answer
+    header match its color)."""
     import html as _html
 
-    out, in_thought = [], False
+    out, in_thought, thought_color = [], False, _META_THOUGHT_COLOR
     for line in _strip_ansi(text).split("\n"):
         stripped = line.lstrip()
         if stripped.startswith("🤖"):
-            # Final-answer header — emphasized, and it ends any reasoning block.
+            # Answer header — emphasized, and it ends any reasoning block. A
+            # delegated specialist's header carries the marker -> specialist
+            # color (matching its reasoning); the meta's own stays bright cyan.
             in_thought = False
-            out.append(f'<span style="color:#7fdfff;font-weight:bold">{_html.escape(line)}</span>')
+            ans_color = (_SPECIALIST_THOUGHT_COLOR if _THOUGHT_MARK in line
+                         else "#7fdfff")
+            clean = _html.escape(line.replace(_THOUGHT_MARK, ""))
+            out.append(f'<span style="color:{ans_color};font-weight:bold">{clean}</span>')
+            continue
+        if stripped.startswith(_HANDOFF_PREFIXES):
+            # Meta -> specialist handoff — a pronounced section divider so the
+            # transition into (and back out of) a delegation is obvious. Rendered
+            # as a banded row (bold gold on a faint tint with a left rule), which
+            # the <pre> log pane supports. Ends any reasoning block.
+            in_thought = False
+            out.append(
+                f'<span style="display:inline-block;color:{_HANDOFF_COLOR};'
+                f"font-weight:bold;background:#2e2a1f;border-left:3px solid "
+                f'{_HANDOFF_COLOR};padding:1px 8px">{_html.escape(stripped)}</span>'
+            )
             continue
         if stripped.startswith("💭"):
             in_thought = True
+            # A specialist's first thought line carries the invisible marker; pick
+            # the color from it and hold it across this block's continuation lines.
+            thought_color = (_SPECIALIST_THOUGHT_COLOR if _THOUGHT_MARK in line
+                             else _META_THOUGHT_COLOR)
         elif in_thought and not line.startswith("     "):
             in_thought = False
-        esc = _html.escape(line)
+        esc = _html.escape(line.replace(_THOUGHT_MARK, ""))  # drop the source tag
         if in_thought:
-            esc = f'<span style="color:#6ec1e4;font-style:italic">{esc}</span>'
+            esc = f'<span style="color:{thought_color};font-style:italic">{esc}</span>'
         out.append(esc)
     return "\n".join(out)
 
