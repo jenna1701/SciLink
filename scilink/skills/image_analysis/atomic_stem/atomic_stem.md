@@ -169,20 +169,50 @@ goal you picked above:
   structures. Verify stoichiometric ratios in all cases. Detected
   positions from a prior detection step should come from
   `prior_analysis_paths`, not be re-detected here.
-- *If goal is lattice parameter / lattice vector / zone axis:* a lattice
-  vector is the translation that maps the crystal onto itself — one column
-  onto the next column **of the same species**. Measure it from the FFT
-  fundamental reflections (or `find_zone_axes`), NOT from the nearest-
-  neighbor spacing of detected columns. When the projection resolves more
-  than one inequivalent column per cell (multiple sublattices / a basis),
-  the NN distance is *shorter* than the lattice constant by a projection-
-  dependent factor (√2, √3, 2×, … — derive it from the resolved geometry
-  or measure the repeat directly; never assume a value). Report the
-  quantity the objective names: "lattice constant / parameter / vector" →
-  the repeat period; "nearest-neighbor distance / bond length" → the NN. If
-  the request offers them as alternatives or is ambiguous, report both,
-  explicitly labeled, with their geometric relation — never silently
-  substitute one for the other.
+- *If goal is lattice parameter / lattice constant / nearest-neighbor
+  distance:* use the registered tool **`measure_lattice_constant`** — the
+  fast, deterministic default for this exact question. It detects the Bragg
+  peaks, picks the reciprocal basis by translational support (so a {200}
+  harmonic and the centered {110} a/√2 sub-cell can NOT be mis-reported as
+  the fundamental), and returns the axis-resolved cell (`a1_nm`, `a2_nm`,
+  `gamma_deg`), `lattice_constant_nm`, and `nn_distance_nm` with `nn_basis`
+  stating the projection relation (NN = a, or a/√2 for a centered/perovskite
+  sublattice). Crop to a single crystalline domain first (exclude
+  substrate/vacuum) and pass the true square-pixel size. ALWAYS check the
+  returned `multi_lattice` / `low_confidence` flags: if set, the field of
+  view holds more than one lattice or is under-sampled — crop to one domain
+  (ROI) and re-run rather than trusting the number. Do NOT hand-roll this
+  from `fourier_reflection_map` + manual fundamental-picking (that is the
+  exact failure mode — choosing the strongest σ reflection, often a harmonic);
+  `measure_lattice_constant` exists to remove it. Use `find_zone_axes` (real
+  space) instead only when you need per-site / spatially-resolved cell maps.
+  A lattice vector is the translation that maps the crystal onto itself — one
+  column onto the next column **of the same species** — so when the
+  projection resolves more than one inequivalent column per cell (multiple
+  sublattices / a basis), the NN distance is *shorter* than the lattice
+  constant by a projection factor (√2, √3, 2×, …); the tool's `nn_basis`
+  makes this explicit. Report the quantity the objective names: "lattice
+  constant / parameter / vector" → the repeat period; "nearest-neighbor
+  distance / bond length" → the NN. If the request offers them as
+  alternatives or is ambiguous, report both, explicitly labeled, with their
+  geometric relation — never silently substitute one for the other.
+- *If goal is locating or excluding a film/substrate (or grain) interface:*
+  between two lattice-matched phases (e.g. a perovskite film on a perovskite
+  substrate) the boundary is CHEMICAL, not structural — the reflection set /
+  lattice spacing is identical on both sides, so FFT/periodicity-based
+  detection is physically blind to it. The discriminator is the per-column
+  **Z-contrast step** (HAADF intensity ∝ Z², so a heavier-cation substrate is
+  brighter) or an ordering **superstructure** that appears/disappears across
+  the boundary. Therefore do NOT flat-field / background-divide before
+  interface detection: that erases the very Z-contrast step that marks the
+  interface along with any global shading. A *smooth* low-frequency brightness
+  ramp is a shading/thickness artifact and is not the interface; a *sustained
+  per-column intensity step* is — separate them with a per-row mean
+  column-intensity profile (on the raw image) and a significance-tested
+  superstructure-satellite map, not a row-mean of flat-fielded intensity. If
+  neither a Z-contrast step nor a superstructure change is found, the interface
+  is genuinely absent from the field of view (report that) — but do not
+  conclude "no interface" merely because the FFT was uniform.
 - *If goal is vacancy / missing-column search:* two complementary
   routes — pick by data quality, or run both as a cross-check.
   **Real-space route** (defect typing, needs reliable columns): requires
