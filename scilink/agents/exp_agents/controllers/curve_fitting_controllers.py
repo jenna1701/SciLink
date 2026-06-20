@@ -262,6 +262,209 @@ def _render_region_zoom_panels(x, y, fit, diag, max_panels: int = 3,
         return []
 
 
+def _extract_xy(curve_data):
+    """(x, y) from a 1-D curve array, mirroring AnalyzeDataController's
+    heuristic: 1-D -> (index, data); [2,N] -> rows; [N,2] -> columns. Returns
+    None if the shape isn't a recognizable single curve."""
+    try:
+        d = np.asarray(curve_data, float)
+        if d.ndim == 1:
+            return np.arange(d.size, dtype=float), d
+        if d.ndim == 2 and d.shape[0] == 2:
+            return d[0], d[1]
+        if d.ndim == 2 and d.shape[1] == 2:
+            return d[:, 0], d[:, 1]
+    except Exception:
+        pass
+    return None
+
+
+_STRUCTURE_RMS_FLOOR = 2.5  # window structure must be this many × noise to count
+
+
+def _score_scale(x, y, sigma, global_span, n_windows):
+    """Score sliding windows at ONE scale. Window centers step by width/4 so a
+    window lands ON each feature regardless of grid alignment (a fixed grid
+    splits a narrow feature across a boundary and misses it). Returns the
+    windows whose structure clears the noise floor."""
+    width = (x.max() - x.min()) / n_windows
+    if width <= 0:
+        return []
+    half = width / 2.0
+    out = []
+    for c in np.arange(x.min() + half, x.max() - half + 1e-9, width / 4.0):
+        lo, hi = c - half, c + half
+        wm = (x >= lo) & (x <= hi)
+        if int(wm.sum()) < 6:
+            continue
+        xw, yw = x[wm], y[wm]
+        xc = xw - xw.mean()
+        try:                                    # local LINE = the resolvable trend
+            dr = yw - np.polyval(np.polyfit(xc, yw, 1), xc)
+        except Exception:
+            dr = yw - yw.mean()
+        rms_over_noise = float(np.sqrt(np.mean(dr ** 2)) / sigma)
+        if rms_over_noise < _STRUCTURE_RMS_FLOOR:    # no structure above the noise
+            continue
+        # Sign-changes of the BIN-AVERAGED detrend residual: systematic local
+        # structure (a shoulder -> 1, an unresolved doublet -> several), not noise.
+        nb = int(min(10, max(3, dr.size // 8)))
+        cuts = np.linspace(0, dr.size, nb + 1).astype(int)
+        bmeans = np.array([dr[cuts[k]:cuts[k + 1]].mean()
+                           for k in range(nb) if cuts[k + 1] > cuts[k]])
+        bsigns = np.sign(bmeans)
+        bsigns = bsigns[bsigns != 0]
+        sign_changes = int(np.sum(bsigns[:-1] != bsigns[1:])) if bsigns.size > 1 else 0
+        local_span = float(np.ptp(yw)) or sigma
+        compression = max(1.0, global_span / local_span)
+        j = int(np.argmax(np.abs(dr)))
+        out.append({
+            "x_lo": float(lo), "x_hi": float(hi), "x_mid": float(c),
+            "rms_over_noise": rms_over_noise,
+            "max_abs_norm": float(np.abs(dr[j]) / sigma),
+            "x_at_max": float(xw[j]),
+            "sign_changes": sign_changes,
+            "compression": compression,
+            # structured AND squashed sorts to the top. Compression is weighted
+            # LINEARLY so a small feature hidden under a tall one — the actually-
+            # hard-to-resolve case — outranks the tall feature's own (already-
+            # visible) flanks. Safe because the rms floor excludes squashed noise.
+            "_score": rms_over_noise * compression,
+        })
+    return out
+
+
+def _data_structure_diagnostics(x, y, scales=(8, 16, 32)):
+    """Fit-FREE "where is the hard-to-resolve structure?" diagnostics for the
+    PLANNING stage. The planner sees only the full-range plot, which squashes
+    fine structure under the dominant features. ANALYSIS-AGNOSTIC — no assumed
+    model: per window it removes a local LINE (the part a glance already
+    resolves) and scores the leftover structure, so it flags bumps / shoulders /
+    unresolved doublets for spectra AND fine structure on edges / steep knees
+    for decays, steps and monotonic curves.
+
+    MULTI-SCALE: runs several window scales and merges (cross-scale non-max
+    suppression), so it adapts to ANY feature width — narrow shoulders and broad
+    humps alike — with no single ``n_windows`` to tune. Precision-first: a window
+    must clear the noise floor to count, so featureless / noisy data flags
+    nothing (a clean no-op). Returns ``None`` on unusable input.
+    """
+    try:
+        x = np.asarray(x, float).ravel()
+        y = np.asarray(y, float).ravel()
+        m = np.isfinite(x) & np.isfinite(y)
+        if int(m.sum()) < 16:
+            return None
+        x, y = x[m], y[m]
+        order = np.argsort(x)
+        x, y = x[order], y[order]
+        sigma = _robust_noise_sigma(y) or (float(np.std(y)) or 1.0)
+        global_span = float(np.ptp(y)) or 1.0
+        cand = []
+        for nw in scales:
+            cand.extend(_score_scale(x, y, sigma, global_span, nw))
+        # Cross-scale non-max suppression: highest score first; drop any window
+        # that overlaps an already-kept one (its center inside the kept range or
+        # vice-versa) so the result is up to 5 DISTINCT regions, each at the
+        # scale that best resolved it.
+        cand.sort(key=lambda w: w["_score"], reverse=True)
+        kept = []
+        for w in cand:
+            if not any((k["x_lo"] <= w["x_mid"] <= k["x_hi"])
+                       or (w["x_lo"] <= k["x_mid"] <= w["x_hi"]) for k in kept):
+                kept.append(w)
+            if len(kept) >= 5:
+                break
+        return {"noise_sigma": sigma, "global_span": global_span,
+                "worst_windows": kept}
+    except Exception:
+        return None
+
+
+def _render_data_zoom_panels(x, y, diag, max_panels: int = 3, pad_frac: float = 0.15):
+    """Zoomed, locally-rescaled DATA views of the most structured-but-squashed
+    regions, for the PLANNING stage (no fit exists yet). Returns
+    ``[(label, png_bytes), ...]`` (empty when nothing systematic / unrenderable
+    — caller degrades gracefully)."""
+    if not diag or not diag.get("worst_windows"):
+        return []
+    try:
+        from io import BytesIO
+        from matplotlib import pyplot as plt
+        x = np.asarray(x, float).ravel()
+        y = np.asarray(y, float).ravel()
+        if x.shape[0] != y.shape[0]:
+            return []
+        order = np.argsort(x)
+        x, y = x[order], y[order]
+        panels = []
+        for w in diag["worst_windows"]:
+            if len(panels) >= max_panels:
+                break
+            lo, hi = float(w["x_lo"]), float(w["x_hi"])
+            pad = (hi - lo) * pad_frac
+            mask = (x >= lo - pad) & (x <= hi + pad)
+            if int(mask.sum()) < 4:
+                continue
+            xs, ys = x[mask], y[mask]
+            fig, ax = plt.subplots(figsize=(6, 3.2))
+            ax.plot(xs, ys, "-o", ms=3, lw=1.0, color="#1f77b4")
+            ax.set_title(
+                f"Region {lo:.1f}–{hi:.1f} (true x axis)  |  local structure "
+                f"{float(w.get('rms_over_noise', 0.0)):.1f}×noise, "
+                f"{int(w.get('sign_changes', 0))} sign-changes",
+                fontsize=9)
+            ax.set_xlabel("x (data axis)")
+            ax.set_ylabel("Intensity (local scale)")
+            fig.tight_layout()
+            buf = BytesIO()
+            fig.savefig(buf, format="png", dpi=110)
+            plt.close(fig)
+            panels.append((f"Region {lo:.1f}–{hi:.1f}", buf.getvalue()))
+        return panels
+    except Exception:
+        return []
+
+
+def _append_structure_zoom(prompt: list, state: dict) -> bool:
+    """Append fit-free 'hard-to-resolve region' zoom panels to a planning /
+    validation prompt, so the planner sees fine structure the full-range plot
+    squashes. No-op (returns False) for multi-spectrum stacks or unstructured
+    data. Analysis-agnostic — works for spectra, decays, edges, steps."""
+    try:
+        xy = _extract_xy(state.get("curve_data"))
+        if xy is None:
+            return False
+        panels = _render_data_zoom_panels(
+            xy[0], xy[1], _data_structure_diagnostics(xy[0], xy[1]))
+        if not panels:
+            return False
+        prompt.append(
+            "\n## Candidate hard-to-resolve regions (zoomed, fit-free — ADVISORY)\n"
+            "The full-range plot above is the PRIMARY evidence. The windows below "
+            "are candidate regions where a smooth local trend leaves leftover "
+            "structure — cropped to their true x-range and y-rescaled to the LOCAL "
+            "data so squashed detail becomes visible. They are detected "
+            "GEOMETRICALLY (NO assumed model), so they apply whatever the analysis "
+            "type: a shoulder may need an extra component, a knee an extra decay "
+            "term, a split edge two features.\n"
+            "Treat them as HINTS, not findings: VERIFY each against the full plot "
+            "and the noise level before acting on it, and IGNORE any that look "
+            "like noise or are already clearly resolved in the full view. They "
+            "never override the full plot — at worst they are redundant. Use the "
+            "ones that hold up to choose the model/approach and seed feature "
+            "positions; absence of a flagged window does not mean absence of "
+            "structure. If a domain skill is loaded, cross-reference these regions "
+            "against the features that technique expects."
+        )
+        for label, png in panels:
+            prompt.append(f"\n**{label}:**")
+            prompt.append({"mime_type": "image/png", "data": png})
+        return True
+    except Exception:
+        return False
+
+
 def _active_skill_names(state: dict) -> list[str]:
     """Return names of all currently-loaded skills from a pipeline state dict.
 
@@ -1739,6 +1942,8 @@ class HumanFeedbackRefinementController:
             "\n## Metadata\n" + json.dumps(state.get("system_info", {}), indent=2),
         ]
 
+        # Fit-free zoom into hard-to-resolve regions the full plot squashes.
+        _append_structure_zoom(prompt, state)
         _append_objective_context(prompt, state)
         _append_fit_domain_guidance(prompt, state)
         _append_column_structure(prompt, state)
@@ -1853,6 +2058,10 @@ class HumanFeedbackRefinementController:
         if data_plot:
             prompt_parts.append("\n**Data:**")
             prompt_parts.append({"mime_type": "image/png", "data": data_plot})
+        # Same fit-free zoom into hard-to-resolve regions so the validator can
+        # catch unresolved structure the plan mischaracterized (no-op for series
+        # stacks, where _extract_xy returns None).
+        _append_structure_zoom(prompt_parts, state)
 
         try:
             response = self.model.generate_content(
@@ -2177,46 +2386,7 @@ class HumanFeedbackRefinementController:
                     "  Column mapping unresolved/absent — heuristic X/Y selection."
                 )
 
-            state["locked_fitting_config"] = {
-                "analysis_approach": state.get("analysis_approach"),
-                "physical_model": state.get("physical_model") or "Model to be determined from the data",
-                "parameters_to_extract": state.get("parameters_to_extract", []),
-                "fitting_strategy": state.get("fitting_strategy"),
-                "column_mapping": column_mapping,
-            }
-
-            # Build per-regime configs if series plan has multiple regimes
-            series_plan = state.get("series_analysis_plan")
-            if series_plan and series_plan.get("regimes"):
-                regime_configs = {}
-                for regime in series_plan["regimes"]:
-                    regime_config = {
-                        "analysis_approach": state.get("analysis_approach"),
-                        "physical_model": regime.get(
-                            "physical_model", state.get("physical_model")
-                        ),
-                        "parameters_to_extract": regime.get(
-                            "parameters_to_extract",
-                            state.get("parameters_to_extract", []),
-                        ),
-                        "fitting_strategy": regime.get(
-                            "fitting_strategy", state.get("fitting_strategy")
-                        ),
-                        # Column roles are a file property — same across regimes.
-                        "column_mapping": column_mapping,
-                    }
-                    for idx in regime.get("spectrum_indices", []):
-                        regime_configs[idx] = regime_config
-                state["regime_configs"] = regime_configs
-                self.logger.info(
-                    f"  ✅ Locked {len(series_plan['regimes'])} regime "
-                    f"configuration(s) for series processing."
-                )
-            else:
-                state["regime_configs"] = None
-                self.logger.info(
-                    "  ✅ Fitting configuration locked for series processing."
-                )
+            self._lock_config(state, column_mapping)
 
         except Exception as e:
             self.logger.warning(f"⚠️ Planning failed: {e}, using fallback")
@@ -2240,6 +2410,74 @@ class HumanFeedbackRefinementController:
             state["series_analysis_plan"] = None
             state["regime_configs"] = None
 
+        return state
+
+    def _lock_config(self, state: dict, column_mapping) -> None:
+        """Freeze the current fitting-plan fields into ``locked_fitting_config``
+        (and per-regime configs). Shared by ``execute`` and the per-candidate
+        ``replan_headless`` so both lock identically. ``column_mapping`` is a
+        file-structure property resolved once and passed in — candidates
+        inherit the primary plan's mapping rather than re-resolving it."""
+        state["locked_fitting_config"] = {
+            "analysis_approach": state.get("analysis_approach"),
+            "physical_model": state.get("physical_model") or "Model to be determined from the data",
+            "parameters_to_extract": state.get("parameters_to_extract", []),
+            "fitting_strategy": state.get("fitting_strategy"),
+            "column_mapping": column_mapping,
+        }
+
+        # Build per-regime configs if series plan has multiple regimes
+        series_plan = state.get("series_analysis_plan")
+        if series_plan and series_plan.get("regimes"):
+            regime_configs = {}
+            for regime in series_plan["regimes"]:
+                regime_config = {
+                    "analysis_approach": state.get("analysis_approach"),
+                    "physical_model": regime.get(
+                        "physical_model", state.get("physical_model")
+                    ),
+                    "parameters_to_extract": regime.get(
+                        "parameters_to_extract",
+                        state.get("parameters_to_extract", []),
+                    ),
+                    "fitting_strategy": regime.get(
+                        "fitting_strategy", state.get("fitting_strategy")
+                    ),
+                    # Column roles are a file property — same across regimes.
+                    "column_mapping": column_mapping,
+                }
+                for idx in regime.get("spectrum_indices", []):
+                    regime_configs[idx] = regime_config
+            state["regime_configs"] = regime_configs
+            self.logger.info(
+                f"  ✅ Locked {len(series_plan['regimes'])} regime "
+                f"configuration(s) for series processing."
+            )
+        else:
+            state["regime_configs"] = None
+            self.logger.info(
+                "  ✅ Fitting configuration locked for series processing."
+            )
+
+    def replan_headless(self, state: dict) -> dict:
+        """Generate a fresh, INDEPENDENT fitting plan for one best-of-N
+        candidate.
+
+        Mirrors ``execute``'s planning — one ``_plan_analysis`` + ``_validate_plan``
+        + lock — with NO human feedback and NO candidate pre-selection.
+        Divergence comes from inherent sampling, which is especially valuable
+        for SKILL-LESS curves where initial-plan variance (model family, peak
+        count, background) is high; when an authoritative technique skill is
+        active the plans naturally converge on the mandated model (correct).
+        COLUMN MAPPING is a file-structure property already resolved and
+        applied to the shared data by the primary plan, so candidates INHERIT
+        it (no re-resolve, no re-slice). Mutates and returns ``state``.
+        """
+        state = self._plan_analysis(state)
+        self.logger.info(f"  Approach: {state['analysis_approach']}")
+        self.logger.info(f"  Model: {state['physical_model']}")
+        state = self._validate_plan(state)
+        self._lock_config(state, state.get("column_mapping_locked"))
         return state
 
 
@@ -2420,6 +2658,7 @@ Your guidance: '''
         max_verification_iterations: int = None,
         conformance_instructions: str = "",
         parallel_workers: Optional[int] = None,
+        replanner: Any = None,
     ):
         self.model = model
         self.logger = logger
@@ -2432,6 +2671,10 @@ Your guidance: '''
         self.quality_instructions = quality_instructions
         self.output_dir = Path(output_dir)
         self.plot_fn = plot_fn
+        # Planning controller used to give each best-of-N fan-out candidate
+        # (>=1) its OWN independent fitting plan (ensemble diversity; most
+        # valuable for skill-less curves). None -> candidates share the plan.
+        self.replanner = replanner
         self.r2_threshold = r2_threshold if r2_threshold is not None else self.DEFAULT_R2_THRESHOLD
         # Vestigial: the alternative-models loop was removed in favor of
         # patience-counter-driven hot annealing inside the verification
@@ -4491,6 +4734,23 @@ Return JSON with:
         attempts after a fast-accept.
         """
         n = max(1, int(state.get("n_candidates") or 1))
+        escalation = bool(state.get("candidate_escalation"))
+        # Skill-gated auto-escalation: the n>1 + escalation default is an AUTO
+        # ensemble (no explicit user count, used when curve fitting has no
+        # skill to guide it — high plan variance). A loaded domain skill PINS
+        # the technique, so independent candidates would just converge on the
+        # mandated model; run one skill-guided fit instead. An EXPLICIT user
+        # count (candidate_escalation False, e.g. "run 3 candidates") is always
+        # honored, skill or not.
+        if escalation and n > 1:
+            _active = _active_skill_names(state)
+            if _active:
+                self.logger.info(
+                    f"   Skill active ({', '.join(_active)}) — single "
+                    f"skill-guided fit; auto best-of-N suppressed (pass an "
+                    f"explicit n_candidates to force it)."
+                )
+                n = 1
         if n == 1 or reuse_script:
             return self._fit_with_quality_control(
                 state=state, curve_data=curve_data, data_path=data_path,
@@ -4499,7 +4759,6 @@ Return JSON with:
                 reuse_script=reuse_script, reuse_source=reuse_source,
             )
 
-        escalation = bool(state.get("candidate_escalation"))
         spectrum_config = state.get("locked_fitting_config", {})
 
         import threading as _threading
@@ -4520,6 +4779,18 @@ Return JSON with:
             # lone candidate keeps clean, unprefixed — but still visible — logs.
             register_worker(_parent_thread, f"cand_{i:02d}", prefix=tagged)
             try:
+                # Ensemble diversity: each fan-out candidate (>=1) generates its
+                # OWN independent fitting plan — like running the agent again.
+                # Especially valuable for skill-less curves (high plan variance);
+                # with an authoritative skill the plans converge on the mandated
+                # model. Candidate 0 keeps the (human-approved) primary plan.
+                # Toggle off with state["independent_candidate_plans"] = False.
+                if (i >= 1 and self.replanner is not None
+                        and job_state.get("independent_candidate_plans", True)):
+                    self.logger.info(
+                        "Planning an independent approach for this candidate..."
+                    )
+                    self.replanner.replan_headless(job_state)
                 result = self._fit_with_quality_control(
                     state=job_state, curve_data=curve_data,
                     data_path=data_path, spectrum_name=spectrum_name,
@@ -4633,12 +4904,14 @@ Return JSON with:
                 f"fanning out only if it is weak"
             )
             _run_attempts([0])
-            if not self._candidate_fast_accept(candidates[0]):
+            if not self._candidate_fast_accept(candidates[0], _gate(state)):
                 escalated = True
                 self.logger.info(
-                    f"First attempt weak "
+                    f"First attempt not a clean win "
                     f"(R²={candidates[0]['score']:.4f}, "
-                    f"iterations={candidates[0]['iterations']}) - "
+                    f"iterations={candidates[0]['iterations']}, "
+                    f"climbed_to_hot="
+                    f"{self._candidate_climbed_to_hot(candidates[0])}) - "
                     f"escalating to {n} candidates"
                 )
                 _run_attempts(range(1, n))
@@ -4723,21 +4996,66 @@ Return JSON with:
         }
         return result
 
-    # Escalation fast-accept gate: attempt 0 is accepted without fan-out when
-    # it passed the R² gate with margin and converged quickly. The margin is
-    # capped near 1.0 (an r2_threshold of 0.999 leaves no room for +0.02).
-    ESCALATION_R2_MARGIN = 0.02
-    ESCALATION_MAX_FAST_ITERS = 2
+    # Escalation fast-accept gate: attempt 0 skips the fan-out only when it
+    # cleared the acceptance metric WITH MARGIN and did NOT have to anneal
+    # "hot" to get there. Fit quality has TWO parts — the numeric metric
+    # (objective goodness-of-fit: R², or a skill's χ²/RMSE/FOM) and physical
+    # correctness (a verifier judgment, folded into `approved`). The metric
+    # half is a strong, objective signal; the physical-correctness half is
+    # SUBJECTIVE, and is exactly where a hot-annealed OVER-FIT (T=2 grants full
+    # model freedom to add components) can post a great metric, be physically
+    # wrong, and slip past a lenient verifier. The annealing-"struggle" check
+    # (max level < hot) corroborates that approval was earned WITHOUT relaxing
+    # the model. (Replaces the old `iterations <= 2` proxy, which fanned out
+    # needlessly on good-but-slow fits and did nothing about over-fit risk.)
+    #
+    # The margin is METRIC-AGNOSTIC: a fraction of the gate's accept↔hard-reject
+    # band, applied in the gate's direction, capped near the metric's optimum
+    # (QualityGate.clears_by_fast_margin). For the default R² gate (band 0.05,
+    # best 1.0) the fraction 0.4 reproduces the old absolute +0.02 / 0.97 bar
+    # exactly; a lower-is-better χ² gate instead requires value <= accept -
+    # margin. The R² `final_r2` score is NOT used as the bar — the gate reads
+    # its own metric from `fit_quality`, so a skill scored by χ²/RMSE is no
+    # longer wrongly required to also post a high R².
+    ESCALATION_MARGIN_FRACTION = 0.4
 
-    def _candidate_fast_accept(self, c: dict) -> bool:
-        fast_thr = self.r2_threshold + min(
-            self.ESCALATION_R2_MARGIN, (1.0 - self.r2_threshold) / 2
+    @property
+    def _hot_annealing_level(self) -> int:
+        return len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1
+
+    @staticmethod
+    def _candidate_max_annealing_level(c: dict) -> int:
+        """Highest annealing level the candidate's verification loop reached."""
+        iters = (
+            (c["result"].get("quality_history") or {})
+            .get("verification_iterations") or []
         )
+        return max(
+            (it.get("annealing_level", 0) for it in iters), default=0
+        )
+
+    def _candidate_climbed_to_hot(self, c: dict) -> bool:
+        """True only if the loop ESCALATED into hot annealing under stall — it
+        started below hot and had to climb there. A fit that STARTED at hot (a
+        caller / re-run set the starting annealing level) did not struggle, so
+        reaching hot is not held against it (that must NOT auto-escalate)."""
+        iters = (
+            (c["result"].get("quality_history") or {})
+            .get("verification_iterations") or []
+        )
+        if not iters:
+            return False
+        levels = [it.get("annealing_level", 0) for it in iters]
+        hot = self._hot_annealing_level
+        return max(levels) >= hot and levels[0] < hot
+
+    def _candidate_fast_accept(self, c: dict, gate) -> bool:
+        value = gate.extract((c["result"] or {}).get("fit_quality") or {})
         return (
             c["success"]
             and c["approved"]
-            and c["score"] >= fast_thr
-            and c["iterations"] <= self.ESCALATION_MAX_FAST_ITERS
+            and gate.clears_by_fast_margin(value, self.ESCALATION_MARGIN_FRACTION)
+            and not self._candidate_climbed_to_hot(c)
         )
 
     def _get_bestofn_join_approval(
