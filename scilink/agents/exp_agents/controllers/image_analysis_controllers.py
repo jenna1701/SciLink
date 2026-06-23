@@ -271,6 +271,7 @@ def _append_tool_inventory(
     from ....skills._shared._registry import (
         format_library_inventory,
         get_tools_for,
+        TOOL_USE_PRINCIPLE,
     )
 
     specs = get_tools_for(agent, active_skills=active_skills)
@@ -282,6 +283,7 @@ def _append_tool_inventory(
             "code for post-processing. A tool call anchoring the hard step followed "
             "by custom code is usually more reliable than an all-custom pipeline."
         )
+        prompt.append(TOOL_USE_PRINCIPLE)
         for spec in specs:
             prompt.append(spec.to_prompt())
 
@@ -1982,7 +1984,14 @@ class UnifiedImageProcessingController:
         "Prefer keeping registered tools in the pipeline and expressing fixes "
         "through their documented parameters. If you must recommend replacing a "
         "tool with custom code, briefly state why the tool's parameters could "
-        "not address the issue.\n",
+        "not address the issue.\n"
+        "If the pipeline is effectively a SINGLE registered-tool call (its "
+        "documented parameters were already explored at the previous level), do "
+        "not keep re-tweaking those parameters — the next step is to REPLACE the "
+        "tool: prefer a DIFFERENT registered tool that targets the same goal a "
+        "different way; only if no such sibling tool fits is custom code "
+        "justified, and then state why the tool's parameters and the available "
+        "registered tools cannot address the issue.\n",
         # T=2 open — main annealing already grants full freedom
         "",
     )
@@ -2628,6 +2637,8 @@ Your guidance: '''
 **PROCESSING PIPELINE:** {processing_pipeline}
 **QUALITY CRITERIA (defined during planning):** {quality_criteria}
 
+**DATASET METADATA** (judge against THIS imaging modality's physics — do not invoke an artifact mechanism, or a correction, that belongs to a different technique): {metadata}
+
 **EXTRACTED FEATURES:**
 {features}
 
@@ -2675,6 +2686,22 @@ Score: 0.0 (nothing captured) to 1.0 (everything captured).
 - For texture/phase tasks: do classified regions match what you see in the original?
 - For measurement tasks: do extracted values match visual estimates from the image?
 Score: 0.0 (entirely wrong) to 1.0 (all output is correct).
+
+**Wrong science vs. over-production — two causes of low Correctness that need
+opposite feedback.** *Wrong science*: the output is in the wrong place or
+absent — edges off the real boundary, the wrong region analyzed, hallucinated
+or missed structure. The fix is to reanalyze. *Over-production*: a single
+coherent dominant finding IS present and correctly located, but the output
+renders far more structure than the evidence supports — a per-object/per-atom
+edge mesh, dozens of micro-regions, a marker haze — so most of the rendered
+detail is noise riding on a correct result. Score the noise honestly in both
+cases (do NOT inflate an over-produced result), but DIAGNOSE which one it is:
+when the cause is over-production, set `recommended_action` (and the matching
+`suggested_fix`) to "the dominant finding is correct — reduce the output to the
+evidence-supported structure (e.g. the single dominant boundary contour) and
+re-render; prefer simplifying the existing result over switching approach."
+This steers refinement to simplify a correct result rather than abandon it for
+a worse one.
 
 ### C. Relevance — does the output address what was asked?
 - Does the analysis extract the features listed in the quality criteria?
@@ -2794,10 +2821,16 @@ Return JSON:
         tool_schedule = self._TOOL_CONSTRAINT_SCHEDULE
         tool_constraint = tool_schedule[min(level, len(tool_schedule) - 1)]
 
+        sysinfo = state.get("system_info")
+        metadata_str = (
+            json.dumps(sysinfo) if isinstance(sysinfo, dict) and sysinfo
+            else (str(sysinfo).strip() if sysinfo else "Not provided")
+        )
         prompt_text = self.QUALITY_VERIFICATION_PROMPT.format(
             analysis_approach=config.get("analysis_approach", "Unknown"),
             processing_pipeline=config.get("processing_pipeline", "Unknown"),
             quality_criteria=config.get("quality_criteria", "Visual inspection"),
+            metadata=metadata_str,
             features=features_str,
             metrics=metrics_str,
             quality_threshold=self.quality_threshold,
@@ -2841,15 +2874,32 @@ Return JSON:
                 "data": state["original_image_bytes"]
             })
 
-        # Include domain-specific validation criteria from skill
+        # Include domain context from the skill. The verifier judges physical
+        # plausibility, so it needs the same domain PHYSICS the analysis stage
+        # had — without it, it falls back on generic-imaging priors (e.g.
+        # "horizontal contrast band -> illumination/scan artifact") that may not
+        # apply to this modality. Inject the interpretation (physics) section as
+        # well as the validation criteria, not validation alone.
         skill_sections = state.get("skill_sections")
-        if skill_sections and skill_sections.get("validation"):
+        if skill_sections:
             skill_name = state.get("skill_name", "domain skill")
-            prompt_parts.append(
-                f"\n\n**Domain Validation Criteria ({skill_name}):**\n"
-                "Use these criteria when scoring completeness and correctness.\n\n"
-                + skill_sections["validation"]
-            )
+            if skill_sections.get("interpretation"):
+                prompt_parts.append(
+                    f"\n\n**Domain Physics & Interpretation ({skill_name}):**\n"
+                    "Judge physical plausibility against THIS modality's physics; "
+                    "do not invoke an artifact mechanism or correction that this "
+                    "modality does not support.\n\n"
+                    + skill_sections["interpretation"]
+                )
+            if skill_sections.get("validation"):
+                prompt_parts.append(
+                    f"\n\n**Domain Validation Criteria ({skill_name}):**\n"
+                    "Use these criteria when scoring completeness and correctness.\n\n"
+                    + skill_sections["validation"]
+                )
+
+        from ....skills._shared._registry import VERIFIER_TOOL_SCRUTINY_PRINCIPLE
+        prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
 
         state["_last_verify_error"] = None
         try:
@@ -3451,9 +3501,19 @@ Return JSON with:
                         # noisy quality scores keep resetting the stall
                         # counter. Each level gets ~max_iter/n_levels slots
                         # before the floor forces the next one.
-                        _floor = min(
-                            verification_iter // 2,
+                        # Front-loaded floor, adaptive to max_verification_iterations:
+                        # one iteration at level 0, then spread the remaining N-1
+                        # iterations evenly across the upper levels. This unlocks the
+                        # permissive T=1 (swap/modify) rung at iter 1 regardless of N
+                        # — swapping is then an OPTION, not a requirement, so reaching
+                        # it early is low-risk — while full-freedom T=2 (custom code,
+                        # where vetted tools get abandoned) stays a later resort
+                        # (~midway for a 3-level ladder). For N=7 this is
+                        # (0,1,1,1,2,2,2). Was linear `verification_iter // 2`.
+                        _N = max(self.max_verification_iterations, 2)
+                        _floor = 0 if verification_iter == 0 else min(
                             _n_anneal_levels - 1,
+                            1 + ((verification_iter - 1) * (_n_anneal_levels - 1)) // (_N - 1),
                         )
                         if _floor > _annealing_level:
                             self.logger.info(
