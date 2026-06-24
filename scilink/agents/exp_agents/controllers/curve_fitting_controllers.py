@@ -638,8 +638,14 @@ def build_verification_prompt_with_history(
         "caveat (the plateau/convergence rule takes precedence).",
         "3. If a previous fix was NOT applied due to an API error, "
         "re-suggest it or propose an alternative",
+        "4. A previously-raised issue may have been MISTAKEN. RETRACT it (drop it; "
+        "stop demanding fixes) when STRONG evidence shows the concern was unfounded "
+        "— the plot, a registered tool's documented behaviour/guarantees, clear "
+        "physics, or an independent cross-check. Absent strong evidence, keep "
+        "scrutinizing: 'persists' means still demonstrably real, not merely "
+        "un-disproven.",
     ])
-    
+
     return "\n".join(lines)
 
 
@@ -3132,6 +3138,7 @@ Your guidance: '''
                     script, diagnosis = self._correct_script(state, script, last_error)
                     script_errors.append({"error": last_error, "diagnosis": diagnosis})
 
+                state["_verify_working_dir"] = str(item_dir)
                 run = stage_and_run(self.executor, script, curve_data, item_dir,
                                     aux=extra_operands)
                 exec_result = run["exec"]
@@ -3716,7 +3723,41 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
         # Scrutinize-don't-reimplement: when a registered curve-fitting tool
         # (e.g. fit_pattern, fit_sideband_manifold) produced the fit, judge it by
         # the tool's QC + domain knowledge + cross-checks, not by re-deriving.
-        from ....skills._shared._registry import VERIFIER_TOOL_SCRUTINY_PRINCIPLE
+        from ....skills._shared._registry import (
+            VERIFIER_TOOL_SCRUTINY_PRINCIPLE, get_tools_for)
+        _tool_inv = _tool_inventory_text(state)
+        if _tool_inv:
+            prompt_parts.append(
+                "\n\n**REGISTERED TOOLS AVAILABLE TO THIS FIT** — judge the result "
+                "against what each tool actually does and what its outputs mean; do not "
+                "re-derive a failure mode the tool already controls for:\n" + _tool_inv)
+            # Which of those tools THIS iteration's script actually called
+            # (authoritative — the prose pipeline description can deviate from the
+            # executed code). Parsed from the saved fitting script; only the name
+            # list is injected, never the script source.
+            try:
+                import glob as _g
+                _wd = state.get("_verify_working_dir")
+                _names = [t.name for t in get_tools_for(
+                    "curve_fitting", active_skills=_active_skill_names(state))]
+                _src = ""
+                if _wd:
+                    _hits = (_g.glob(os.path.join(_wd, "scripts", "*.py"))
+                             or _g.glob(os.path.join(_wd, "*.py")))
+                    if _hits:
+                        with open(_hits[0]) as _sf:
+                            _src = _sf.read()
+                import re as _re
+                _used = [n for n in _names
+                         if _re.search(rf"\b{_re.escape(n)}\b", _src)]
+                state["_last_tools_used"] = _used   # persisted into quality_history
+                if _used:
+                    prompt_parts.append(
+                        "\n\n**Registered tools this iteration's script actually CALLED:** "
+                        + ", ".join(_used) + " — apply each one's documented behaviour "
+                        "(above) when judging the result.")
+            except Exception:
+                pass
         prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
 
         try:
@@ -4261,6 +4302,7 @@ Return JSON with:
                             "metric_value": _cur_metric,
                             "best_metric_value": _best_metric,
                             "metric_label": _metric_label,
+                            "tools_used": state.get("_last_tools_used", []),
                             "config_used": state.get("locked_fitting_config", {}),
                             "issues_found": verification.get("issues_found", []),
                             "overall_assessment": verification.get("overall_assessment", ""),
@@ -6028,6 +6070,7 @@ Return JSON with:
                 {
                     "r_squared": entry.get("r_squared"),
                     "annealing_level": entry.get("annealing_level", 0),
+                    "tools_used": entry.get("tools_used", []),
                     # The model in force at this iteration — lets a consumer
                     # (e.g. the self-evolution figure) show the per-attempt
                     # model alongside its R² and issues.
