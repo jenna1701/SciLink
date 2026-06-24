@@ -22,7 +22,7 @@ Relationship to the other tools:
     — this tool is the sharp LOCALIZER that returns the boundary line plus a
     physical readout (delta-orientation in deg, delta-spacing in %). Same
     explore-vs-localize split as FFT-NMF vs fourier_reflection_map.
-  * gpa_strain measures the continuous strain tensor against ONE reference
+  * gpa_strain_map measures the continuous strain tensor against ONE reference
     lattice — ideal for small distortions and coherent interfaces, but it
     breaks at large misorientation (two grains = two reciprocal lattices). This
     tool handles large misorientation (each window finds its own orientation).
@@ -399,7 +399,7 @@ TOOL_SPEC = ToolSpec(
         "Pick among the reciprocal-space tools: `run_fft_nmf_analysis` is the "
         "EXPLORATORY decomposer (unknown heterogeneity, 'how many domains') — "
         "this tool is the sharp LOCALIZER that returns the boundary line + a "
-        "physical readout. `gpa_strain` measures the continuous strain tensor "
+        "physical readout. `gpa_strain_map` measures the continuous strain tensor "
         "against one reference lattice (small distortions, coherent interfaces, "
         "fine same-orientation faults) but breaks at large misorientation; this "
         "tool handles large misorientation, so use GPA for strain MAGNITUDE and "
@@ -415,9 +415,14 @@ TOOL_SPEC = ToolSpec(
         "TRANSLATIONALLY with no orientation or spacing change — invisible to the "
         "(translation-invariant) power spectrum on its own, but the tool catches "
         "it via a real-space lateral-shift check on every coherence-drop band and "
-        "reports lateral_shift_frac (so a horizontal/layer-parallel coherence "
-        "band with a fractional-period shift is a real stacking fault, NOT a scan "
-        "artifact — do not dismiss it as one). The tool detects boundaries that "
+        "reports lateral_shift_frac. lateral_shift_frac is measured on DC-removed "
+        "(mean-subtracted) lattice profiles by phase correlation, so it is "
+        "BRIGHTNESS/CONTRAST-STEP INVARIANT — a pure brightness/illumination step "
+        "yields 0; a nonzero value cannot be produced by a contrast step and needs "
+        "NO flat-field normalization to 'prove'. So a horizontal/layer-parallel "
+        "coherence band with a fractional-period shift is a real stacking fault, NOT "
+        "a scan artifact — do not dismiss it or demand normalization. The tool "
+        "detects boundaries that "
         "change local orientation, spacing, or coherence; for very large or "
         "subtle-misorientation images tune window_nm and dissim_floor."
     ),

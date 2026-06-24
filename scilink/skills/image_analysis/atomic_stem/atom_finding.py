@@ -1564,7 +1564,10 @@ TOOL_SPECS = [
         name="detect_atoms",
         description=(
             "Classical atom-column detection: peak detection plus optional 2D Gaussian "
-            "refinement. Returns sub-pixel positions and per-atom Gaussian parameters."
+            "refinement. Returns sub-pixel positions and per-atom Gaussian parameters. "
+            "SPECIES-BLIND: positions are column LOCATIONS, not chemical identities or "
+            "sublattice labels, and the Gaussian amplitude is intensity, not species — "
+            "type columns downstream (intensity, local_env_gmm, type_sublattice_defects)."
         ),
         import_line="from scilink.skills.image_analysis.atomic_stem.atom_finding import detect_atoms",
         signature=(
@@ -1616,7 +1619,9 @@ TOOL_SPECS = [
         name="detect_atoms_dcnn",
         description=(
             "AtomNet3 deep-CNN ensemble detection. Produces atom positions and a "
-            "probability heatmap."
+            "probability heatmap. SPECIES-BLIND: it returns column LOCATIONS, not "
+            "chemical identities or sublattice labels — species/sublattice typing "
+            "is a downstream step (intensity, local_env_gmm, type_sublattice_defects)."
         ),
         import_line="from scilink.skills.image_analysis.atomic_stem.atom_finding import detect_atoms_dcnn",
         signature=(
@@ -1954,7 +1959,7 @@ TOOL_SPECS = [
             "inter-sublattice spacing, NOT the intra-sublattice repeat. Lattice-agnostic and "
             "free of material constants. Assumes HAADF bright-column intensity. Reports the polar "
             "displacement field; for tetragonality/shear, characterise the reference sublattice "
-            "with gpa_strain. "
+            "with gpa_strain_map. "
             "LIMITS: (1) DIRECTION/domains are the robust output; MAGNITUDE is trustworthy only "
             "on CLEAN detection (NN at the inter-sublattice spacing, low nn_cv) — over-detected "
             "input inflates magnitude (~20% on real over-detection), and EXTREME over-detection "
