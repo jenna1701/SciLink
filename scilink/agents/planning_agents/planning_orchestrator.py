@@ -662,6 +662,7 @@ class PlanningOrchestratorAgent:
         self.target_directions = {}  # e.g. {"Yield": "maximize", "Defect_Density": "minimize"}
         self.expected_input_types = None  # {col: "continuous" | "categorical"} from scalarizer
         self.expected_input_levels = None  # {col: [level0, level1, ...]} for categorical inputs
+        self.fidelity_spec = None  # {column, target_fidelity?, costs?} when the data has a fidelity axis
         self.latest_tea_results = None
 
         # Per-delegation output isolation. Used only by run_task: the meta
@@ -1144,6 +1145,7 @@ class PlanningOrchestratorAgent:
             self.target_directions = state.get("target_directions", {})
             self.expected_input_types = state.get("expected_input_types")
             self.expected_input_levels = state.get("expected_input_levels")
+            self.fidelity_spec = state.get("fidelity_spec")
             self.latest_tea_results = state.get("latest_tea_results")
             self._delegation_counter = state.get("delegation_counter", 0)
 
@@ -1446,6 +1448,7 @@ class PlanningOrchestratorAgent:
                 "target_directions": self.target_directions,
                 "expected_input_types": self.expected_input_types,
                 "expected_input_levels": self.expected_input_levels,
+                "fidelity_spec": self.fidelity_spec,
                 "data_points_collected": len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0,
                 "planner_state": self.planner.state,
                 "message_count": self.message_count,

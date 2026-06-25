@@ -731,6 +731,11 @@ Rules:
 - If the data file contains ONLY measurement data (e.g., spectra: wavelength/intensity,
   time series: time/signal) with NO controllable parameters, set inputs to an empty list [].
   This signals that experimental conditions must be provided externally (e.g., via metadata sidecar).
+- FIDELITY (rare — omit unless clearly present): declare a `"fidelity"` role ONLY when the
+  same objective is evaluated at distinct levels of cost/accuracy and a column indexes that
+  level — e.g., a `fidelity`/`quality`/`resolution` column, or coarse vs fine simulation /
+  measurement. The fidelity column MUST also appear in `inputs`. Do NOT invent a fidelity axis
+  for ordinary optimization data; when in doubt, omit it.
 
 **LLM RESPONSE FORMAT:**
 You (the Agent) must return a single JSON object containing the code AND column classification:
@@ -749,6 +754,10 @@ You (the Agent) must return a single JSON object containing the code AND column 
     "reasoning": "Temperature and concentration are continuous knobs; Solvent is an unordered identity (DMSO/DMF/MeCN). Yield is the measured outcome to maximize."
   }
 }
+
+OPTIONAL `column_roles.fidelity` — include ONLY for a genuine multi-fidelity dataset (see rule above):
+  "fidelity": {"column": "<one of inputs>", "target_fidelity": <highest/most-accurate level>, "costs": {"<level>": <relative cost>}}
+`costs` is optional. Example: "fidelity": {"column": "sim_resolution", "target_fidelity": 1.0, "costs": {"0": 1, "1": 10}}.
 """
 
 SCALARIZER_REFLECTION_PROMPT = """
