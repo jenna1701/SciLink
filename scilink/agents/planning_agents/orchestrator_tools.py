@@ -68,6 +68,41 @@ def _build_planning_skill_description(custom_skills: dict = None) -> str:
     return " ".join(parts)
 
 
+def _build_optimization_skill_description() -> str:
+    """Build the ``skill`` parameter description for ``run_optimization``.
+
+    Lists the available optimization skill bundles (``domain="optimization"``)
+    so the orchestrator LLM can activate one by name. Mirrors the planning
+    helper above, scoped to the optimization domain.
+    """
+    parts = [
+        "Optional optimization skill: a built-in optimization skill name. When "
+        "set, the skill's guidance is injected into the BO strategy and "
+        "inspection stages, and any surrogate/acquisition the skill contributes "
+        "becomes selectable. Pass when the user's problem matches a skill below."
+    ]
+    try:
+        names = list_skills(domain="optimization")
+    except Exception:
+        names = []
+
+    skill_descs = []
+    for name in names:
+        try:
+            parsed = load_skill(name, domain="optimization")
+            desc = (parsed.get("meta") or {}).get("description")
+            if not desc:
+                desc = parsed.get("overview", "").split("\n")[0].strip()
+            desc = desc.rstrip(".;,") if desc else desc
+            skill_descs.append(f"'{name}' — {desc}" if desc else f"'{name}'")
+        except Exception:
+            skill_descs.append(f"'{name}'")
+    if skill_descs:
+        parts.append(f"Available optimization skills: {'; '.join(skill_descs)}.")
+
+    return " ".join(parts)
+
+
 class OrchestratorTools:
     """
     Manages tool definitions, schemas, and execution for the OrchestratorAgent.
@@ -2491,7 +2526,8 @@ class OrchestratorTools:
             physical_constraints: str = None,
             experimental_budget: int = None,
             targets: list[str] = None,
-            strategy_hint: str = None
+            strategy_hint: str = None,
+            skill: str = None
         ):
             """
             Runs Bayesian Optimization to suggest next parameters.
@@ -2853,6 +2889,7 @@ class OrchestratorTools:
                     plot_acq=True,
                     save_acq=True,
                     cat_dims=cat_dims if cat_dims else None,
+                    skill=skill,
                 )
                 
                 if res.get("status") != "success":
@@ -2993,6 +3030,10 @@ class OrchestratorTools:
                         "'switch to Matern-1.5', 'use UCB with high exploration'. "
                         "The hint is respected unless it conflicts with budget constraints."
                     )
+                },
+                "skill": {
+                    "type": "string",
+                    "description": _build_optimization_skill_description()
                 }
             },
             required=[]
