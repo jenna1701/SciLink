@@ -208,7 +208,7 @@ component simply does not register (it degrades gracefully).
 | Bundle | Adds | Why a skill (not core) |
 |---|---|---|
 | `bo_deep_ensemble` | `deep_ensemble` surrogate — an ensemble of bootstrap-trained MLPs exposing a Gaussian posterior | BoTorch ships GPs, not a trained NN ensemble |
-| `bo_changeover_aware` | `changeover_ei` acquisition — discounts EI by how far a candidate moves expensive-to-change setpoints | BoTorch's cost-aware utilities model *evaluation* cost, not setpoint changeover between runs |
+| `bo_changeover` | `changeover_ei` acquisition — discounts EI by how far a candidate moves expensive-to-change setpoints | BoTorch's cost-aware utilities model *evaluation* cost, not setpoint changeover between runs |
 
 Read those two bundles as templates.
 

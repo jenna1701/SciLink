@@ -16,11 +16,11 @@ from scilink.agents.planning_agents.bo_tools import get_optimizer
 
 def test_discovery_and_gating():
     assert "deep_ensemble" in get_surrogate_components(["bo_deep_ensemble"])
-    assert "changeover_ei" in get_acquisition_components(["bo_changeover_aware"])
+    assert "changeover_ei" in get_acquisition_components(["bo_changeover"])
     assert get_surrogate_components([]) == {}  # nothing without an active skill
     assert get_acquisition_components([]) == {}
     # bundle-gated: deep_ensemble not visible under a different active skill
-    assert "deep_ensemble" not in get_surrogate_components(["bo_changeover_aware"])
+    assert "deep_ensemble" not in get_surrogate_components(["bo_changeover"])
 
 
 def test_saas_is_core_not_skill():
@@ -37,7 +37,7 @@ def test_deep_ensemble_surrogate_smoke():
 
 def test_engine_builds_skill_surrogate_and_dispatches_skill_acquisition():
     surr = get_surrogate_components(["bo_deep_ensemble"])
-    acq = get_acquisition_components(["bo_changeover_aware"])
+    acq = get_acquisition_components(["bo_changeover"])
     rng = np.random.RandomState(0)
     X = rng.uniform(0, 1, (24, 4))
     y = ((X[:, 0] - 0.5) ** 2 + 0.3 * X[:, 1]).reshape(-1, 1)
@@ -58,7 +58,7 @@ def test_changeover_penalty_keeps_expensive_dim_near_last_setpoint():
     """A heavy changeover_weight on the expensive dim should keep the next
     recommendation's expensive input near the last experiment, even when the EI
     optimum is far away — the whole point of the acquisition."""
-    acq = get_acquisition_components(["bo_changeover_aware"])
+    acq = get_acquisition_components(["bo_changeover"])
     # Optimum (low y) is at x0 ~ 0.9, but the last experiment sits at x0 ~ 0.1.
     grid = np.linspace(0, 1, 25)
     X = np.column_stack([grid, np.full_like(grid, 0.5)])
