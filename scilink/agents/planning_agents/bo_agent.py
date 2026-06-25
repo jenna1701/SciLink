@@ -5,7 +5,7 @@ import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
 from types import SimpleNamespace
 import PIL.Image as PIL_Image
 
@@ -120,7 +120,7 @@ def _compute_budget_context(experimental_budget: Optional[int], history: List[Di
     }
 
 
-class BOAgent(BaseAgent):
+class OptimizationAgent(BaseAgent):
     """
     Autonomous Agent for Bayesian Optimization (BO) designed for "Stop-and-Go" experimental loops.
 
@@ -737,15 +737,80 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
     # offline snapshot test (tests/test_bo_prompt_snapshot.py).
     # =====================================================================
 
-    def _skill_context(self, section: str) -> str:
-        """Return the active skill's guidance for one pipeline section.
+    SKILL_DOMAIN = "optimization"
 
-        Seam for the OptimizationAgent foundationalization. Sections follow the
-        optimization vocabulary (overview / setup / surrogate / acquisition /
-        diagnostics / interpretation / implementation). Returns "" until skills
-        are loaded (PR 2), so builders that splice it stay byte-identical.
+    def _load_skills_to_state(self, skill: Union[str, List[str], None]) -> Dict[str, Any]:
+        """Load one or more optimization skills and return a state-dict fragment.
+
+        Mirrors the analysis-side helper shape (``skill_name`` / ``skill_sections``
+        / ``skills_loaded``) without unifying base classes (D4): a local helper
+        keeps duplication low while the three orchestrators stay independent.
+        Skills that fail to load are warned and dropped.
         """
-        return ""
+        from ...skills.loader import load_skill
+
+        if skill is None or skill == "":
+            inputs: List[str] = []
+        elif isinstance(skill, str):
+            inputs = [skill]
+        else:
+            inputs = list(skill)
+
+        loaded: List[Dict[str, Any]] = []
+        seen: set = set()
+        for s in inputs:
+            try:
+                parsed = load_skill(s, domain=self.SKILL_DOMAIN)
+            except FileNotFoundError:
+                logging.warning(f"   Skill '{s}' not found — skipping.")
+                continue
+            if parsed["name"] in seen:
+                continue
+            seen.add(parsed["name"])
+            loaded.append(parsed)
+            logging.info(f"   📖 Optimization skill loaded: {parsed['name']}")
+
+        first = loaded[0] if loaded else None
+        return {
+            "skill_name": first["name"] if first else None,
+            "skill_sections": first,
+            "skills_loaded": loaded,
+        }
+
+    def _resolve_skills(self, skill: Union[str, List[str], None], is_moo: bool) -> Dict[str, Any]:
+        """Decide which skills to activate for a run.
+
+        Skills are *specializations beyond the baseline*. Standard single- and
+        multi-objective BO (the kernel/noise/acquisition/surrogate menus and
+        inspection) is baseline competency carried by the agent's own prompts —
+        it is NOT skill-gated. So only an explicitly-requested ``skill`` (or, in
+        future, an agent-selected one) activates here; with none, the run uses
+        the baseline. ``is_moo`` is accepted for signature stability but does not
+        auto-load anything."""
+        if skill:
+            return self._load_skills_to_state(skill)
+        return {"skill_name": None, "skill_sections": None, "skills_loaded": []}
+
+    def _skill_context(self, section: str) -> str:
+        """Return the active skills' guidance for one pipeline section, spliced
+        into the per-stage prompt by the builders.
+
+        Sections follow the optimization vocabulary (overview / setup /
+        surrogate / acquisition / diagnostics / interpretation / implementation).
+        Returns "" when no active skill carries that section, so an empty skill
+        set reproduces the baseline prompt byte-for-byte.
+        """
+        loaded = getattr(self, "state", {}).get("skills_loaded", []) if isinstance(getattr(self, "state", {}), dict) else []
+        parts = []
+        for sk in loaded:
+            content = (sk.get(section) or "").strip()
+            if content:
+                parts.append(
+                    f"**Domain Skill — {sk.get('name', 'skill')} ({section}):**\n{content}"
+                )
+        if not parts:
+            return ""
+        return "\n\n" + "\n\n".join(parts)
 
     def _build_strategy_prompt(self, *, is_moo: bool, objective_text: str,
                                target_directions: Optional[Dict[str, str]],
@@ -874,7 +939,8 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                              plot_acq: bool = True,
                              fixed_noise_std: Optional[float] = None,
                              cat_dims: Optional[List[int]] = None,
-                             dkl_config: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+                             dkl_config: Optional[Dict[str, int]] = None,
+                             skill: Union[str, List[str], None] = None) -> Dict[str, Any]:
         """
         Run one iteration of the Bayesian Optimization loop.
         
@@ -931,6 +997,19 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
 
         # Initialize state
         self._init_state(objective=objective_text, data_path=data_path)
+
+        # Resolve + activate skills for this run (foundation-agent
+        # specialization, issue #196). Skills are specializations beyond the
+        # baseline (e.g. multi-fidelity); standard single-/multi-objective BO is
+        # baseline competency and is NOT skill-gated. Only an explicit `skill`
+        # activates here. `_skill_context` reads state["skills_loaded"] when the
+        # stage builders assemble their prompts.
+        is_moo = len(target_cols) > 1
+        skills_frag = self._resolve_skills(skill, is_moo)
+        self.state["skills_loaded"] = skills_frag["skills_loaded"]
+        if skills_frag["skills_loaded"]:
+            print(f"  - 🧩 Active optimization skill(s): "
+                  f"{[s['name'] for s in skills_frag['skills_loaded']]}")
 
         # The run-context threads state across the pipeline stages below.
         # run_optimization_loop is the driver; each _stage_* method reads and
@@ -1361,4 +1440,15 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         )
 
         return result
+
+
+class BOAgent(OptimizationAgent):
+    """Back-compat alias for :class:`OptimizationAgent`.
+
+    The optimization modality foundationalized from ``BOAgent`` into
+    ``OptimizationAgent`` (issue #196). This subclass keeps the old import path
+    and constructor working unchanged for existing callers; no deprecation
+    warning yet (added in a later PR once callers migrate).
+    """
+    pass
 
