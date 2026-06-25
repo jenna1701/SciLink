@@ -376,6 +376,21 @@ preferred here:
   iteration count.
 """
 
+# Appended to the strategy-config prompt ONLY when the input dimension is high
+# (a data signal) — surfaces the SAAS surrogate, a baseline high-D capability.
+BO_HIGHD_ADDENDUM = """
+
+**HIGH-DIMENSIONAL ({n_dims} inputs).**
+* SURROGATE `"saas"`: Sparse Axis-Aligned Subspace fully-Bayesian GP (fit by
+  NUTS). Use when you suspect only a few of the many inputs actually drive the
+  response — SAAS places sparsity priors on the length-scales and concentrates
+  on the active dimensions, where `single_task`/`dkl` get swamped by the
+  irrelevant ones. It is markedly more expensive (MCMC) and single-objective
+  only; reserve it for genuinely high-D problems with adequate budget. After
+  fitting, cross-check the inferred active dimensions against the Sobol panel —
+  if they disagree, the MCMC likely did not converge; fall back to `single_task`.
+"""
+
 BO_VISUAL_INSPECTION_PROMPT = """
 You are a Data Scientist validating a GP model and its optimization strategy.
 Analyze the 4-panel diagnostic dashboard.

@@ -49,7 +49,7 @@ ALLOWED_INPUT_TRANSFORMS = {"none", "warp"}
 # not a skill (issue #196). Specialized non-standard methods (foreign-backend,
 # etc.) would arrive later behind the generic menu-gating hook, added when a
 # real Tier-2 case exists.
-ALLOWED_SURROGATES = {"single_task", "mixed", "dkl", "single_task_multi_fidelity"}
+ALLOWED_SURROGATES = {"single_task", "mixed", "dkl", "single_task_multi_fidelity", "saas"}
 
 
 def build_input_transform(key: str, input_dim: int) -> "ChainedInputTransform | Normalize":
@@ -227,6 +227,7 @@ def build_surrogate(
     cat_dims: Optional[List[int]] = None,
     dkl_config: Optional[Dict[str, int]] = None,
     fidelity_config: Optional[Dict[str, Any]] = None,
+    surrogate_components: Optional[Dict[str, Any]] = None,
 ) -> SurrogateSpec:
     """Build a surrogate factory and matching fit function.
 
@@ -234,7 +235,18 @@ def build_surrogate(
     instance — required because MOO instantiates one GP per output column and
     wraps them in a ModelListGP. The same `fit_fn` works for either a single
     model or a ModelListGP wrapper.
+
+    ``surrogate_components`` maps a key to a skill-contributed SurrogateComponent
+    (a bundle's .py helper); a matching key is built by the component, letting an
+    in-package skill ship a custom torch surrogate without editing this file.
     """
+    if surrogate_components and key in surrogate_components:
+        return surrogate_components[key].builder(
+            input_dim, kernel=kernel, noise=noise, input_transform=input_transform,
+            fixed_noise_std=fixed_noise_std, cat_dims=cat_dims,
+            dkl_config=dkl_config, fidelity_config=fidelity_config,
+        )
+
     if key not in ALLOWED_SURROGATES:
         logging.warning(f"Unknown surrogate '{key}', defaulting to 'single_task'")
         key = "single_task"
@@ -347,6 +359,30 @@ def build_surrogate(
             ),
         )
 
+    if key == "saas":
+        # Sparse Axis-Aligned Subspace fully-Bayesian GP (NUTS) for high-D BO
+        # where few inputs are active. Native BoTorch, so it is a baseline
+        # surrogate surfaced by a high-dimensionality signal (like `dkl`).
+        from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
+        from botorch.fit import fit_fully_bayesian_model_nuts
+        in_transform = Normalize(d=input_dim)
+
+        def factory(X, y):
+            return SaasFullyBayesianSingleTaskGP(
+                X, y, outcome_transform=Standardize(m=1), input_transform=in_transform,
+            )
+
+        return SurrogateSpec(
+            model_factory=factory,
+            fit_fn=lambda m: fit_fully_bayesian_model_nuts(
+                m, warmup_steps=64, num_samples=128, thinning=16, disable_progbar=True,
+            ),
+            capabilities=SurrogateCapabilities(
+                supports_fixed_noise=False, supports_warp=False,
+                needs_cat_dims=False, supports_thompson=False,
+            ),
+        )
+
     # key == "dkl"
     cfg = dkl_config or {}
     hidden = int(cfg.get("hidden", 64))
@@ -430,7 +466,9 @@ class SingleObjectiveOptimizer:
             fixed_noise_std: Optional[float] = None,
             cat_dims: Optional[List[int]] = None,
             dkl_config: Optional[Dict[str, int]] = None,
-            fidelity_config: Optional[Dict[str, Any]] = None):
+            fidelity_config: Optional[Dict[str, Any]] = None,
+            surrogate_components: Optional[Dict[str, Any]] = None,
+            acquisition_components: Optional[Dict[str, Any]] = None):
         """Fits the surrogate selected by ``model_config['surrogate']``.
 
         Default surrogate is ``"single_task"`` (vanilla SingleTaskGP). ``"mixed"``
@@ -459,11 +497,16 @@ class SingleObjectiveOptimizer:
             cat_dims=cat_dims,
             dkl_config=dkl_config,
             fidelity_config=fidelity_config,
+            surrogate_components=surrogate_components,
         )
         self.fidelity_config = fidelity_config or {}
+        self._acq_components = acquisition_components or {}
         self.model = spec.model_factory(self.X_train, self.y_train)
         spec.fit_fn(self.model)
-        self.mll = ExactMarginalLogLikelihood(self.model.likelihood, self.model)
+        # GP-only convenience handle; non-GP surrogates (e.g. a skill-shipped
+        # deep ensemble) have no likelihood.
+        self.mll = (ExactMarginalLogLikelihood(self.model.likelihood, self.model)
+                    if hasattr(self.model, "likelihood") else None)
 
         # Clear stale acquisition function from previous fit
         self.acq_func = None
@@ -479,7 +522,13 @@ class SingleObjectiveOptimizer:
         
         self.acq_strategy_name = strategy
 
-        # --- 0. Cost-aware Multi-Fidelity Knowledge Gradient (Tier-2 skill) ---
+        # --- Skill-contributed acquisition components (bundle .py helpers) ---
+        comps = getattr(self, "_acq_components", None)
+        if comps and strategy in comps:
+            self.acq_func = None  # custom acquisitions aren't grid-plotted by default
+            return comps[strategy].recommend_fn(self, n_candidates, params)
+
+        # --- 0. Cost-aware Multi-Fidelity Knowledge Gradient (baseline) ---
         if strategy == 'mf_kg':
             return self._recommend_mf_kg(n_candidates, params)
 
@@ -1245,7 +1294,9 @@ class MultiObjectiveOptimizer:
             fixed_noise_std: Optional[float] = None,
             cat_dims: Optional[List[int]] = None,
             dkl_config: Optional[Dict[str, int]] = None,
-            fidelity_config: Optional[Dict[str, Any]] = None):
+            fidelity_config: Optional[Dict[str, Any]] = None,
+            surrogate_components: Optional[Dict[str, Any]] = None,
+            acquisition_components: Optional[Dict[str, Any]] = None):
         """Fits independent surrogates per objective and wraps them in a
         ModelListGP. Same surrogate kind is used for every objective.
         """

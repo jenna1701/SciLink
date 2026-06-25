@@ -16,6 +16,7 @@ from .instruct import (
     BO_CONFIG_SOO_PROMPT,
     BO_CONFIG_MOO_PROMPT,
     BO_MULTIFIDELITY_ADDENDUM,
+    BO_HIGHD_ADDENDUM,
     BO_VISUAL_INSPECTION_PROMPT,
     BO_VISUAL_INSPECTION_MOO_PROMPT,
     BO_CONSTRAINED_BATCH_PROMPT,
@@ -239,7 +240,9 @@ class OptimizationAgent(BaseAgent):
         history.append(entry)
         with open(self.history_file, 'w') as f: json.dump(history, f, indent=2)
 
-    def _validate_config(self, config: Dict, fidelity_declared: bool = False) -> Dict:
+    def _validate_config(self, config: Dict, fidelity_declared: bool = False,
+                         extra_surrogates: Optional[set] = None,
+                         extra_acquisitions: Optional[set] = None) -> Dict:
         clean = config.copy()
         m_conf = clean.get("model_config", {})
         if m_conf.get("kernel") not in ["matern_2.5", "matern_1.5", "matern_0.5", "rbf"]:
@@ -253,9 +256,12 @@ class OptimizationAgent(BaseAgent):
             m_conf["input_transform"] = "none"
         # Multi-fidelity surrogate/acquisition are baseline but only valid when a
         # fidelity column is declared (the fidelity_config data signal).
-        allowed_surrogates = ["single_task", "mixed", "dkl"]
+        allowed_surrogates = ["single_task", "mixed", "dkl", "saas"]
         if fidelity_declared:
             allowed_surrogates.append("single_task_multi_fidelity")
+        # Skill-contributed surrogates are selectable only while their skill is
+        # active (their keys arrive via extra_surrogates).
+        allowed_surrogates += list(extra_surrogates or set())
         if m_conf.get("surrogate", "single_task") not in allowed_surrogates:
             logging.warning(
                 f"Invalid surrogate '{m_conf.get('surrogate')}', defaulting to 'single_task'"
@@ -267,6 +273,12 @@ class OptimizationAgent(BaseAgent):
             fidelity_declared and m_conf.get("surrogate") == "single_task_multi_fidelity"
         ):
             logging.warning("'mf_kg' requires single_task_multi_fidelity + a fidelity column; defaulting to 'log_ei'.")
+            acq["type"] = "log_ei"
+        # Skill-contributed acquisitions are valid only while their skill is
+        # active; an unknown/inactive one falls back to the default.
+        core_acqs = {"log_ei", "ucb", "thompson", "max_variance", "pareto", "weighted", "mf_kg"}
+        if acq.get("type") and acq["type"] not in core_acqs | set(extra_acquisitions or set()):
+            logging.warning(f"Acquisition '{acq['type']}' not available; defaulting to 'log_ei'.")
             acq["type"] = "log_ei"
         # Pairwise compatibility — warn but do not auto-substitute. Strategy LLM
         # is expected to obey the prompt; the runtime factory will silently fall
@@ -804,6 +816,18 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             return self._load_skills_to_state(skill)
         return {"skill_name": None, "skill_sections": None, "skills_loaded": []}
 
+    def _optimization_components(self):
+        """Resolve skill-contributed engine components (custom surrogates /
+        acquisitions shipped as bundle .py helpers) from the active skills.
+        Returns (surrogate_components, acquisition_components) dicts keyed by the
+        registry key the LLM selects. Empty when no component-skill is active."""
+        from ...skills._shared._opt_components import (
+            get_surrogate_components, get_acquisition_components,
+        )
+        names = [s["name"] for s in getattr(self, "state", {}).get("skills_loaded", [])]
+        return (get_surrogate_components(names, agent="bo"),
+                get_acquisition_components(names, agent="bo"))
+
     def _skill_context(self, section: str) -> str:
         """Return the active skills' guidance for one pipeline section, spliced
         into the per-stage prompt by the builders.
@@ -842,6 +866,9 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         # (baseline capability, data-signal gated like `mixed`/cat_dims).
         if fidelity_config and fidelity_config.get("fidelity_col") is not None:
             prompt_tmpl = prompt_tmpl + BO_MULTIFIDELITY_ADDENDUM
+        # Surface SAAS (baseline high-D surrogate) when the input space is large.
+        if not is_moo and len(input_cols) >= 8:
+            prompt_tmpl = prompt_tmpl + BO_HIGHD_ADDENDUM.format(n_dims=len(input_cols))
         prompt_parts = [
             prompt_tmpl,
             f"Objective: {objective_text}",
@@ -1171,7 +1198,14 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             return {"error": f"JSON Error: {parse_error}"}
 
         fidelity_declared = bool(c.fidelity_config and c.fidelity_config.get("fidelity_col") is not None)
-        valid_config = self._validate_config(raw_config, fidelity_declared=fidelity_declared)
+        # Skill-contributed engine components (custom surrogates/acquisitions) for
+        # the active skills — gate validation by them and pass them to the fit.
+        c.surrogate_components, c.acquisition_components = self._optimization_components()
+        valid_config = self._validate_config(
+            raw_config, fidelity_declared=fidelity_declared,
+            extra_surrogates=set(c.surrogate_components),
+            extra_acquisitions=set(c.acquisition_components),
+        )
         valid_config["batch_size"] = int(c.batch_size)
 
         # Store current config in state
@@ -1209,6 +1243,8 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             cat_dims=c.cat_dims,
             dkl_config=c.dkl_config,
             fidelity_config=c.fidelity_config,
+            surrogate_components=getattr(c, "surrogate_components", None),
+            acquisition_components=getattr(c, "acquisition_components", None),
         )
         if c.fixed_noise_std is not None:
             # Echo the override back into the config so downstream history /
