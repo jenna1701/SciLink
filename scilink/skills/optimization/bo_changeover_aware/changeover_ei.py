@@ -1,22 +1,20 @@
-"""Changeover-aware Expected Improvement — a skill-shipped acquisition (issue
-#196). A genuinely BEYOND-BoTorch, lab-operational acquisition.
+"""Changeover-aware Expected Improvement.
 
-Real labs pay a large setpoint-CHANGEOVER cost between consecutive experiments:
-re-stabilizing a furnace to a new temperature can take hours; switching solvent
-or substrate means cleaning and re-priming. Standard BO ignores this — it jumps
-to the global EI optimum no matter how far that is from the current setpoint, so
-the campaign wastes time on changeovers. (BoTorch's cost-aware utilities model
-multi-fidelity EVALUATION cost, not move/changeover cost between sequential
-experiments — there is no such acquisition in BoTorch.)
+In many experimental campaigns the dominant cost between consecutive runs is the
+setpoint CHANGEOVER, not the measurement: re-stabilizing a furnace to a new
+temperature can take hours; switching solvent or substrate means cleaning and
+re-priming the rig. Standard EI ignores this and jumps to the global optimum
+regardless of how far it is from the current setpoint, so a campaign spends most
+of its wall time on changeovers.
 
 `changeover_ei` discounts Expected Improvement by how far a candidate moves the
 *expensive-to-change* inputs from the last experiment's setpoint, trading a
-little improvement for much less changeover overhead.
+little improvement for far fewer changeovers.
 
-Params (set by the agent from the skill guidance):
-  - ``expensive_dims``      : indices of slow/expensive-to-change inputs
+Params:
+  - ``expensive_dims``      : indices of the slow/expensive-to-change inputs
                               (e.g. the temperature column). Default: all inputs.
-  - ``changeover_weight``   : λ ≥ 0; higher = penalize moves harder. Default 1.0.
+  - ``changeover_weight``   : lambda >= 0; higher penalizes moves harder. Default 1.0.
 """
 import numpy as np
 

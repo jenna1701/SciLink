@@ -1,11 +1,10 @@
-"""Deep-ensemble BNN surrogate as a skill-shipped component (issue #196).
+"""Deep-ensemble surrogate for Bayesian optimization.
 
-A genuinely BEYOND-BoTorch surrogate: BoTorch ships GPs (incl. SAAS / DKL), not
-a trained neural-network ensemble. This bundle's .py defines the model and its
-training, and exposes a standard BoTorch Gaussian posterior (ensemble mean /
-variance) so it composes with every existing acquisition unchanged. This is the
-contributor rung: new functionality core can't reach, added through a skill
-bundle via the SurrogateSpec seam — torch only, no edit to bo_tools.py.
+An ensemble of small neural networks, each trained on a bootstrap resample of
+the data; their disagreement provides the epistemic uncertainty. It exposes a
+Gaussian posterior (the ensemble mean and variance), so the standard acquisition
+functions apply unchanged. A non-GP alternative for larger or strongly
+non-stationary datasets where a stationary GP kernel fits poorly.
 """
 import torch
 import torch.nn.functional as F

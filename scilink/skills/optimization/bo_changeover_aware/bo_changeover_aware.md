@@ -12,9 +12,8 @@ re-equilibrating a furnace or reactor to a new temperature can take hours;
 switching solvent, substrate, or catalyst means cleaning and re-priming the rig.
 Standard BO ignores this and jumps to the global acquisition optimum regardless
 of how far it is from the current setpoint, so a campaign burns most of its wall
-time on changeovers. This bundle adds the `changeover_ei` acquisition, which
-keeps making progress while staying close — in the expensive-to-change inputs —
-to the last experiment.
+time on changeovers. The `changeover_ei` acquisition keeps making progress while
+staying close — in the expensive-to-change inputs — to the last experiment.
 
 ## Acquisition
 

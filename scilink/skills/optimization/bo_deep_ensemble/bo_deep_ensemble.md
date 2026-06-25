@@ -6,11 +6,10 @@ domain: both
 
 ## Overview
 
-This bundle contributes a `deep_ensemble` surrogate: an ensemble of small neural
-networks, each trained on a bootstrap resample, whose disagreement provides
-epistemic uncertainty. It is a non-GP alternative for situations where the GP
-surrogates underperform — and is *beyond* BoTorch's built-in toolkit, shipped as
-a skill component rather than core.
+The `deep_ensemble` surrogate is an ensemble of small neural networks, each
+trained on a bootstrap resample, whose disagreement provides epistemic
+uncertainty. It is a non-GP alternative for situations where the GP surrogates
+underperform.
 
 ## Surrogate
 
