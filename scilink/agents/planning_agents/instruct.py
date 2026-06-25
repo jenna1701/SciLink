@@ -353,6 +353,29 @@ The same surrogate is used for every objective — there is no per-output choice
 }
 """
 
+# Appended to the strategy-config prompt ONLY when a fidelity column is declared
+# (the fidelity_config data signal) — multi-fidelity is a baseline capability
+# surfaced like `mixed` is for categoricals, not a skill (issue #196).
+BO_MULTIFIDELITY_ADDENDUM = """
+
+**MULTI-FIDELITY (a fidelity column is declared in this campaign).**
+This problem has cheap approximate evaluations and expensive accurate ones,
+indexed by the fidelity column. Two extra options are available and should be
+preferred here:
+* SURROGATE `"single_task_multi_fidelity"`: models all fidelities jointly with a
+  linear-truncated fidelity kernel, sharing information from cheap data toward
+  the target fidelity. Prefer it over `single_task`. Caveat: low-fidelity data
+  only helps if correlated with the target — if LOO-CV residuals stratified by
+  fidelity show the cheap source is misleading, fall back to `single_task` fit
+  on target-fidelity data only.
+* ACQUISITION `"mf_kg"`: cost-aware multi-fidelity Knowledge Gradient. Use it
+  WITH `single_task_multi_fidelity`. It chooses both the input AND the fidelity
+  to evaluate next, spending cheap fidelities to learn early and the target
+  fidelity to confirm before declaring an optimum. Never spend final-shot
+  budget on a low fidelity. Treat the remaining budget as cost units, not raw
+  iteration count.
+"""
+
 BO_VISUAL_INSPECTION_PROMPT = """
 You are a Data Scientist validating a GP model and its optimization strategy.
 Analyze the 4-panel diagnostic dashboard.

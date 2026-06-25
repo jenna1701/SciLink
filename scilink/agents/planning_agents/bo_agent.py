@@ -15,6 +15,7 @@ from .bo_tools import get_optimizer
 from .instruct import (
     BO_CONFIG_SOO_PROMPT,
     BO_CONFIG_MOO_PROMPT,
+    BO_MULTIFIDELITY_ADDENDUM,
     BO_VISUAL_INSPECTION_PROMPT,
     BO_VISUAL_INSPECTION_MOO_PROMPT,
     BO_CONSTRAINED_BATCH_PROMPT,
@@ -238,7 +239,7 @@ class OptimizationAgent(BaseAgent):
         history.append(entry)
         with open(self.history_file, 'w') as f: json.dump(history, f, indent=2)
 
-    def _validate_config(self, config: Dict) -> Dict:
+    def _validate_config(self, config: Dict, fidelity_declared: bool = False) -> Dict:
         clean = config.copy()
         m_conf = clean.get("model_config", {})
         if m_conf.get("kernel") not in ["matern_2.5", "matern_1.5", "matern_0.5", "rbf"]:
@@ -250,11 +251,23 @@ class OptimizationAgent(BaseAgent):
         if m_conf.get("input_transform", "none") not in ["none", "warp"]:
             logging.warning(f"Invalid input_transform '{m_conf.get('input_transform')}', defaulting to 'none'")
             m_conf["input_transform"] = "none"
-        if m_conf.get("surrogate", "single_task") not in ["single_task", "mixed", "dkl"]:
+        # Multi-fidelity surrogate/acquisition are baseline but only valid when a
+        # fidelity column is declared (the fidelity_config data signal).
+        allowed_surrogates = ["single_task", "mixed", "dkl"]
+        if fidelity_declared:
+            allowed_surrogates.append("single_task_multi_fidelity")
+        if m_conf.get("surrogate", "single_task") not in allowed_surrogates:
             logging.warning(
                 f"Invalid surrogate '{m_conf.get('surrogate')}', defaulting to 'single_task'"
             )
             m_conf["surrogate"] = "single_task"
+        # `mf_kg` requires the multi-fidelity surrogate and a declared fidelity.
+        acq = clean.get("acquisition_strategy", {})
+        if acq.get("type") == "mf_kg" and not (
+            fidelity_declared and m_conf.get("surrogate") == "single_task_multi_fidelity"
+        ):
+            logging.warning("'mf_kg' requires single_task_multi_fidelity + a fidelity column; defaulting to 'log_ei'.")
+            acq["type"] = "log_ei"
         # Pairwise compatibility — warn but do not auto-substitute. Strategy LLM
         # is expected to obey the prompt; the runtime factory will silently fall
         # back where physically required (e.g., warp ignored under 'mixed').
@@ -819,11 +832,16 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                                budget_ctx: Dict[str, Any], input_cols: List[str],
                                cat_dims: Optional[List[int]],
                                physical_constraints: Optional[str],
-                               strategy_hint: Optional[str]) -> List:
+                               strategy_hint: Optional[str],
+                               fidelity_config: Optional[Dict[str, Any]] = None) -> List:
         """Assemble the strategy-configuration prompt (kernel / noise / surrogate
-        / acquisition selection). Baseline template + optional skill guidance for
-        the `surrogate` and `acquisition` sections."""
+        / acquisition selection). Baseline template + the multi-fidelity addendum
+        when a fidelity column is declared + optional skill guidance."""
         prompt_tmpl = BO_CONFIG_MOO_PROMPT if is_moo else BO_CONFIG_SOO_PROMPT
+        # Surface multi-fidelity options only when a fidelity column is declared
+        # (baseline capability, data-signal gated like `mixed`/cat_dims).
+        if fidelity_config and fidelity_config.get("fidelity_col") is not None:
+            prompt_tmpl = prompt_tmpl + BO_MULTIFIDELITY_ADDENDUM
         prompt_parts = [
             prompt_tmpl,
             f"Objective: {objective_text}",
@@ -940,6 +958,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                              fixed_noise_std: Optional[float] = None,
                              cat_dims: Optional[List[int]] = None,
                              dkl_config: Optional[Dict[str, int]] = None,
+                             fidelity_config: Optional[Dict[str, Any]] = None,
                              skill: Union[str, List[str], None] = None) -> Dict[str, Any]:
         """
         Run one iteration of the Bayesian Optimization loop.
@@ -1024,7 +1043,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             experimental_budget=experimental_budget,
             physical_constraints=physical_constraints, strategy_hint=strategy_hint,
             save_acq=save_acq, plot_acq=plot_acq, fixed_noise_std=fixed_noise_std,
-            cat_dims=cat_dims, dkl_config=dkl_config,
+            cat_dims=cat_dims, dkl_config=dkl_config, fidelity_config=fidelity_config,
             minimize_mask=[], constrained_metadata=None,
             acq_plot_path=None, acq_data_path=None,
         )
@@ -1142,6 +1161,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             batch_size=c.batch_size, trend_context=trend_context, df=c.df,
             budget_ctx=c.budget_ctx, input_cols=c.input_cols, cat_dims=c.cat_dims,
             physical_constraints=c.physical_constraints, strategy_hint=c.strategy_hint,
+            fidelity_config=c.fidelity_config,
         )
 
         print(f"  - 🤖 BO Agent: Configuring strategy (Batch={c.batch_size})...")
@@ -1150,7 +1170,8 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         if parse_error:
             return {"error": f"JSON Error: {parse_error}"}
 
-        valid_config = self._validate_config(raw_config)
+        fidelity_declared = bool(c.fidelity_config and c.fidelity_config.get("fidelity_col") is not None)
+        valid_config = self._validate_config(raw_config, fidelity_declared=fidelity_declared)
         valid_config["batch_size"] = int(c.batch_size)
 
         # Store current config in state
@@ -1187,6 +1208,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             fixed_noise_std=c.fixed_noise_std,
             cat_dims=c.cat_dims,
             dkl_config=c.dkl_config,
+            fidelity_config=c.fidelity_config,
         )
         if c.fixed_noise_std is not None:
             # Echo the override back into the config so downstream history /

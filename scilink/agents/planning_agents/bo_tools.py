@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 
 from botorch.models import SingleTaskGP, ModelListGP
 from botorch.models.gp_regression_mixed import MixedSingleTaskGP
+from botorch.models.gp_regression_fidelity import SingleTaskMultiFidelityGP
 from botorch.models.transforms import Standardize, Normalize
 from botorch.models.transforms.input import Warp, ChainedInputTransform
 from botorch.fit import fit_gpytorch_mll
@@ -42,7 +43,13 @@ ALLOWED_NOISE_PRIORS = {
 
 ALLOWED_INPUT_TRANSFORMS = {"none", "warp"}
 
-ALLOWED_SURROGATES = {"single_task", "mixed", "dkl"}
+# The agent's standard surrogate toolkit. ``single_task_multi_fidelity`` is a
+# baseline capability surfaced when a fidelity column is declared (the
+# fidelity_config data signal), exactly as ``mixed`` is surfaced by cat_dims —
+# not a skill (issue #196). Specialized non-standard methods (foreign-backend,
+# etc.) would arrive later behind the generic menu-gating hook, added when a
+# real Tier-2 case exists.
+ALLOWED_SURROGATES = {"single_task", "mixed", "dkl", "single_task_multi_fidelity"}
 
 
 def build_input_transform(key: str, input_dim: int) -> "ChainedInputTransform | Normalize":
@@ -219,6 +226,7 @@ def build_surrogate(
     fixed_noise_std: Optional[float],
     cat_dims: Optional[List[int]] = None,
     dkl_config: Optional[Dict[str, int]] = None,
+    fidelity_config: Optional[Dict[str, Any]] = None,
 ) -> SurrogateSpec:
     """Build a surrogate factory and matching fit function.
 
@@ -294,6 +302,47 @@ def build_surrogate(
                 supports_fixed_noise=False,
                 supports_warp=False,
                 needs_cat_dims=True,
+                supports_thompson=False,
+            ),
+        )
+
+    if key == "single_task_multi_fidelity":
+        # Baseline multi-fidelity surrogate, surfaced when a fidelity column is
+        # declared (like ``mixed`` for categoricals). Native BoTorch
+        # SingleTaskMultiFidelityGP with a linear-truncated fidelity kernel; the
+        # fidelity column index rides ``fidelity_config``.
+        sc = fidelity_config or {}
+        fidelity_col = sc.get("fidelity_col")
+        if fidelity_col is None:
+            raise ValueError(
+                "'single_task_multi_fidelity' requires skill_config['fidelity_col'] "
+                "(index of the fidelity input column)."
+            )
+        in_transform = Normalize(d=input_dim)
+
+        def factory(X, y):
+            kwargs = dict(
+                data_fidelities=[int(fidelity_col)],
+                outcome_transform=Standardize(m=1),
+                input_transform=in_transform,
+                linear_truncated=bool(sc.get("linear_truncated", True)),
+            )
+            if fixed_noise_std is not None:
+                kwargs["train_Yvar"] = torch.full_like(y, float(fixed_noise_std) ** 2)
+            else:
+                kwargs["likelihood"] = build_likelihood(noise)
+            return SingleTaskMultiFidelityGP(X, y, **kwargs)
+
+        return SurrogateSpec(
+            model_factory=factory,
+            fit_fn=lambda m: fit_gpytorch_mll(
+                SumMarginalLogLikelihood(m.likelihood, m) if hasattr(m, "models")
+                else ExactMarginalLogLikelihood(m.likelihood, m)
+            ),
+            capabilities=SurrogateCapabilities(
+                supports_fixed_noise=True,
+                supports_warp=False,
+                needs_cat_dims=False,
                 supports_thompson=False,
             ),
         )
@@ -380,7 +429,8 @@ class SingleObjectiveOptimizer:
             model_config: Dict[str, str], feature_names: List[str] = None,
             fixed_noise_std: Optional[float] = None,
             cat_dims: Optional[List[int]] = None,
-            dkl_config: Optional[Dict[str, int]] = None):
+            dkl_config: Optional[Dict[str, int]] = None,
+            fidelity_config: Optional[Dict[str, Any]] = None):
         """Fits the surrogate selected by ``model_config['surrogate']``.
 
         Default surrogate is ``"single_task"`` (vanilla SingleTaskGP). ``"mixed"``
@@ -408,7 +458,9 @@ class SingleObjectiveOptimizer:
             fixed_noise_std=fixed_noise_std,
             cat_dims=cat_dims,
             dkl_config=dkl_config,
+            fidelity_config=fidelity_config,
         )
+        self.fidelity_config = fidelity_config or {}
         self.model = spec.model_factory(self.X_train, self.y_train)
         spec.fit_fn(self.model)
         self.mll = ExactMarginalLogLikelihood(self.model.likelihood, self.model)
@@ -426,6 +478,10 @@ class SingleObjectiveOptimizer:
         params = params or {}
         
         self.acq_strategy_name = strategy
+
+        # --- 0. Cost-aware Multi-Fidelity Knowledge Gradient (Tier-2 skill) ---
+        if strategy == 'mf_kg':
+            return self._recommend_mf_kg(n_candidates, params)
 
         # --- 1. Thompson Sampling (High Throughput / Diversity) ---
         if strategy == 'thompson':
@@ -472,6 +528,69 @@ class SingleObjectiveOptimizer:
             sequential=use_sequential
         )
         return candidates.detach().cpu().numpy()
+
+    def _recommend_mf_kg(self, n_candidates: int, params: Dict[str, float]) -> np.ndarray:
+        """Cost-aware multi-fidelity Knowledge Gradient (Tier-2, bo_multi_fidelity
+        skill). Chooses BOTH the input and the fidelity to evaluate next, trading
+        information gain against per-fidelity cost. Reads from skill_config:
+        ``fidelity_col`` (required), ``fidelity_costs`` (optional), and
+        ``target_fidelity`` (default = highest observed fidelity)."""
+        from botorch.acquisition.knowledge_gradient import qMultiFidelityKnowledgeGradient
+        from botorch.acquisition.cost_aware import InverseCostWeightedUtility
+        from botorch.models.cost import AffineFidelityCostModel
+        from botorch.acquisition.utils import project_to_target_fidelity
+        from botorch.acquisition import PosteriorMean
+        from botorch.acquisition.fixed_feature import FixedFeatureAcquisitionFunction
+
+        sc = self.fidelity_config or {}
+        fid_col = sc.get("fidelity_col")
+        if fid_col is None:
+            raise RuntimeError("mf_kg acquisition requires fidelity_config['fidelity_col'].")
+        fid_col = int(fid_col)
+        levels = sorted({float(v) for v in self.X_train[:, fid_col].detach().cpu().numpy()})
+        target_fid = float(sc.get("target_fidelity", max(levels)))
+        fixed_cost = float(sc.get("fixed_cost", 5.0))
+
+        target_fidelities = {fid_col: target_fid}
+        cost_model = AffineFidelityCostModel(fidelity_weights={fid_col: 1.0}, fixed_cost=fixed_cost)
+        cost_aware_utility = InverseCostWeightedUtility(cost_model=cost_model)
+
+        def project(X):
+            return project_to_target_fidelity(X=X, target_fidelities=target_fidelities,
+                                              d=self.input_dim)
+
+        # Current best posterior-mean value at the target fidelity (KG baseline).
+        curr_acqf = FixedFeatureAcquisitionFunction(
+            acq_function=PosteriorMean(self.model),
+            d=self.input_dim, columns=[fid_col], values=[target_fid],
+        )
+        non_fid_cols = [i for i in range(self.input_dim) if i != fid_col]
+        _, current_value = optimize_acqf(
+            acq_function=curr_acqf, bounds=self.bounds[:, non_fid_cols], q=1,
+            num_restarts=10, raw_samples=512,
+        )
+
+        mfkg = qMultiFidelityKnowledgeGradient(
+            model=self.model, num_fantasies=int(sc.get("num_fantasies", 32)),
+            current_value=current_value, cost_aware_utility=cost_aware_utility,
+            project=project,
+        )
+        # One-shot KG is not a pointwise acquisition (it needs q > num_fantasies),
+        # so it cannot be grid-evaluated for plotting/saving — leave acq_func None
+        # like thompson, so the diagnostics stage skips the acquisition panel.
+        self.acq_func = None
+        # optimize_acqf handles the one-shot KG fantasy augmentation internally
+        # (gen_one_shot_kg_initial_conditions). Fidelity is optimized continuously
+        # in-bounds, then snapped to the nearest observed discrete level.
+        candidates, _ = optimize_acqf(
+            acq_function=mfkg, bounds=self.bounds, q=n_candidates,
+            num_restarts=5, raw_samples=128,
+        )
+        cand = candidates.detach().cpu().numpy()
+        if levels:
+            for r in range(cand.shape[0]):
+                cand[r, fid_col] = min(levels, key=lambda L: abs(L - cand[r, fid_col]))
+        return cand
 
     # ------------------------------------------------------------------ #
     #  Acquisition function evaluation (for constrained batch planning)
@@ -1125,7 +1244,8 @@ class MultiObjectiveOptimizer:
             model_config: Dict[str, str], feature_names: List[str] = None,
             fixed_noise_std: Optional[float] = None,
             cat_dims: Optional[List[int]] = None,
-            dkl_config: Optional[Dict[str, int]] = None):
+            dkl_config: Optional[Dict[str, int]] = None,
+            fidelity_config: Optional[Dict[str, Any]] = None):
         """Fits independent surrogates per objective and wraps them in a
         ModelListGP. Same surrogate kind is used for every objective.
         """
