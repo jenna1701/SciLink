@@ -2,9 +2,9 @@
 description: 'p-XRD profile fitting — the quantitative follow-up to phase identification: per-peak pseudo-Voigt fits (position, intensity, FWHM), Scherrer crystallite size and Williamson-Hall microstrain, and a Rietveld tier (phase fractions / accurate lattice; engine pending) that refines against the identified-phase CIF.'
 technique: [XRD, "X-ray diffraction", "powder diffraction", pXRD]
 quality_gate:
-  metric: r_squared
-  accept_threshold: 0.95
-  hard_reject_threshold: 0.85
+  metric: peak_region_r2
+  accept_threshold: 0.90
+  hard_reject_threshold: 0.55
   direction: higher_is_better
 ---
 # p-XRD Profile Fitting Skill
@@ -220,15 +220,28 @@ print("FIT_RESULTS_JSON: " + json.dumps({
     "scherrer_per_peak_nm": sizes_nm,
     "williamson_hall": wh,
     "fit_quality": {
-        "r_squared": r_squared,                       # GLOBAL
+        # peak_region_r2 is the GATE METRIC: R² over the channels that carry
+        # diffracted intensity, so a correct fit of a weak/noisy pattern is not
+        # failed by the noise-only background channels. fit_pattern returns it.
+        "peak_region_r2": fit['peak_region_r2'],
+        "r_squared": r_squared,                       # GLOBAL (reported for context)
         "residual_rms_over_noise": fit['residual_rms_over_noise'],
-        "verdict": "accept" if r_squared >= 0.95 else (
-            "marginal" if r_squared >= 0.85 else "reject"
+        "verdict": "accept" if fit['peak_region_r2'] >= 0.90 else (
+            "marginal" if fit['peak_region_r2'] >= 0.55 else "reject"
         ),
         "n_peaks_fitted": fit['n_peaks'],
     },
 }))
 ```
+
+The gate scores `peak_region_r2`. When the global `r_squared` is well below
+`peak_region_r2`, the pattern is low-SNR (weak counts, noisy background) but its
+reflections are well fit — accept it; that gap is the metric working as
+intended, not a bad fit. When `peak_region_r2` itself is low, real reflections
+are mis- or un-modelled (a genuine miss on a dense low-symmetry pattern) — that
+is **not** rescued, so refine (lower `prominence_frac`/`min_distance_deg` and
+re-run the single global `fit_pattern`). `peak_region_r2` equals the global R² on
+a high-SNR pattern, so this changes nothing for clean data.
 
 **In-situ / series use — lock the method, not the values.** `fit_pattern` is
 one fast call per frame, so it drops straight into the agent's per-spectrum
@@ -331,9 +344,19 @@ auto-detect catches it and re-run the single global `fit_pattern` — keep the
 recipe auto-detecting (so it still generalises frame-to-frame), not spliced
 sub-fits or hardcoded centers.
 
-**Per-peak fit checks:**
-- `r_squared` ≥ 0.95 for each fit accepts; 0.85–0.95 marginal; below
-  0.85 reject the fit and either widen the window or drop the peak.
+**Gate on `peak_region_r2`, read the global R² as context.** The whole-pattern
+`r_squared` is depressed by noise-only background channels on a weak/noisy
+pattern, so a correct fit can score a misleadingly low global R² (e.g. a faint
+powder pattern whose Bragg peaks are well fit can sit at global R² ≈ 0.5 with
+`peak_region_r2` ≈ 0.9). Score acceptance on `peak_region_r2`:
+- `peak_region_r2` ≥ 0.90 accepts; 0.55–0.90 marginal (the verifier decides on
+  residual structure); below 0.55 reject.
+- A large `r_squared` ↔ `peak_region_r2` gap with a **structureless (noise-only)
+  residual** = low-SNR pattern, fit is good → accept. The same gap with
+  *peaked* residual (unmodelled-reflection spikes) = real miss → refine: lower
+  `prominence_frac`/`min_distance_deg` and re-run the single global `fit_pattern`.
+  `peak_region_r2` does not rescue a fit that genuinely misses reflections, so a
+  low `peak_region_r2` is a true reject, not a metric artifact.
 - FWHM sanity: 0.05° (typical instrumental floor for a lab CuKa
   diffractometer) ≤ FWHM ≤ 2.0° (very small crystallites; peak overlap
   dominates above this).

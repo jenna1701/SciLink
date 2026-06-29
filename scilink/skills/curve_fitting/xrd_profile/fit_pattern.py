@@ -35,6 +35,7 @@ from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 
 from ..._shared._spec import ToolSpec
+from ..._shared._quality_metrics import peak_region_r2
 from .background import fit_background
 
 _logger = logging.getLogger(__name__)
@@ -81,8 +82,13 @@ TOOL_SPEC = ToolSpec(
     required=["exp_two_theta", "exp_intensity"],
     returns=(
         "dict with 'r_squared' (GLOBAL, over the whole corrected pattern), "
-        "'residual_rms_over_noise' (global residual RMS / estimated point "
-        "noise — the verifier's key statistic; < ~3 is clean), 'n_peaks', "
+        "'peak_region_r2' (R² over only the channels carrying diffracted "
+        "intensity — report this as the gate metric; a low global R² with a high "
+        "peak_region_r2 means a low-SNR pattern whose peaks are well fit, while a "
+        "low peak_region_r2 means real reflections are mis/un-fit), "
+        "'n_signal_points', 'residual_rms_over_noise' (global residual RMS / "
+        "estimated point noise — the verifier's key statistic; < ~3 is clean), "
+        "'n_peaks', "
         "'peaks' (list of dicts: center, fwhm (mean width; for Scherrer/W-H), "
         "amplitude (height), area, eta, sorted by 2-theta; split mode adds "
         "fwhm_left, fwhm_right, and asymmetry=(fwhm_right-fwhm_left)/sum), "
@@ -340,6 +346,12 @@ def _fit_corrected(
     ss_tot = float(np.sum((ycorr - ycorr.mean()) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
     rms_over_noise = float(np.sqrt(np.mean(resid ** 2)) / noise)
+    # Peak-region R²: R² over the channels carrying diffracted intensity, so a
+    # correct fit of a weak/noisy pattern is not scored down by the noise-only
+    # background channels (global R² is kept too). The corrected pattern is fit
+    # about zero, so the baseline is zero. Equals the global R² on a high-SNR
+    # pattern and does NOT rescue a fit that misses real reflections.
+    region = peak_region_r2(x, ycorr, fit_curve, baseline=np.zeros_like(ycorr))
 
     stride = 5 if split else 4
     peaks = []
@@ -366,6 +378,8 @@ def _fit_corrected(
 
     return {
         "r_squared": float(r2),
+        "peak_region_r2": float(region["peak_region_r2"]),
+        "n_signal_points": int(region["n_signal_points"]),
         "residual_rms_over_noise": rms_over_noise,
         "n_peaks": len(centers),
         "peaks": peaks,
