@@ -68,6 +68,32 @@ known, proceed standalone.
 points below shape *that* fit — how many peaks matter, when Williamson-Hall
 is admissible, which background — rather than a peak-by-peak procedure.
 
+**Exclude a corrupting low-angle upturn — without clipping a real reflection.**
+Lab patterns often have a steep air-scatter / beamstop rise in the first few
+degrees. It is *not* diffraction, and it breaks the fit two ways: SNIP
+background overshoots on the steep edge, and the inflated intensity range
+starves prominence-based detection — the tell is `fit_pattern` returning only
+1–2 peaks with a deceptively high R² on a near-empty fit. When you see that
+rise, pass `fit_range=(lo, hi)` to exclude only the climb; excluded channels are
+dropped from background, detection, and the fit but returned as matched, so the
+residual diagnostics still work.
+
+The hazard is over-cropping: genuine low-angle Bragg peaks are common (layered
+materials, clays, MOFs, surfactants, many molecular/pharmaceutical crystals with
+large d-spacings) and live in the same first few degrees. The upturn is a
+**smooth, monotonic, featureless** decay; a Bragg reflection is a **distinct
+peak** sitting on it. So **do not use a fixed cutoff like 5°** — look at the
+low-angle data and set `lo` *just below the lowest genuine peak*, cutting only
+the featureless part of the climb. If a sharp peak rides partway up the upturn,
+keep it (lower `lo`, or don't crop). When you cannot tell a low-angle feature
+from the climb, **include it** — leaving a little upturn in costs a slightly
+worse background fit; clipping a real reflection corrupts the science. After
+fitting, sanity-check the lower bound: re-run once with `lo` a couple of degrees
+lower and confirm no new strong reflection appears in the widened window (if one
+does, it was real — keep the wider window). The same knob (with the same caution)
+excludes a detector artifact or a known contaminant region. For a series, set one
+window on the establishing frame and reuse it on every frame.
+
 **How many peaks to fit:**
 - Scherrer alone: 3–5 strongest, well-isolated peaks is enough — report
   size per peak and the mean.
@@ -234,14 +260,17 @@ print("FIT_RESULTS_JSON: " + json.dumps({
 }))
 ```
 
-The gate scores `peak_region_r2`. When the global `r_squared` is well below
-`peak_region_r2`, the pattern is low-SNR (weak counts, noisy background) but its
-reflections are well fit — accept it; that gap is the metric working as
-intended, not a bad fit. When `peak_region_r2` itself is low, real reflections
-are mis- or un-modelled (a genuine miss on a dense low-symmetry pattern) — that
-is **not** rescued, so refine (lower `prominence_frac`/`min_distance_deg` and
-re-run the single global `fit_pattern`). `peak_region_r2` equals the global R² on
-a high-SNR pattern, so this changes nothing for clean data.
+The gate scores `peak_region_r2`. A large global-`r_squared` ↔ `peak_region_r2`
+gap is **only** a benign low-SNR artifact when you have *verified* both that the
+pattern is genuinely low-SNR (weak counts over a noisy background) **and** that
+the residual in the gap regions is structureless (noise-only). Do not assume the
+gap is benign: on a high-SNR pattern a low global `r_squared` should be presumed
+a **real** problem (a missed reflection or a mis-shaped peak) until the residual
+is checked and found featureless. Conversely, when `peak_region_r2` itself is low,
+real reflections are mis- or un-modelled — that is **not** rescued, so refine
+(lower `prominence_frac`/`min_distance_deg` and re-run the single global
+`fit_pattern`). `peak_region_r2` equals the global R² on a high-SNR pattern, so
+on clean data there is no gap to explain.
 
 **In-situ / series use — lock the method, not the values.** `fit_pattern` is
 one fast call per frame, so it drops straight into the agent's per-spectrum

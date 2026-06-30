@@ -90,6 +90,49 @@ def test_fit_pattern_reports_peak_region_r2():
     assert 0.0 <= res["peak_region_r2"] <= 1.0
 
 
+def test_fit_range_contract():
+    """fit_range restricts detection/background/fit to a window, finds the in-window
+    peaks, and returns FULL-length arrays with the excluded region at zero residual
+    (so the verifier's length-N residual diagnostics still run). The real-data
+    recovery (low-angle upturn: 1 -> 20 peaks on the RRUFF/IBD series) is validated
+    in the benchmark; SNIP's exact overshoot is not reliably reproducible in a unit
+    synthetic, so here we assert the mechanical contract."""
+    from scilink.skills.curve_fitting.xrd_profile.fit_pattern import fit_pattern
+    x = np.linspace(2.0, 45.0, 4300)
+    y = np.full_like(x, 500.0)
+    for c, a in [(11.0, 8000), (17.0, 3000), (22.0, 9000), (29.0, 2000), (36.0, 1500)]:
+        y += a * (0.05 ** 2) / ((x - c) ** 2 + 0.05 ** 2)
+    y += 5e5 * np.exp(-(x - 2.0) * 3.0)   # non-Bragg low-angle upturn below ~4 deg
+
+    ranged = fit_pattern(x.tolist(), y.tolist(), fit_range=(5.0, 45.0))
+    assert ranged["n_peaks"] >= 5                       # finds the 5 in-window peaks
+    # full-length arrays preserved (residual-diagnostic length contract)
+    assert len(ranged["fit_curve"]) == x.size
+    assert len(ranged["intensity_corrected"]) == x.size
+    # excluded region is matched -> zero residual on raw-scale reconstruction
+    fc = np.asarray(ranged["fit_curve"]); ic = np.asarray(ranged["intensity_corrected"])
+    fit_raw = fc + (y - ic)
+    excl = x < 5.0
+    assert np.max(np.abs(y[excl] - fit_raw[excl])) < 1e-6
+    assert ranged["fit_range"] == [5.0, 45.0]
+    # scores reflect the window only and the in-window fit is good
+    assert ranged["peak_region_r2"] > 0.9
+
+
+def test_fit_range_none_is_default_behavior():
+    """fit_range=None must be byte-identical to omitting it (no regression)."""
+    from scilink.skills.curve_fitting.xrd_profile.fit_pattern import fit_pattern
+    x = np.linspace(10.0, 60.0, 2500)
+    y = np.full_like(x, 100.0)
+    for c in (20.0, 30.0, 45.0):
+        y += 2000 * (0.1 ** 2) / ((x - c) ** 2 + 0.1 ** 2)
+    a = fit_pattern(x.tolist(), y.tolist())
+    b = fit_pattern(x.tolist(), y.tolist(), fit_range=None)
+    assert a["n_peaks"] == b["n_peaks"]
+    assert a["r_squared"] == pytest.approx(b["r_squared"])
+    assert "fit_range" not in a  # only present when a window was applied
+
+
 def test_frontmatter_gate_is_peak_region_r2():
     md = Path("scilink/skills/curve_fitting/xrd_profile/xrd_profile.md").read_text()
     fm = yaml.safe_load(md.split("---")[1])
