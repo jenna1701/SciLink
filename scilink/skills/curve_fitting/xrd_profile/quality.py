@@ -67,5 +67,3 @@ TOOL_SPEC = ToolSpec(
         "fit; a low peak-region R² means real reflections are mis- or un-fit."
     ),
 )
-
-TOOL_SPECS = [TOOL_SPEC]

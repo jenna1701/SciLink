@@ -166,6 +166,31 @@ engine is wired, do not attempt a whole-pattern refine with the kinematic
 tools** — report tiers 1–2 and recommend Rietveld as the explicit next step,
 naming the matched CIF as the model to refine.
 
+*Refinement order (engine-pending — the protocol for when `refine_rietveld`
+exists; do not apply it to the tier-1/2 empirical `fit_pattern`, which has no
+such refinement groups).* A manual Rietveld runs in a set order, and that order
+is most of the skill: the logic is identical in GSAS-II or TOPAS, only the
+parameter names differ. **Nothing is freed all at once** — refine one group at a
+time, holding everything else at its current value and carrying the converged
+values forward; freeing everything together tends to diverge or settle in a
+false minimum on overlap-heavy data. The order:
+1. **Scale + background** first — just to get the calculated curve roughly onto
+   the observed one.
+2. **Sample/setup group** (the parameters with no "correct" value to look up —
+   they are whatever the packing and alignment produced that day): zero-shift /
+   sample displacement for peak positions, the profile terms for width and
+   shape, and preferred orientation if the intensities are off.
+3. **Structural group** (a separate bucket, anchored by the published CIF for a
+   known phase): the cell refines only a little for a fixed phase at fixed
+   conditions; atomic coordinates and occupancies stay fixed unless the data
+   really justify touching them.
+
+The step-2 corrections are exactly the ones that quietly absorb error from
+elsewhere and still produce a clean Rwp — judge each by the sample-and-mounting
+priors in **validation** (a large displacement or preferred-orientation or
+lattice change is suspect unless the sample/mounting/conditions make it real),
+not by the fit statistic.
+
 ## implementation
 
 **Default path: one global fit with `fit_pattern`.** Prefer `fit_pattern`
@@ -439,3 +464,21 @@ powder pattern whose Bragg peaks are well fit can sit at global R² ≈ 0.5 with
   resolution-limited. Report "size below sensitivity limit
   (~ Scherrer with β = instrumental)" rather than NaN or a complex
   number.
+
+**Sample-and-mounting priors — the fit statistic can't tell you these, the
+sample does.** The corrections that absorb position/intensity error (sample
+displacement, preferred orientation, and a refined lattice) will quietly soak up
+error from elsewhere and still leave a clean R²/Rwp, so a good fit statistic does
+*not* mean the correction is real. Judge each against what the sample is and how
+it was mounted, not against the fit:
+- **Sample displacement / zero-shift:** ~0 on a properly seated zero-background
+  holder. A large fitted displacement points to a misaligned sample, not a
+  correction worth trusting — flag it rather than reporting it as physical.
+- **Preferred orientation / intensity mismatch:** on a loosely packed random
+  powder there should be little texture, so a large PO correction usually means
+  something *else* is wrong (it is absorbing error); on a flat plate of platy or
+  needle crystals the texture is real and a correction along the right axis is
+  legitimate. Use the known morphology/mounting to decide which case you are in.
+- **Lattice change:** for a fixed phase at fixed conditions the cell should move
+  only a little; a large shift is suspect — *except* in a variable-temperature /
+  in-situ run, where the cell genuinely moves and tracking it is the point.
