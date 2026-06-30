@@ -131,6 +131,38 @@ def _auxiliary_display_items(state: dict) -> list:
     return [it for it in (state.get("auxiliary_items") or []) if it.get("plot_bytes")]
 
 
+def _resample_ref_to_signal_axis(arr, ref_axis, energy_axis, e_):
+    """Resample a 1D reference sampled on its OWN axis onto the data's signal
+    (energy) axis, so it can serve as a per-channel codegen operand.
+
+    Returns the resampled length-``e_`` array, or ``None`` when resampling is
+    not warranted — i.e. the reference is not a 1D curve carrying its own axis,
+    the signal axis is unknown/degenerate, or the two axes don't overlap (so
+    they plausibly describe different quantities and interpolation would
+    fabricate values rather than align them). Only the previously-dropped
+    misaligned case is affected; aligned operands never reach here.
+    """
+    if ref_axis is None or arr is None:
+        return None
+    arr = np.asarray(arr, dtype=float)
+    ref_axis = np.asarray(ref_axis, dtype=float)
+    if arr.ndim != 1 or ref_axis.shape != arr.shape:
+        return None
+    # Need a real, length-matched signal axis to resample onto (not the
+    # channel-index fallback shape).
+    if energy_axis is None or np.asarray(energy_axis).shape != (e_,):
+        return None
+    energy_axis = np.asarray(energy_axis, dtype=float)
+    order = np.argsort(ref_axis)
+    ra, rv = ref_axis[order], arr[order]
+    # Require axis overlap — guards against interpolating, say, a keV table
+    # onto a channel-index axis (no shared range => not the same quantity).
+    lo, hi = max(ra.min(), float(energy_axis.min())), min(ra.max(), float(energy_axis.max()))
+    if not (hi > lo):
+        return None
+    return np.interp(energy_axis, ra, rv)
+
+
 def _append_auxiliary_context(prompt: list, state: dict) -> None:
     """Append auxiliary reference dataset(s) to an LLM prompt if available."""
     items = _auxiliary_display_items(state)
@@ -1880,10 +1912,16 @@ class RunDynamicAnalysisController:
         # Offer shape-aligned auxiliary dataset(s) as OPTIONAL numerical operands
         # (issue #226): the user-supplied companions (reference/baseline/other
         # channels) the generated code MAY divide by / subtract / mask with,
-        # keyed by label. Each is kept context-only (NOT an operand) when it can't
-        # be aligned to the primary — v1 does no resampling. Raw `data` stays base.
+        # keyed by label. Aligned companions pass through as index-matched
+        # operands. A 1D reference sampled on its OWN axis (e.g. a tabulated
+        # cross-section / attenuation / standard pulled from a database, never
+        # on the detector's grid) is resampled onto the signal axis here so it
+        # becomes a per-channel operand instead of being dropped — the operand
+        # stays index-aligned, so the codegen contract is unchanged. Anything
+        # still unalignable is kept context-only. Raw `data` stays base.
         auxiliary_operands = {}
         h_, w_, e_ = optimal_data.shape
+        energy_axis = np.asarray(state.get("energy_axis")) if state.get("energy_axis") is not None else None
         for it in (state.get("auxiliary_items") or []):
             arr = it.get("array")
             if arr is None:
@@ -1895,11 +1933,21 @@ class RunDynamicAnalysisController:
                 or (arr.ndim == 2 and arr.shape == (h_, w_))      # per-pixel map (mask/normalize)
                 or (arr.shape == optimal_data.shape)              # full companion cube
             )
+            resampled = (
+                None if aligned
+                else _resample_ref_to_signal_axis(arr, it.get("axis"), energy_axis, e_)
+            )
             if aligned:
                 auxiliary_operands[label] = arr
                 self.logger.info(
                     f"🧩 Offering auxiliary '{label}' {arr.shape} as an optional "
                     f"codegen operand."
+                )
+            elif resampled is not None:
+                auxiliary_operands[label] = resampled
+                self.logger.info(
+                    f"🧩 Auxiliary '{label}' ({arr.shape[0]} pts on its own axis) "
+                    f"resampled onto the {e_}-channel signal axis as an operand."
                 )
             else:
                 self.logger.info(
