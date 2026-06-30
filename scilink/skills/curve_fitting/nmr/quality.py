@@ -47,12 +47,25 @@ TOOL_SPEC = ToolSpec(
         "dilate": {"type": "int", "description": "Points to grow the signal mask on each side, to include peak wings (default 5). Increase for broad lines so the wings are scored; decrease for very sharp lines."},
         "model_frac": {"type": "float", "description": "Also count points where the fitted model exceeds this fraction of its own max as signal (default 0.02) — so the metric scores where the model claims peaks even if data there is weak."},
         "min_points": {"type": "int", "description": "If fewer than this many signal points are found, fall back to the global R² (default 15) — guards the metric when there is essentially no signal."},
+        "struct_apex_frac": {"type": "float", "description": "Threshold on apex_resid_frac (largest residual as a fraction of peak height) for the residual_structured flag (default 0.15 = a ≥15% apex miss). The raw value is always returned; raise it to flag only gross misfits, lower it to be stricter."},
+        "struct_autocorr": {"type": "float", "description": "Threshold on lag-1 residual autocorrelation for residual_structured (default 0.9) — near 1 means a systematic (non-random) residual rather than noise."},
     },
     required=["x", "y", "y_fit"],
     returns=(
         "dict with 'peak_region_r2', global 'r_squared', 'n_signal_points', "
-        "and 'fell_back_to_global'. Put 'peak_region_r2' (and 'r_squared') into "
-        "the fit_quality block of FIT_RESULTS_JSON."
+        "'fell_back_to_global', and residual-structure diagnostics over the "
+        "signal region. Judge fit adequacy by the SIGNAL-RELATIVE quantities — "
+        "'apex_resid_frac' (largest residual / peak height) and 'resid_rms_frac' "
+        "(RMS residual / peak height) — together with 'resid_autocorr_lag1'. "
+        "NOTE: 'apex_resid_over_noise' and 'frac_resid_gt_3sigma' are "
+        "NOISE-relative and are therefore large even for a PERFECT fit of a "
+        "high-SNR peak (e.g. ~0.8 of points exceed 3σ on a clean line) — do not "
+        "read them as misfit on their own. 'residual_structured' (boolean) = "
+        "systematic (autocorr high) AND severe at the apex (apex_resid_frac "
+        "above threshold). Put 'peak_region_r2' and 'r_squared' into the "
+        "fit_quality block; if 'residual_structured' is True the fit has the "
+        "wrong MODEL where the signal is — escalate (see the skill), don't accept "
+        "it on R² alone."
     ),
     when_to_use=(
         "Always, as the final quality step of an NMR fit — the skill's quality "
