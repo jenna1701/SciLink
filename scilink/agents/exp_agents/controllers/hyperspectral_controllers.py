@@ -163,6 +163,53 @@ def _resample_ref_to_signal_axis(arr, ref_axis, energy_axis, e_):
     return np.interp(energy_axis, ra, rv)
 
 
+def _codegen_retry_feedback(failures: int, critique: str) -> str:
+    """Annealed retry guidance for the per-pixel code-gen loop.
+
+    Flat retries (re-prompt at the same setting with "fix the math") cannot
+    escape a wrong-but-self-consistent method — they re-sample the same basin.
+    So the guidance *anneals*: early failures patch the logic, repeated
+    failures push the model to question and then ABANDON the method for a
+    structurally different estimator. "Temperature" here is the prompt's
+    structural freedom — modern Claude/Bedrock models omit the sampling
+    temperature, so escalation is expressed in the instruction, not the knob.
+    The escape-hatch families are generic to per-pixel quantitative extraction,
+    so this helps any struggling analysis, not one technique.
+    """
+    block = [
+        "\n\n### ❌ PREVIOUS ATTEMPT FAILED",
+        f"Critique:\n```text\n{critique}\n```",
+    ]
+    if failures <= 1:
+        block.append("Fix the logic/math to address this critique.")
+    elif failures == 2:
+        block.append(
+            "This is the SECOND failure with the same approach — stop tweaking "
+            "parameters and question the METHOD itself. A common cause of a "
+            "non-physical or mostly-masked quantitative map is a fit performed "
+            "across the FULL measurement axis: channels that violate the model "
+            "(signal saturation, heavy absorption / near-zero transmission, low "
+            "SNR, near-zero reference) bias a global fit. Restrict the extraction "
+            "to the informative sub-range, or use a measure insensitive to those "
+            "channels."
+        )
+    else:
+        block.append(
+            "The current APPROACH has failed repeatedly. Do NOT patch it again — "
+            "ABANDON it and choose a STRUCTURALLY DIFFERENT estimator. If your "
+            "previous attempts fit a model across the whole measurement axis, "
+            "switch families: (a) restrict the fit to a narrow, informative "
+            "window around the diagnostic feature instead of the full axis; "
+            "(b) use a DIFFERENTIAL measure (difference of the signal just across "
+            "the feature/edge) that cancels smooth backgrounds and is feature-"
+            "specific; or (c) use a ROBUST estimator that down-weights saturated "
+            "or outlier channels. Negative / NaN / mostly-masked outputs are "
+            "strong evidence the global model is biased — change families, do not "
+            "re-fit the same way."
+        )
+    return "\n".join(block)
+
+
 def _append_auxiliary_context(prompt: list, state: dict) -> None:
     """Append auxiliary reference dataset(s) to an LLM prompt if available."""
     items = _auxiliary_display_items(state)
@@ -2011,6 +2058,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             current_prompt = base_prompt
             retries = 0
             task_success = False
+            best_attempt = {"req_passed": -1, "valid_count": -1,
+                            "images": [], "maps": [], "meta": []}
 
             while retries < self.MAX_RETRIES:
                 try:
@@ -2106,7 +2155,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             # 3. Visual QC (Generator-Judge Loop)
                             self.logger.info(f"    👀 Performing Visual QC on {feature_name}...")
                             is_valid, critique = self._check_result_visually(dashboard_bytes, f"{target_desc} ({feature_name})")
-                            
+
                             if is_valid:
                                 # STAGE DATA (Do not commit to state yet)
                                 current_run_valid_images.append({
@@ -2138,6 +2187,22 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     # the partial-success threshold never silently drops the
                     # user-asked-for quantity.
                     valid_names = {m['name'] for m in current_run_valid_meta}
+
+                    # Track the strongest attempt so an UNSATISFIABLE required
+                    # output (e.g. a QC criterion a valid result can never meet)
+                    # doesn't discard the recoverable maps this attempt produced.
+                    # Ranked by (#required passed, #maps passed); committed as a
+                    # self-consistent partial result only if every attempt fails.
+                    n_req_passed = sum(1 for n in required_outputs if n in valid_names)
+                    if (n_req_passed, valid_count) > (best_attempt["req_passed"], best_attempt["valid_count"]):
+                        best_attempt = {
+                            "req_passed": n_req_passed,
+                            "valid_count": valid_count,
+                            "images": list(current_run_valid_images),
+                            "maps": list(current_run_valid_maps),
+                            "meta": list(current_run_valid_meta),
+                        }
+
                     missing_required = [n for n in required_outputs if n not in valid_names]
                     if missing_required:
                         relevant_critiques = [
@@ -2186,10 +2251,35 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     
                     self.logger.warning(f"    ❌ Attempt {retries+1} failed: {error_msg}")
                     retries += 1
-                    current_prompt = base_prompt + f"\n\n### ❌ PREVIOUS ATTEMPT FAILED\nCritique:\n```text\n{error_msg}\n```\nFix the logic/math to address this critique."
+                    # Annealed retry: escalate from "patch the math" to "abandon
+                    # the method" as failures accumulate, so retries can leave a
+                    # wrong-but-self-consistent method basin instead of resampling
+                    # it. See _codegen_retry_feedback.
+                    current_prompt = base_prompt + _codegen_retry_feedback(retries, error_msg)
+                    if retries >= 2:
+                        self.logger.info(
+                            f"    ↻ Retry annealing engaged (failure {retries}): "
+                            "escalating from parameter-patch toward method-change."
+                        )
 
             if not task_success:
                 self.logger.error(f"    ⚠️ Task {i} failed after {self.MAX_RETRIES} attempts.")
+                # Salvage the strongest attempt rather than discarding all work:
+                # commit its passing maps so a recoverable output survives an
+                # unsatisfiable required one. The required-output failure is still
+                # surfaced (the task did not cleanly succeed).
+                if best_attempt["valid_count"] > 0:
+                    self.logger.warning(
+                        f"    ⛑️  Committing best partial attempt "
+                        f"({best_attempt['req_passed']}/{len(required_outputs)} required "
+                        f"outputs, {best_attempt['valid_count']} map(s) passed QC); some "
+                        f"required output(s) never passed."
+                    )
+                    for img_item in best_attempt["images"]:
+                        tools.save_image_bytes(img_item['data'], output_dir, img_item['filename'], self.logger)
+                        state.setdefault("analysis_images", []).append(img_item)
+                    all_valid_maps.extend(best_attempt["maps"])
+                    all_valid_meta.extend(best_attempt["meta"])
 
         # --- FINAL AGGREGATION ---
         if not all_valid_maps:
