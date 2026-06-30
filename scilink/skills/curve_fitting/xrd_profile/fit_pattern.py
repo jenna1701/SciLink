@@ -103,8 +103,11 @@ TOOL_SPEC = ToolSpec(
         "fwhm_left, fwhm_right, and asymmetry=(fwhm_right-fwhm_left)/sum), "
         "'peak_centers' (the centers actually fit — feed back as the locked "
         "list for the next series frame); when fit_range was used, 'fit_range' "
-        "(the kept window); 'intensity_corrected', 'fit_curve' "
-        "(model evaluated on the full grid; use for the visualization), "
+        "(the kept window); 'intensity_corrected', 'fit_curve' (model on the "
+        "BACKGROUND-SUBTRACTED scale), 'fit_curve_raw' (model on the RAW scale = "
+        "fit_curve + background; SAVE THIS as the fit overlay / fit.npy so it "
+        "matches the raw data — do NOT save fit_curve, which plotted against raw "
+        "data makes a good fit look collapsed when the background is large), "
         "'background_method', 'peak_shape'."
     ),
     when_to_use=(
@@ -310,6 +313,16 @@ def fit_pattern(
         best["intensity_corrected"] = _pad(best["intensity_corrected"])
         best["fit_curve"] = _pad(best["fit_curve"])
         best["fit_range"] = [float(fit_range[0]), float(fit_range[1])]
+
+    # Raw-scale model = corrected model + the background that was subtracted
+    # (background = input intensity - corrected intensity). SAVE THIS as the fit
+    # overlay, NOT fit_curve: fit_curve is on the background-subtracted scale, so
+    # plotting it against the RAW data makes a good fit look collapsed (peaks at a
+    # fraction of height, gaps dropping to ~0) on patterns with a large
+    # background. Returning it ready-made removes that reconstruction error.
+    _ic = np.asarray(best["intensity_corrected"], dtype=float)
+    _fc = np.asarray(best["fit_curve"], dtype=float)
+    best["fit_curve_raw"] = [float(v) for v in (_fc + (y_full - _ic))]
 
     return best
 

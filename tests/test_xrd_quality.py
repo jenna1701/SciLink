@@ -139,6 +139,30 @@ def test_max_abs_residual_flags_localized_misfit():
     assert r["max_abs_residual_over_noise"] > 5.0 * r["residual_rms_over_noise"]  # averaging hides it
 
 
+def test_fit_curve_raw_overlays_raw_data():
+    """fit_pattern returns fit_curve_raw (= fit_curve + background) — the model on
+    the RAW-intensity scale. Saving THIS (not fit_curve, which is background-
+    subtracted) is what makes a good fit overlay the raw data instead of looking
+    collapsed when the background is large."""
+    from scilink.skills.curve_fitting.xrd_profile.fit_pattern import fit_pattern
+    x = np.linspace(10.0, 60.0, 3000)
+    bg = 50000.0 + 1e5 * np.exp(-(x - 10.0) * 0.3)        # large, sloping background
+    y = bg.copy()
+    for c, a in [(20.0, 8e5), (30.0, 4e5), (45.0, 2e5)]:
+        y += a * (0.1 ** 2) / ((x - c) ** 2 + 0.1 ** 2)
+    r = fit_pattern(x.tolist(), y.tolist())
+    assert "fit_curve_raw" in r
+    fcr = np.asarray(r["fit_curve_raw"]); fc = np.asarray(r["fit_curve"])
+    assert fcr.shape == x.shape
+    # fit_curve_raw overlays the raw data (peaks at full raw height); fit_curve does NOT
+    i = int(np.argmin(np.abs(x - 20.0)))
+    assert 0.9 < fcr[i] / y[i] < 1.1                      # raw-scale overlay matches data
+    assert fc[i] / y[i] < 0.7                             # bg-subtracted is well below raw
+    # in the gaps the raw-scale model sits at the background, not at ~0
+    g = int(np.argmin(np.abs(x - 15.0)))
+    assert fcr[g] > 0.5 * bg[g]
+
+
 def test_fit_range_contract():
     """fit_range restricts detection/background/fit to a window, finds the in-window
     peaks, and returns FULL-length arrays with the excluded region at zero residual

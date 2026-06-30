@@ -274,6 +274,13 @@ fit = fit_pattern(
 peaks = fit['peaks']            # each: center, fwhm, amplitude, area, eta
 r_squared = fit['r_squared']    # GLOBAL R²
 
+# Save the fit overlay (fit.npy) on the RAW-intensity scale so it matches the raw
+# data. fit['fit_curve'] is on the BACKGROUND-SUBTRACTED scale; saving THAT makes a
+# good fit look collapsed (peaks at a fraction of height, gaps near zero) whenever
+# the background is large — use fit['fit_curve_raw'] (= fit_curve + background).
+import numpy as np
+np.save('fit.npy', np.asarray(fit['fit_curve_raw'], dtype=float))
+
 # ---- Step 3: Per-peak Scherrer size ----
 sizes_nm = []
 for p in peaks:
