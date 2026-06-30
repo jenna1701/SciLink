@@ -4016,6 +4016,21 @@ Return JSON with:
             self.logger.error(f"Failed to refine model from feedback: {e}")
             return config
 
+    def _gate_metric_str(self, state: dict, result: Optional[dict], fallback_r2: float) -> str:
+        """`"<label> = <value>"` for the active gate metric, for approval log
+        lines. Falls back to the global R² when the gate is r_squared or the
+        metric is missing — so a non-R² gate (e.g. peak_region_r2) is not logged
+        as "R²" with the global value it doesn't gate on."""
+        g = _gate(state)
+        if g is not None and getattr(g, "metric", "r_squared") != "r_squared":
+            try:
+                v = g.extract((result or {}).get("fit_quality"))
+                if v is not None:
+                    return f"{g.label} = {v:.4f}"
+            except Exception:
+                pass
+        return f"R² = {fallback_r2:.4f}"
+
     def _fit_with_quality_control(self, state: dict, curve_data: np.ndarray, data_path: str, spectrum_name: str, spectrum_idx: int, is_regime_anchor: bool = False, reuse_script: Optional[str] = None, reuse_source: Optional[str] = None) -> dict:
         """
         Fit a single spectrum with quality control, verification, and optional judge selection.
@@ -4322,7 +4337,7 @@ Return JSON with:
                             best_verification = verification
                             best_ever_rejected = False
                             state["locked_fitting_config"] = best_config
-                            self.logger.info(f"   ✅ Fit approved (R² = {best_r2:.4f})")
+                            self.logger.info(f"   ✅ Fit approved ({self._gate_metric_str(state, best_result, best_r2)})")
                             fit_was_approved = True
                             break
 
@@ -4558,7 +4573,7 @@ Return JSON with:
                             if current_result is best_result:
                                 best_verification = final_verification
                                 if not _final_rejected:
-                                    self.logger.info(f"   ✅ Final fit approved (R² = {best_r2:.4f})")
+                                    self.logger.info(f"   ✅ Final fit approved ({self._gate_metric_str(state, best_result, best_r2)})")
                                     fit_was_approved = True
                                     best_ever_rejected = False
                                 else:
@@ -4575,7 +4590,7 @@ Return JSON with:
 
             # --- Verifier-approved fits bypass the R² threshold check ---
             if fit_was_approved:
-                self.logger.info(f"✅ Verifier approved fit (R² = {best_r2:.4f})")
+                self.logger.info(f"✅ Verifier approved fit ({self._gate_metric_str(state, best_result, best_r2)})")
                 quality_history = self._build_quality_history(
                     best_r2, self.r2_threshold, all_attempts,
                     verification_history, None,
@@ -5601,10 +5616,15 @@ Return JSON with:
             )
         else:
             _cmp = "≥" if _gate_obj.direction == "higher_is_better" else "≤"
+            # Bypass is governed by physical_review, not by the metric name:
+            # goodness-of-fit gates (peak_region_r2, …) still run the verifier.
+            if _gate_obj.physical_review:
+                _verifier_note = "verifier runs, framed against this metric (not R²)"
+            else:
+                _verifier_note = "skill scoring is the verification (curve-fit verifier bypassed)"
             self.logger.info(
                 f"   Quality: {_gate_obj.metric} {_cmp} {_gate_obj.accept_threshold:.3f} "
-                f"accepts ({_gate_obj.direction}); skill scoring is the verification "
-                f"(curve-fit R² verifier bypassed)."
+                f"accepts ({_gate_obj.direction}); {_verifier_note}."
             )
         self.logger.info(f"   Max verification iterations: {self.max_verification_iterations}")
         if not is_single:

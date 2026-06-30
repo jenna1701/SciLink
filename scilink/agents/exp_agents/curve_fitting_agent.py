@@ -675,11 +675,25 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             )
         else:
             cmp = "≥" if effective_gate.direction == "higher_is_better" else "≤"
+            # The verifier bypass is governed by physical_review, NOT by whether
+            # the metric is R². Goodness-of-fit gates (peak_region_r2, BIC, …)
+            # keep physical_review=True and DO run the verifier, framed against
+            # the gate's metric; only workflow-scoring gates (physical_review=
+            # False, e.g. xrd's figure_of_merit) bypass it for their own scoring.
+            if effective_gate.physical_review:
+                verifier_note = (
+                    "curve-fit verifier runs, framed against this metric "
+                    "(not R²)"
+                )
+            else:
+                verifier_note = (
+                    "curve-fit verifier bypassed — skill workflow's own scoring "
+                    "is the verification"
+                )
             self.logger.info(
                 f"   Quality: {effective_gate.metric} {cmp} "
                 f"{effective_gate.accept_threshold:.3f} accepts "
-                f"({effective_gate.direction}); curve-fit verifier bypassed "
-                f"— skill workflow's own scoring is the verification."
+                f"({effective_gate.direction}); {verifier_note}."
             )
 
         # Extract series metadata from system_info if not provided explicitly
