@@ -97,6 +97,19 @@ decision is **where the steep climb flattens into ordinary background**, not jus
   still **inside the climb** — raise it to where the background goes flat and
   re-fit. A clean fit with many reflections and a structureless low-angle residual
   means `lo` is right.
+- **A dominant low-angle feature that suppresses the rest of the pattern is
+  air-scatter — exclude it.** Prominence-based detection scales its floor to the
+  tallest peak in the window, so one enormous low-angle feature (the air-scatter /
+  beam-stop maximum, often *orders of magnitude* above every real reflection)
+  starves detection of the weaker peaks. The tell is a fit that captures only the
+  two or three tallest peaks while the rest of the pattern — which plainly shows
+  reflections in the raw data — sits unmodeled at baseline. When you see that, the
+  giant low-angle feature is air-scatter, not a reflection you must keep: raise
+  `lo` above it and re-fit; recovering the full set of reflections confirms it.
+  The trigger is **suppression of otherwise-visible peaks**, not size alone — a
+  genuinely strong reflection leaves the rest of the pattern detectable and does
+  not fire this rule (e.g. a 100×-dominant peak whose neighbours are still fit is
+  fine; it is only a problem when the neighbours vanish from the fit).
 - A genuine reflection truly buried on the climb is a **background problem**, not
   a `fit_range` problem: report that the low-angle region needs a dedicated
   background (or a measurement with a beam stop / variable slits) rather than
