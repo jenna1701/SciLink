@@ -80,19 +80,31 @@ residual diagnostics still work.
 
 The hazard is over-cropping: genuine low-angle Bragg peaks are common (layered
 materials, clays, MOFs, surfactants, many molecular/pharmaceutical crystals with
-large d-spacings) and live in the same first few degrees. The upturn is a
-**smooth, monotonic, featureless** decay; a Bragg reflection is a **distinct
-peak** sitting on it. So **do not use a fixed cutoff like 5°** — look at the
-low-angle data and set `lo` *just below the lowest genuine peak*, cutting only
-the featureless part of the climb. If a sharp peak rides partway up the upturn,
-keep it (lower `lo`, or don't crop). When you cannot tell a low-angle feature
-from the climb, **include it** — leaving a little upturn in costs a slightly
-worse background fit; clipping a real reflection corrupts the science. After
-fitting, sanity-check the lower bound: re-run once with `lo` a couple of degrees
-lower and confirm no new strong reflection appears in the widened window (if one
-does, it was real — keep the wider window). The same knob (with the same caution)
-excludes a detector artifact or a known contaminant region. For a series, set one
-window on the establishing frame and reuse it on every frame.
+large d-spacings) and live in the same first few degrees, so **do not blindly use
+a fixed cutoff** — look at the low-angle data and set `lo` deliberately. The
+decision is **where the steep climb flattens into ordinary background**, not just
+"below the lowest bump":
+- **Set `lo` where the climb has flattened.** A reflection that sits on **flat**
+  background just past the climb — keep it (put `lo` below it). A feature sitting
+  **on the steep part of the climb itself** — exclude it with the rest of the
+  climb. Do *not* lower `lo` into the climb to rescue such a feature: a peak
+  buried in air-scatter cannot be reliably fit there anyway, and — because
+  `fit_range` sets a single lower bound — keeping any of the steep climb keeps the
+  SNIP overshoot and the starved detection across the **whole** pattern, so you
+  trade one ambiguous low-angle peak for a bad fit everywhere.
+- **Read the result, not your intent.** If the fit comes back with only a handful
+  of peaks and/or a large oscillatory residual in the first few degrees, `lo` is
+  still **inside the climb** — raise it to where the background goes flat and
+  re-fit. A clean fit with many reflections and a structureless low-angle residual
+  means `lo` is right.
+- A genuine reflection truly buried on the climb is a **background problem**, not
+  a `fit_range` problem: report that the low-angle region needs a dedicated
+  background (or a measurement with a beam stop / variable slits) rather than
+  forcing the single-bound crop to do both jobs.
+
+The same knob (with the same caution) excludes a detector artifact or a known
+contaminant region. For a series, set one window on the establishing frame and
+reuse it on every frame.
 
 **How many peaks to fit:**
 - Scherrer alone: 3–5 strongest, well-isolated peaks is enough — report
@@ -102,12 +114,20 @@ window on the establishing frame and reuse it on every frame.
   becomes degenerate. Refuse W-H and fall back to peak-by-peak Scherrer
   when sin θ range < 0.1.
 
-**Background first, fit second.** Subtract a background (`fit_background`
-with `method='snip'` is the standard p-XRD choice) before per-peak
-fitting. SNIP handles smooth amorphous backgrounds and fluorescence
-floors without imposing a polynomial shape. Use `method='polynomial'`
-only when a polynomial is genuinely the right model (capillary
-scattering on a flat baseline).
+**Background: default to SNIP; do not switch to polynomial to "keep a
+pedestal".** `fit_background(method='snip')` (also `fit_pattern`'s default) is
+the right choice for almost every p-XRD pattern: it follows smooth amorphous
+humps, broad diffracted pedestals, and fluorescence floors without imposing a
+shape, and its iteration count (`snip_iterations='auto'` sweeps it) sets how much
+of a broad pedestal it treats as background. So if a broad pedestal under a
+cluster is being over-subtracted (crystalline apexes not reaching full data
+height), **tune the SNIP iterations** (fewer iterations leaves more of the
+pedestal) — do **not** change method. Reach for `method='polynomial'` only for a
+specific, known smooth scattering on a genuinely flat baseline (e.g. capillary
+scattering), **never** to preserve an amorphous pedestal: a Chebyshev/polynomial
+background oscillates and goes **negative between peaks**, producing a
+pathological model that dips below zero in the gaps — almost never what XRD data
+needs.
 
 **Line shape: pseudo-Voigt as default.** A pseudo-Voigt mixes Gaussian
 and Lorentzian contributions through a single mixing parameter `eta` —
