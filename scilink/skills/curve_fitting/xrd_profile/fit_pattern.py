@@ -89,6 +89,14 @@ TOOL_SPEC = ToolSpec(
         "low peak_region_r2 means real reflections are mis/un-fit), "
         "'n_signal_points', 'residual_rms_over_noise' (global residual RMS / "
         "estimated point noise — the verifier's key statistic; < ~3 is clean), "
+        "'max_abs_residual_over_noise' (the WORST single local misfit in noise "
+        "units — the complement of the averaged R²/peak_region_r2/RMS, which hide "
+        "a localized error such as a mis-shaped sharp apex on a high-dynamic-range "
+        "pattern. Read it AGAINST residual_rms_over_noise: much larger than the RMS "
+        "= the misfit is localized -> look at the residual figure there. Do NOT "
+        "use an absolute threshold: its scale rises with dynamic range, so a large "
+        "value is expected on very sharp intense peaks, NOT a verdict — the figure "
+        "decides accept (irreducible apex) vs refine (unmodelled feature)), "
         "'n_peaks', "
         "'peaks' (list of dicts: center, fwhm (mean width; for Scherrer/W-H), "
         "amplitude (height), area, eta, sorted by 2-theta; split mode adds "
@@ -384,6 +392,18 @@ def _fit_corrected(
     ss_tot = float(np.sum((ycorr - ycorr.mean()) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
     rms_over_noise = float(np.sqrt(np.mean(resid ** 2)) / noise)
+    # Worst LOCAL misfit, in noise units. The global R² / peak_region_r2 / RMS
+    # all AVERAGE over the pattern, so a localized but severe error — a mis-shaped
+    # sharp, intense apex on a high-dynamic-range pattern — is invisible to them
+    # (it scores ~0.999 while the apex residual is tens of sigma). This is the
+    # complementary signal: a 3-point-smoothed (single-channel spikes ignored)
+    # max |residual| / noise. Threshold-free: high here with a high R²/region
+    # means a localized shape misfit, not a clean fit. No tuned constants.
+    if resid.size >= 3:
+        smoothed = np.convolve(resid, np.ones(3) / 3.0, mode="same")
+    else:
+        smoothed = resid
+    max_resid_over_noise = float(np.max(np.abs(smoothed)) / noise)
     # Peak-region R²: R² over the channels carrying diffracted intensity, so a
     # correct fit of a weak/noisy pattern is not scored down by the noise-only
     # background channels (global R² is kept too). The corrected pattern is fit
@@ -419,6 +439,7 @@ def _fit_corrected(
         "peak_region_r2": float(region["peak_region_r2"]),
         "n_signal_points": int(region["n_signal_points"]),
         "residual_rms_over_noise": rms_over_noise,
+        "max_abs_residual_over_noise": max_resid_over_noise,
         "n_peaks": len(centers),
         "peaks": peaks,
         "peak_centers": [p["center"] for p in peaks],

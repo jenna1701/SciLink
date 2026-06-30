@@ -90,6 +90,55 @@ def test_fit_pattern_reports_peak_region_r2():
     assert 0.0 <= res["peak_region_r2"] <= 1.0
 
 
+def test_max_abs_residual_flags_localized_misfit():
+    """The dynamic-range diagnostic: max_abs_residual_over_noise is the worst
+    LOCAL misfit, the complement of the averaged R²/peak_region_r2/RMS. A clean,
+    modest-dynamic-range fit is a few sigma; a localized misfit makes it spike far
+    above the (averaged) residual_rms_over_noise — which is exactly why the
+    averaged metrics hide it. It is read AGAINST the RMS (localized-ness), not as
+    an absolute threshold: its scale rises with dynamic range (a tiny fractional
+    residual on a giant peak is many sigma), so it directs attention rather than
+    issuing a verdict."""
+    from scilink.skills.curve_fitting.xrd_profile.fit_pattern import fit_pattern
+
+    def make(amp, noise_frac, seed, apex_width=0.15):
+        x = np.linspace(10.0, 70.0, 2400)
+        y = np.full_like(x, 200.0)
+        # last peak's width is tunable: a sub-resolution apex_width makes a tall
+        # peak that IS detected (so peak_region_r2 stays high) but is too sharp
+        # for the model floor to fit -> a localized apex misfit.
+        # the apex peak is DOMINANT (high dynamic range, like a real super-peak):
+        # fittable at the default width (clean -> low max), sub-resolution sharp
+        # at apex_width=0.012 (misfit the smooth model cannot capture -> high max).
+        for c, f, w in [(20, 1.0, 0.15), (30, 0.6, 0.15), (45, 0.4, 0.15), (58, 4.0, apex_width)]:
+            s = w / 2.355
+            g = np.exp(-((x - c) ** 2) / (2 * s ** 2))
+            l = (w / 2) ** 2 / ((x - c) ** 2 + (w / 2) ** 2)
+            y += amp * f * (0.5 * l + 0.5 * g)
+        y += np.random.default_rng(seed).normal(0, noise_frac * amp, y.shape)
+        return x, y
+
+    # clean fits: low max-residual at BOTH high and low SNR (not just tracking noise)
+    clean_vals = []
+    for amp in (2e5, 5e3):
+        x, y = make(amp, 0.01, 0)
+        r = fit_pattern(x.tolist(), y.tolist())
+        assert "max_abs_residual_over_noise" in r
+        assert r["max_abs_residual_over_noise"] < 6.0, amp        # clean ~ few sigma
+        assert r["peak_region_r2"] > 0.95
+        clean_vals.append(r["max_abs_residual_over_noise"])
+
+    # A tall, sub-resolution-sharp apex the smooth model cannot capture -> a
+    # localized misfit. The whole point: it is HUGE in max_abs_residual_over_noise
+    # but small in the AVERAGED residual_rms_over_noise -- which is exactly why the
+    # averaged metrics (R²/peak_region_r2/RMS) hide it. (On a many-peak pattern the
+    # few misfit points also leave peak_region_r2 high; validated on real IBD data.)
+    x, y = make(2e5, 0.005, 0, apex_width=0.012)                  # << model FWHM floor
+    r = fit_pattern(x.tolist(), y.tolist())
+    assert r["max_abs_residual_over_noise"] > 8.0 * max(clean_vals)   # loudly flagged
+    assert r["max_abs_residual_over_noise"] > 5.0 * r["residual_rms_over_noise"]  # averaging hides it
+
+
 def test_fit_range_contract():
     """fit_range restricts detection/background/fit to a window, finds the in-window
     peaks, and returns FULL-length arrays with the excluded region at zero residual

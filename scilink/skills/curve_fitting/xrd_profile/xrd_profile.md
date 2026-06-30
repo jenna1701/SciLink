@@ -252,13 +252,35 @@ print("FIT_RESULTS_JSON: " + json.dumps({
         "peak_region_r2": fit['peak_region_r2'],
         "r_squared": r_squared,                       # GLOBAL (reported for context)
         "residual_rms_over_noise": fit['residual_rms_over_noise'],
-        "verdict": "accept" if fit['peak_region_r2'] >= 0.90 else (
-            "marginal" if fit['peak_region_r2'] >= 0.55 else "reject"
-        ),
+        # Worst single LOCAL misfit in noise units. R²/peak_region_r2/RMS average
+        # and hide a localized error (a mis-shaped sharp apex on a tall peak); this
+        # exposes it. Read against residual_rms_over_noise (>> RMS = localized ->
+        # look at the figure); its scale rises with dynamic range, so it is an
+        # attention signal, not a thresholded verdict.
+        "max_abs_residual_over_noise": fit['max_abs_residual_over_noise'],
         "n_peaks_fitted": fit['n_peaks'],
     },
 }))
 ```
+
+**A high `peak_region_r2` is necessary but not sufficient — use
+`max_abs_residual_over_noise` to decide where to look.** The gate metric (like
+global R² and RMS) averages over the whole pattern, so on a high-dynamic-range
+pattern — one or two giant peaks dwarfing the rest — a localized error such as a
+mis-shaped sharp apex is invisible to it (`peak_region_r2 ≈ 0.99` while that apex
+is far off). `max_abs_residual_over_noise` is the **worst single local misfit**,
+the complement of the averaged statistics. Read it *against*
+`residual_rms_over_noise`: when it is much larger than the RMS, the misfit is
+**localized** (concentrated at a few channels) rather than spread out — that is a
+prompt to **look at the residual figure at that location**, not a verdict.
+Do **not** attach an absolute threshold to it: its scale rises with dynamic range
+(a tiny fractional residual on a giant peak is many σ), so a large value is
+*expected* on very sharp, intense peaks and is not by itself a failure. The
+figure decides: a single sharp apex is the split pseudo-Voigt's irreducible
+profile limit (accept, and **report the residual honestly rather than claiming a
+clean fit** — do not refine endlessly); a residual that is an unmodelled
+reflection or a missed shoulder is a real miss (refine). The value's job is to
+stop a high `peak_region_r2` from being rubber-stamped without that look.
 
 The gate scores `peak_region_r2`. A large global-`r_squared` ↔ `peak_region_r2`
 gap is **only** a benign low-SNR artifact when you have *verified* both that the
