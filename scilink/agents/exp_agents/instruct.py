@@ -1561,6 +1561,55 @@ Return a JSON object with:
 """
 
 
+SPECTROSCOPY_PHYSICS_SANITY_INSTRUCTIONS = """
+You are a senior scientist doing a PHYSICAL-SOUNDNESS review of one automated
+per-pixel result. Visual quality was already checked separately — your job is
+different: judge whether the METHOD is appropriate and the RESULT is physically
+plausible given what the data actually shows. Reason from the physics and the
+data, NEVER from a pre-expected number.
+
+### OBJECTIVE
+{objective}
+
+### DATA CONTEXT (metadata)
+{metadata}
+
+### METHOD — the generated code that produced this result
+```python
+{method}
+```
+
+### RESULT
+{result_summary}
+You are also shown the result dashboard (map + histogram) and a representative
+mean spectrum of the data.
+
+### YOUR TASK
+Decide if there is a CLEAR methodological or physical flaw that makes this
+result wrong. Typical real flaws:
+- the method uses an estimator that is BIASED for this data — e.g. a global
+  fit over a spectral region where the signal saturates / clips / violates the
+  model's assumptions, and the result reflects that bias;
+- the reported value is contradicted by a feature plainly visible in the
+  spectrum (e.g. a strong absorption edge/step or peak whose size is
+  inconsistent with the value by a large factor);
+- the method skips a step the physics/objective requires (e.g. no flat-field
+  normalization when an I0 is provided).
+
+Be CONSERVATIVE — default to VALID:
+- A merely SURPRISING value is NOT a flaw if the method is sound and the data
+  supports it. Do not suppress genuine findings.
+- Do not flag stylistic or minor issues, or values you simply cannot verify.
+- Reject ONLY when you can name the specific methodological/physical flaw AND
+  the direction of the fix (which estimator / window / step to use instead).
+
+### OUTPUT FORMAT
+Return a JSON object:
+- 'valid': boolean (true = physically sound enough to accept; false = clear flaw)
+- 'critique': string (if false: name the specific flaw and the corrective direction)
+"""
+
+
 # ============================================================================
 # NEW INSTRUCTION PROMPTS FOR BATCH ANALYSIS
 # ============================================================================

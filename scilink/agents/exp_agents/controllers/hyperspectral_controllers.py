@@ -24,9 +24,11 @@ from ..instruct import (
     SPECTROSCOPY_REFLECTION_UPDATE_INSTRUCTIONS,
     SPECTROSCOPY_VALIDATION_INTERPRETATION_INSTRUCTIONS,
     SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS,
+    SPECTROSCOPY_PHYSICS_SANITY_INSTRUCTIONS,
 )
 
 from ....skills.hyperspectral.eels.eels import AGENT_METADATA_KEYS_TO_STRIP
+from ....skills._shared.curve_fitting_tools import plot_curve_to_bytes
 from ....executors import ExecutionTimeout
 from ....utils.codegen_parse import parse_codegen_response
 
@@ -2123,6 +2125,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     total_maps_expected = len(maps_dict)
                     raw_units = result_dict.get("units", "a.u.")
                     desc = result_dict.get("description", "")
+                    mean_spec_bytes = None  # rendered lazily for the sanity check
 
                     for feature_name, result_map in maps_dict.items():
                         # Shape/NaN Check
@@ -2155,6 +2158,40 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             # 3. Visual QC (Generator-Judge Loop)
                             self.logger.info(f"    👀 Performing Visual QC on {feature_name}...")
                             is_valid, critique = self._check_result_visually(dashboard_bytes, f"{target_desc} ({feature_name})")
+
+                            # 3b. Physics sanity check (LLM, voted) — only for the
+                            # user-asked-for quantitative deliverables, only once
+                            # visual QC has passed. Visual QC sees plausibility, not
+                            # correctness; this reads the METHOD (code) + a
+                            # representative spectrum + the objective to catch a
+                            # smooth-but-wrong VALUE (e.g. a biased global fit). It
+                            # is conservative (majority vote, fail-open).
+                            if is_valid and feature_name in required_outputs:
+                                if mean_spec_bytes is None:
+                                    try:
+                                        _ms = np.asarray(optimal_data).reshape(
+                                            -1, optimal_data.shape[-1]).mean(0)
+                                        mean_spec_bytes = plot_curve_to_bytes(
+                                            np.column_stack(
+                                                [np.asarray(state["energy_axis"]), _ms]),
+                                            {"title": "Representative mean spectrum"})
+                                    except Exception:
+                                        mean_spec_bytes = b""  # tolerate; check runs without it
+                                summary = (
+                                    f"value range [{float(np.nanmin(result_map)):.4g}, "
+                                    f"{float(np.nanmax(result_map)):.4g}], mean "
+                                    f"{float(np.nanmean(result_map)):.4g} {current_unit}")
+                                self.logger.info(f"    🔬 Physics sanity check on {feature_name}...")
+                                sane, sane_crit = self._sanity_check_result(
+                                    dashboard_bytes, code_str, mean_spec_bytes or None,
+                                    state.get("system_info"),
+                                    state.get("analysis_objective"),
+                                    feature_name, summary)
+                                if not sane:
+                                    is_valid, critique = False, sane_crit
+                                    self.logger.warning(
+                                        f"    🔬 Physics sanity check rejected "
+                                        f"{feature_name}: {critique}")
 
                             if is_valid:
                                 # STAGE DATA (Do not commit to state yet)
@@ -2321,6 +2358,70 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
         except Exception as e:
             self.logger.warning(f"QC check crashed: {e}")
             return True, ""
+
+    # Number of independent judgments and the votes-to-reject majority. A single
+    # judgment is too noisy near the decision boundary (it false-rejects a
+    # correct result ~half the time in validation), but it never false-PASSES a
+    # gross error — so requiring a majority of independent judgments to agree
+    # before flagging removes the false-rejects while keeping the true catches.
+    SANITY_VOTES = 3
+    SANITY_REJECT_MAJORITY = 2
+
+    def _sanity_check_one(self, dashboard_bytes, code_str, mean_spec_bytes,
+                          system_info, objective, feature_desc, result_summary):
+        meta_str = (json.dumps(system_info, default=str)[:1500]
+                    if system_info else "(none)")
+        prompt = [SPECTROSCOPY_PHYSICS_SANITY_INSTRUCTIONS.format(
+            objective=objective or "(not specified)",
+            metadata=meta_str,
+            method=(code_str or "(unavailable)")[:6000],
+            result_summary=f"Output '{feature_desc}': {result_summary}",
+        )]
+        prompt.append("Result dashboard (map + histogram):")
+        prompt.append({"mime_type": "image/jpeg", "data": dashboard_bytes})
+        if mean_spec_bytes:
+            prompt.append("Representative mean spectrum of the data:")
+            prompt.append({"mime_type": "image/png", "data": mean_spec_bytes})
+        resp = self.model.generate_content(
+            prompt, generation_config=None, safety_settings=self.safety_settings,
+        )
+        result, _ = self._parse_llm_response(resp)
+        return bool(result.get("valid", True)), result.get("critique", "")
+
+    def _sanity_check_result(self, dashboard_bytes, code_str, mean_spec_bytes,
+                             system_info, objective, feature_desc,
+                             result_summary) -> tuple[bool, str]:
+        """LLM physical-soundness check: given the objective, data context, the
+        METHOD (generated code) and a representative spectrum, judge whether the
+        result is physically plausible and the method sound. Complements visual
+        QC, which only sees the output dashboard and so cannot catch a smooth-
+        but-wrong VALUE (e.g. a biased global fit).
+
+        Votes ``SANITY_VOTES`` independent judgments and rejects only when at
+        least ``SANITY_REJECT_MAJORITY`` agree the result is flawed — robust to
+        single-judgment noise, and biased toward accept (so it does not suppress
+        surprising-but-sound results). Fails open on error, and short-circuits
+        once the outcome is decided.
+        """
+        reject_votes, last_crit = 0, ""
+        for i in range(self.SANITY_VOTES):
+            try:
+                ok, crit = self._sanity_check_one(
+                    dashboard_bytes, code_str, mean_spec_bytes,
+                    system_info, objective, feature_desc, result_summary)
+            except Exception as e:
+                self.logger.warning(f"Physics sanity check crashed: {e}")
+                return True, ""  # fail-open
+            if not ok:
+                reject_votes += 1
+                last_crit = crit or last_crit
+            # short-circuit: decided either way
+            remaining = self.SANITY_VOTES - (i + 1)
+            if reject_votes >= self.SANITY_REJECT_MAJORITY:
+                return False, last_crit
+            if reject_votes + remaining < self.SANITY_REJECT_MAJORITY:
+                return True, ""
+        return True, ""
     
 
 class RunSelfReflectionController:
