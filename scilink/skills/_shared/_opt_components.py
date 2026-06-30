@@ -16,9 +16,9 @@ Declarations (module-level attributes in the bundle's .py):
 Discovery mirrors the TOOL_SPEC registry: per-bundle, IN-PACKAGE ONLY, visible
 to the engine only while the skill is active. Uploaded / markdown-only skills
 cannot ship code — the deliberate safety boundary against unverifiable injected
-posteriors. Structural validity (does it yield a posterior?) is smoke-tested at
-activation; calibration is the contributor-author's responsibility, exactly as
-for a core surrogate.
+posteriors. Structural validity (does it yield a posterior?) can be smoke-tested
+while authoring via `smoke_test_surrogate`; calibration is the contributor-
+author's responsibility, exactly as for a core surrogate.
 """
 import importlib
 import logging
@@ -114,9 +114,10 @@ def get_acquisition_components(active_skills, agent: str = "bo") -> Dict[str, Ac
 
 
 def smoke_test_surrogate(comp: SurrogateComponent, input_dim: int = 3) -> None:
-    """Structural check at activation: the builder yields a model with a usable
-    posterior on dummy data. Raises on failure. (Calibration is NOT checked —
-    that is the contributor-author's responsibility, as for any core surrogate.)"""
+    """Structural check for authoring/tests: the builder yields a model with a
+    usable posterior on dummy data. Raises on failure. Not run at runtime — call
+    it while authoring a component skill. (Calibration is NOT checked — that is
+    the contributor-author's responsibility, as for any core surrogate.)"""
     import numpy as np
     import torch
     spec = comp.builder(input_dim, kernel="matern_2.5", noise="min_noise_low",

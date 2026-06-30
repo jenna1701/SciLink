@@ -74,6 +74,37 @@ def test_addendum_gated_on_fidelity():
     assert "MULTI-FIDELITY" in ag._build_strategy_prompt(**base, fidelity_config={"fidelity_col": 1})[0]
 
 
+def test_fidelity_costs_shift_chosen_fidelity():
+    """Declared per-fidelity costs must actually move MFKG's fidelity choice
+    (regression: the costs were extracted and plumbed but previously ignored by
+    the cost model). Paired: one fitted model, identical seeds, only cost differs."""
+    import torch
+    rng = np.random.RandomState(123)
+    n = 40
+    x = rng.uniform(0, 1, n)
+    fid = rng.choice([0.0, 1.0], n)
+    y = -((x - 0.6) ** 2) - 0.3 * (1 - fid)
+    X = np.column_stack([x, fid])
+    opt = get_optimizer(is_moo=False, device="cpu")
+    opt.fit(X, y.reshape(-1, 1), bounds=[(0, 1), (0.0, 1.0)],
+            model_config={"surrogate": "single_task_multi_fidelity",
+                          "kernel": "matern_2.5", "noise": "min_noise_low"},
+            fidelity_config={"fidelity_col": 1, "target_fidelity": 1.0})
+
+    def low_fidelity_rate(costs):
+        opt.fidelity_config["fidelity_costs"] = costs
+        picks = []
+        for s in range(4):
+            np.random.seed(s)
+            torch.manual_seed(s)
+            picks.append(round(float(opt.recommend(1, "mf_kg")[0][1]), 3))
+        return sum(p == 0.0 for p in picks) / len(picks)
+
+    # High fidelity expensive -> lean to the cheap low fidelity; flip the costs,
+    # flip the preference. If costs were ignored these two rates would coincide.
+    assert low_fidelity_rate({0: 1, 1: 1000}) > low_fidelity_rate({0: 1000, 1: 1})
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

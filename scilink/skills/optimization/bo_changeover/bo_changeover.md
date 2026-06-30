@@ -32,7 +32,9 @@ params from the problem:
 
 Do not use it when every input is cheap to change, or for a cold start where
 broad exploration matters more than changeover economy — plain `log_ei` /
-`max_variance` are better there. It is single-objective.
+`max_variance` are better there. It is single-objective, and it assumes
+continuous inputs: candidates are drawn from a continuous Sobol pool, so it does
+not honor categorical dimensions (`cat_dims`).
 
 ## Diagnostics
 

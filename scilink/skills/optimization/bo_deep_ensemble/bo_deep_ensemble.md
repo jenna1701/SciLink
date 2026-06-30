@@ -19,7 +19,8 @@ feature interactions that a stationary kernel (even `dkl`) fits poorly, and you
 do not need calibrated tail uncertainty. Prefer the GP surrogates
 (`single_task` / `dkl` / `saas`) when data is scarce: with few points the
 ensemble is under-trained and its variance is unreliable, which can mislead the
-acquisition. It is single-objective.
+acquisition. It is single-objective and assumes continuous inputs (no
+categorical / `cat_dims` handling).
 
 ## Acquisition
 

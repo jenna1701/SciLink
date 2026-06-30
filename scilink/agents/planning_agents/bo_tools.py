@@ -582,8 +582,8 @@ class SingleObjectiveOptimizer:
         """Cost-aware multi-fidelity Knowledge Gradient (Tier-2, bo_multi_fidelity
         skill). Chooses BOTH the input and the fidelity to evaluate next, trading
         information gain against per-fidelity cost. Reads from skill_config:
-        ``fidelity_col`` (required), ``fidelity_costs`` (optional), and
-        ``target_fidelity`` (default = highest observed fidelity)."""
+        ``fidelity_col`` (required), ``fidelity_costs`` (optional; fit to an affine
+        cost model), and ``target_fidelity`` (default = highest observed fidelity)."""
         from botorch.acquisition.knowledge_gradient import qMultiFidelityKnowledgeGradient
         from botorch.acquisition.cost_aware import InverseCostWeightedUtility
         from botorch.models.cost import AffineFidelityCostModel
@@ -598,10 +598,30 @@ class SingleObjectiveOptimizer:
         fid_col = int(fid_col)
         levels = sorted({float(v) for v in self.X_train[:, fid_col].detach().cpu().numpy()})
         target_fid = float(sc.get("target_fidelity", max(levels)))
+
+        # Cost model: by default cost rises linearly with fidelity. If the user
+        # declared per-fidelity costs, fit an affine cost(f) = fixed_cost + weight·f
+        # to them (exact for two levels, least-squares for more) so the cheap
+        # fidelity is genuinely cheaper to MFKG. Fall back to the flat default when
+        # costs are absent or the fit would make any observed level non-positive
+        # (InverseCostWeightedUtility divides by cost, so it must stay > 0).
         fixed_cost = float(sc.get("fixed_cost", 5.0))
+        fid_weight = 1.0
+        fid_costs = sc.get("fidelity_costs")
+        if fid_costs:
+            try:
+                pts = sorted((float(k), float(v)) for k, v in fid_costs.items())
+                fs = np.array([p[0] for p in pts])
+                cs = np.array([p[1] for p in pts])
+                if len(pts) >= 2 and np.ptp(fs) > 0:
+                    slope, intercept = np.polyfit(fs, cs, 1)
+                    if np.all(intercept + slope * fs > 0):
+                        fid_weight, fixed_cost = float(slope), float(intercept)
+            except Exception:
+                pass
 
         target_fidelities = {fid_col: target_fid}
-        cost_model = AffineFidelityCostModel(fidelity_weights={fid_col: 1.0}, fixed_cost=fixed_cost)
+        cost_model = AffineFidelityCostModel(fidelity_weights={fid_col: fid_weight}, fixed_cost=fixed_cost)
         cost_aware_utility = InverseCostWeightedUtility(cost_model=cost_model)
 
         def project(X):
