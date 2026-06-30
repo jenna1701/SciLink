@@ -370,6 +370,21 @@ interpretation, not from frozen centers.** Only pass an explicit `peak_centers`
 for a one-off re-fit of a single known-stable pattern — never as the series
 default.
 
+**The detection settings ARE part of the recipe — tune them, then freeze them.**
+`prominence_frac` and `min_distance_deg` are *settings*, not *values*: tune them
+on the establishing frame so every visible reflection is modelled, then carry the
+chosen numbers into the series call. Doing so is locking the *method* (correct);
+it is the peak *centers* that must never be frozen. Watch `prominence_frac` in
+particular — its floor scales with the pattern's intensity range, so the weakest
+(usually high-angle) reflections sit just above it and are the first to be
+dropped. **A residual statistic will not warn you**: a weak peak on a noisy
+high-angle floor reads only a few σ even when it is entirely unmodelled, so the
+fit can miss real reflections while R²/peak_region_r2/RMS all look clean. Verify
+coverage **by eye against the data across the full 2θ range** — a log-scale
+data-vs-fit overlay — not by the residual number: if the raw data plainly shows
+reflections the model leaves at baseline, lower `prominence_frac` (0.02 → 0.01 →
+0.005) until they are caught, then freeze that value for the series.
+
 For speed across a long series: the default `snip_iterations='auto'` sweeps
 a few background widths per frame (~4× the fit cost). Once the establishing
 frame reports its choice (in `background_method`, e.g. `snip(iterations=10)`),
