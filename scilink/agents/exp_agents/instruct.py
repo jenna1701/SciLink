@@ -1534,14 +1534,25 @@ Determine if this result captures a REAL physical signal, even if that signal is
 In spectroscopy, some features (like impurities) only exist in small regions.
 If the Histogram shows a large pile-up at zero/bounds (background) BUT there is a distinct, smaller population distribution elsewhere, **THIS IS VALID.**
 
+### CRITICAL: HANDLING HOMOGENEOUS RESULTS
+A uniform or single-valued map is NOT, by itself, a failure. The measured
+quantity or feature can be genuinely homogeneous — e.g. a uniform film or
+coating, a sample that fills the field of view, or a property that is
+constant across the region. In those cases a near-uniform map (or a presence
+mask that is all-present / all-absent) is the physically CORRECT result.
+Spatial contrast is not required for validity. Reject uniformity ONLY when the
+single value is a trivial collapse that means the algorithm extracted nothing
+where signal was expected (see Failure Criterion 2).
+
 ### FAILURE CRITERIA (Reject ONLY if these are true):
 1. **Total Noise:** The map is pure 'static' (salt-and-pepper) with ZERO recognizable structure.
-2. **Total Algorithm Failure:** The histogram is a **SINGLE** sharp spike (Dirac delta) containing 100% of the data.
-3. **Complete Rail-Gazing:** The data is piled up at the min/max edges with **NO secondary distribution** visible.
+2. **Trivial Collapse:** The map is uniform AT A TRIVIAL VALUE that means no signal was extracted (e.g. exactly 0 / exactly a clip bound everywhere) AND the feature is one that should vary or appear somewhere — i.e. the algorithm produced nothing, not a real homogeneous measurement. A uniform map at a NON-trivial, physically plausible value (a real thickness, a real concentration, all-present where the sample fills the frame) is NOT this — accept it.
+3. **Complete Rail-Gazing:** The data is piled up at the min/max edges with **NO secondary distribution** visible AND no physical reason for the field to be homogeneous.
 
 ### SUCCESS CRITERIA (Accept if present):
 - **Structure:** Does the map show ANY structured domains, even if they are small?
 - **Population:** Is there a visible distribution (bell curve, tail, or cluster) separate from the background spike?
+- **Plausible homogeneity:** Is the map uniform (or near-uniform) at a physically meaningful value consistent with a homogeneous sample or a feature that fills/is-absent-from the field? That is a valid measurement, not a failure.
 
 ### OUTPUT FORMAT
 Return a JSON object with:
