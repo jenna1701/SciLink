@@ -1561,6 +1561,99 @@ Return a JSON object with:
 """
 
 
+SPECTROSCOPY_RESULT_REVIEW_INSTRUCTIONS = """
+You are a senior scientist doing a SINGLE combined review of one automated
+per-pixel result the user explicitly asked for. Judge BOTH in one decision:
+  (A) SIGNAL — does this capture a real extracted signal, not pure noise or a
+      trivial collapse (uniform at exactly 0 / a clip bound where something was
+      expected)?
+  (B) SOUNDNESS — is the METHOD appropriate and the VALUE physically plausible
+      given what the data actually shows?
+Reason from the physics, the data, and the evidence below — NEVER from a
+pre-expected number.
+
+### OBJECTIVE
+{objective}
+
+### DATA CONTEXT (metadata)
+{metadata}
+
+### METHOD — the generated code that produced this result
+```python
+{method}
+```
+
+### RESULT
+{result_summary}
+You are also shown the result dashboard (map + histogram) and a representative
+mean spectrum of the data.
+
+### TOOLS USED BY THE METHOD
+The generated code called these vetted, purpose-built helper tools — here is
+what each already handles robustly (window selection, flux gating,
+measurability, …):
+{tool_descriptions}
+
+{tool_scrutiny}
+
+### KEY PRINCIPLES
+- Trust the DATA over the objective's geometric framing. A uniform or
+  full-field result is VALID when the signal genuinely fills the field: if the
+  tool evidence shows a coherent, high-SNR feature present in most/all pixels
+  (e.g. a measurable edge in ~all pixels), a uniform map or an all-present mask
+  is the CORRECT result even if the objective calls the sample a localized
+  coupon "on an otherwise empty field." Reject uniformity ONLY as a trivial
+  collapse (uniform at exactly 0 / a clip bound — nothing extracted).
+- A merely SURPRISING value is not a flaw if the method is sound and the data
+  and tool evidence support it. Do not suppress genuine findings.
+- Reject ONLY when you can name a SPECIFIC methodological/physical flaw AND the
+  direction of the fix (which estimator / window / step to use instead).
+
+### OUTPUT FORMAT
+Return a JSON object:
+- 'valid': boolean (true = accept; false = clear flaw)
+- 'critique': string (if false: name the specific flaw and corrective direction)
+"""
+
+
+SPECTROSCOPY_SALVAGE_JUDGE_INSTRUCTIONS = """
+You are a senior scientist making a FINAL salvage decision. Automated extraction
+did NOT fully pass verification after all retries. You are shown the BEST partial
+result produced (a representative dashboard, the method code, a representative
+mean spectrum, and the tools it used). Judge FROM THE PHYSICS AND THE DATA
+whether this partial result is a physically DEFENSIBLE approximate answer worth
+reporting WITH EXPLICIT CAVEATS, or is physically meaningless (trivial collapse
+to zero, pure noise, or a clear artifact) and must be withheld.
+
+Presenting an APPROXIMATE / uncertain result is acceptable — provided its
+limitations and uncertainty are stated honestly. Withhold ONLY if there is no
+real signal to report.
+
+### OBJECTIVE
+{objective}
+
+### DATA CONTEXT (metadata)
+{metadata}
+
+### METHOD (generated code)
+```python
+{method}
+```
+
+### TOOLS USED BY THE METHOD
+{tool_descriptions}
+
+### PARTIAL RESULT
+{result_summary}
+
+### OUTPUT FORMAT
+Return a JSON object:
+- 'present': boolean (true = report it as approximate with caveats; false = withhold, no real signal)
+- 'confidence': "low" or "medium" (never "high" — this is a salvage of an unverified result)
+- 'caveat': ONE honest sentence stating the key limitation / uncertainty a reader MUST know
+"""
+
+
 SPECTROSCOPY_PHYSICS_SANITY_INSTRUCTIONS = """
 You are a senior scientist doing a PHYSICAL-SOUNDNESS review of one automated
 per-pixel result. Visual quality was already checked separately — your job is

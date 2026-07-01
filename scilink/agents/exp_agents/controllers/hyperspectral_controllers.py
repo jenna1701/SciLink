@@ -25,11 +25,15 @@ from ..instruct import (
     SPECTROSCOPY_VALIDATION_INTERPRETATION_INSTRUCTIONS,
     SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS,
     SPECTROSCOPY_PHYSICS_SANITY_INSTRUCTIONS,
+    SPECTROSCOPY_RESULT_REVIEW_INSTRUCTIONS,
+    SPECTROSCOPY_SALVAGE_JUDGE_INSTRUCTIONS,
 )
 
 from ....skills.hyperspectral.eels.eels import AGENT_METADATA_KEYS_TO_STRIP
 from ....skills._shared.curve_fitting_tools import plot_curve_to_bytes
-from ....skills._shared._registry import get_tools_for, get_tool_function
+from ....skills._shared._registry import (
+    get_tools_for, get_tool_function, VERIFIER_TOOL_SCRUTINY_PRINCIPLE,
+)
 from ....executors import ExecutionTimeout
 from ....utils.codegen_parse import parse_codegen_response
 
@@ -144,6 +148,37 @@ def _hyperspectral_tool_specs(state: dict):
         return []
 
 
+def _planning_tool_awareness(state: dict) -> str | None:
+    """Minimal names + when_to_use for the downstream code tools, plus a
+    discipline directive telling the PLANNER to stay method-level.
+
+    The planner does NOT get the full tool inventory (that stays at the codegen
+    step, to keep planning prompts tight). It gets just enough to avoid the
+    failure this fixes: a tool-unaware plan prescribes hand-rolled physics
+    ("embed a NIST mu tabulation", "use a 76-80 / 81-86 keV window") which the
+    codegen then follows *instead of* calling the vetted tool — reintroducing
+    the very bias the tool removes. Naming the tools + forbidding hand-rolled
+    coefficient tables / prescribed windows keeps method selection in the plan
+    and implementation detail in the tool. Returns None when no tools apply.
+    """
+    specs = _hyperspectral_tool_specs(state)
+    if not specs:
+        return None
+    lines = [
+        "\n\n--- Downstream Code Tools (available to the implementation step) ---",
+        "The code implementing your plan can call these vetted helpers. Plan at the "
+        "METHOD level and rely on them for the details they own. Do NOT embed your own "
+        "coefficient/attenuation tables, and do NOT prescribe specific numeric windows "
+        "or parameters that a tool below already handles — name the method (e.g. "
+        "'measure the K-edge step', 'obtain mu from tables') and leave the exact "
+        "windows / coefficients to the tool.",
+    ]
+    for s in specs:
+        wtu = getattr(s, "when_to_use", "") or getattr(s, "description", "")
+        lines.append(f"- `{s.name}`: {wtu}")
+    return "\n".join(lines)
+
+
 def _registry_tool_callables(state: dict) -> dict:
     """{name: callable} for the registered hyperspectral tools, resolved from
     each spec's ``import_line`` (``from MODULE import NAME``). Best-effort — a
@@ -163,6 +198,31 @@ def _registry_tool_callables(state: dict) -> dict:
         except Exception:
             continue
     return out
+
+
+def _used_tool_descriptions(state: dict, code_str: str, max_bytes: int = 1500) -> str:
+    """Descriptions of the registered tools the generated code actually CALLS,
+    for the required-output review.
+
+    Tells the verifier WHAT each used tool already handles robustly (window
+    selection, flux gating, measurability, …) so it does not reject the result
+    by second-guessing internals the tool owns — without feeding any per-run
+    output. Names + description + when_to_use only. Bounded so it can never
+    dominate the prompt.
+    """
+    if not code_str:
+        return ""
+    lines = []
+    for s in _hyperspectral_tool_specs(state):
+        if f"{s.name}(" in code_str:
+            desc = (getattr(s, "description", "") or "").strip()
+            wtu = (getattr(s, "when_to_use", "") or "").strip()
+            entry = f"- `{s.name}`: {desc}"
+            if wtu:
+                entry += f" (When to use: {wtu})"
+            lines.append(entry)
+    blob = "\n".join(lines)
+    return blob[:max_bytes] + ("…" if len(blob) > max_bytes else "")
 
 
 def _auxiliary_display_items(state: dict) -> list:
@@ -1399,6 +1459,14 @@ refinement targets are meaningful here — do not request `spatial` or
 `spectral` zoom refinement.
 """)
 
+        # Give the planner MINIMAL awareness of the downstream code tools (names +
+        # when_to_use) plus a method-level discipline directive, so the plan stops
+        # prescribing hand-rolled physics that overrides those tools. See
+        # _planning_tool_awareness.
+        tool_note = _planning_tool_awareness(state)
+        if tool_note:
+            prompt_parts.append(tool_note)
+
         # Add system info
         if state.get("system_info"):
             sys_info_str = json.dumps(state["system_info"], indent=2)
@@ -2213,18 +2281,15 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         )
 
                         if dashboard_bytes:
-                            # 3. Visual QC (Generator-Judge Loop)
-                            self.logger.info(f"    👀 Performing Visual QC on {feature_name}...")
-                            is_valid, critique = self._check_result_visually(dashboard_bytes, f"{target_desc} ({feature_name})")
-
-                            # 3b. Physics sanity check (LLM, voted) — only for the
-                            # user-asked-for quantitative deliverables, only once
-                            # visual QC has passed. Visual QC sees plausibility, not
-                            # correctness; this reads the METHOD (code) + a
-                            # representative spectrum + the objective to catch a
-                            # smooth-but-wrong VALUE (e.g. a biased global fit). It
-                            # is conservative (majority vote, fail-open).
-                            if is_valid and feature_name in required_outputs:
+                            if feature_name in required_outputs:
+                                # Combined review (visual + physical + tool
+                                # evidence) in ONE voted pass for the user-asked-
+                                # for deliverables. Merges what were two gates so a
+                                # single reviewer weighs the dashboard, the method,
+                                # the spectrum AND the deterministic tool evidence
+                                # together — preventing the split-brain false
+                                # reject (visual 'noise' vs physical 'saturation',
+                                # each blind to the tool's measurability proof).
                                 if mean_spec_bytes is None:
                                     try:
                                         _ms = np.asarray(optimal_data).reshape(
@@ -2234,22 +2299,28 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                                                 [np.asarray(state["energy_axis"]), _ms]),
                                             {"title": "Representative mean spectrum"})
                                     except Exception:
-                                        mean_spec_bytes = b""  # tolerate; check runs without it
+                                        mean_spec_bytes = b""  # tolerate; runs without it
                                 summary = (
                                     f"value range [{float(np.nanmin(result_map)):.4g}, "
                                     f"{float(np.nanmax(result_map)):.4g}], mean "
                                     f"{float(np.nanmean(result_map)):.4g} {current_unit}")
-                                self.logger.info(f"    🔬 Physics sanity check on {feature_name}...")
-                                sane, sane_crit = self._sanity_check_result(
+                                tool_descriptions = _used_tool_descriptions(state, code_str)
+                                self.logger.info(f"    🔎 Combined review on {feature_name}...")
+                                is_valid, critique = self._review_required_output(
                                     dashboard_bytes, code_str, mean_spec_bytes or None,
                                     state.get("system_info"),
                                     state.get("analysis_objective"),
-                                    feature_name, summary)
-                                if not sane:
-                                    is_valid, critique = False, sane_crit
+                                    feature_name, summary, tool_descriptions)
+                                if not is_valid:
                                     self.logger.warning(
-                                        f"    🔬 Physics sanity check rejected "
+                                        f"    🔎 Combined review rejected "
                                         f"{feature_name}: {critique}")
+                            else:
+                                # Diagnostic (non-required) map: lighter single
+                                # visual QC — no method/physics gate needed.
+                                self.logger.info(f"    👀 Performing Visual QC on {feature_name}...")
+                                is_valid, critique = self._check_result_visually(
+                                    dashboard_bytes, f"{target_desc} ({feature_name})")
 
                             if is_valid:
                                 # STAGE DATA (Do not commit to state yet)
@@ -2364,17 +2435,57 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 # unsatisfiable required one. The required-output failure is still
                 # surfaced (the task did not cleanly succeed).
                 if best_attempt["valid_count"] > 0:
-                    self.logger.warning(
-                        f"    ⛑️  Committing best partial attempt "
-                        f"({best_attempt['req_passed']}/{len(required_outputs)} required "
-                        f"outputs, {best_attempt['valid_count']} map(s) passed QC); some "
-                        f"required output(s) never passed."
-                    )
-                    for img_item in best_attempt["images"]:
-                        tools.save_image_bytes(img_item['data'], output_dir, img_item['filename'], self.logger)
-                        state.setdefault("analysis_images", []).append(img_item)
-                    all_valid_maps.extend(best_attempt["maps"])
-                    all_valid_meta.extend(best_attempt["meta"])
+                    # Physics-aware salvage Judge: decide (from physics, not just
+                    # QC-pass count) whether the best partial is a defensible
+                    # APPROXIMATE result to present with honest caveats, or is
+                    # meaningless and should be withheld. Simple: one call.
+                    if mean_spec_bytes is None:
+                        try:
+                            _ms = np.asarray(optimal_data).reshape(
+                                -1, optimal_data.shape[-1]).mean(0)
+                            mean_spec_bytes = plot_curve_to_bytes(
+                                np.column_stack(
+                                    [np.asarray(state["energy_axis"]), _ms]),
+                                {"title": "Representative mean spectrum"})
+                        except Exception:
+                            mean_spec_bytes = b""
+                    passed_names = [m["name"] for m in best_attempt["meta"]]
+                    missing = [n for n in required_outputs if n not in passed_names]
+                    result_summary = (
+                        f"{best_attempt['req_passed']}/{len(required_outputs)} required "
+                        f"outputs passed verification. Committed (passed QC): "
+                        f"{passed_names or 'none'}. Never passed / withheld: "
+                        f"{missing or 'none'}.")
+                    rep_dash = (best_attempt["images"][0]["data"]
+                                if best_attempt["images"] else None)
+                    present, conf, caveat = self._judge_salvage(
+                        rep_dash, code_str, mean_spec_bytes or None,
+                        state.get("system_info"), state.get("analysis_objective"),
+                        _used_tool_descriptions(state, code_str), result_summary)
+
+                    if not present:
+                        self.logger.warning(
+                            f"    ⚖️  Salvage judge WITHHELD the partial result "
+                            f"(no physically defensible signal): {caveat}")
+                    else:
+                        self.logger.warning(
+                            f"    ⚖️  Salvage judge: presenting APPROXIMATE result "
+                            f"({conf} confidence) — {caveat}")
+                        self.logger.warning(
+                            f"    ⛑️  Committing best partial attempt "
+                            f"({best_attempt['req_passed']}/{len(required_outputs)} "
+                            f"required outputs, {best_attempt['valid_count']} map(s) "
+                            f"passed QC); some required output(s) never passed.")
+                        marker = f"[APPROXIMATE — {conf} confidence: {caveat}] "
+                        for img_item in best_attempt["images"]:
+                            tools.save_image_bytes(img_item['data'], output_dir, img_item['filename'], self.logger)
+                            state.setdefault("analysis_images", []).append(img_item)
+                        for m in best_attempt["meta"]:
+                            m["description"] = marker + m.get("description", "")
+                            m["confidence"] = conf
+                            m["salvage_caveat"] = caveat
+                        all_valid_maps.extend(best_attempt["maps"])
+                        all_valid_meta.extend(best_attempt["meta"])
 
         # --- FINAL AGGREGATION ---
         if not all_valid_maps:
@@ -2480,7 +2591,103 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             if reject_votes + remaining < self.SANITY_REJECT_MAJORITY:
                 return True, ""
         return True, ""
-    
+
+    def _review_required_output_one(self, dashboard_bytes, code_str, mean_spec_bytes,
+                                    system_info, objective, feature_desc,
+                                    result_summary, tool_descriptions):
+        meta_str = (json.dumps(system_info, default=str)[:1500]
+                    if system_info else "(none)")
+        prompt = [SPECTROSCOPY_RESULT_REVIEW_INSTRUCTIONS.format(
+            objective=objective or "(not specified)",
+            metadata=meta_str,
+            method=(code_str or "(unavailable)")[:6000],
+            result_summary=f"Output '{feature_desc}': {result_summary}",
+            tool_descriptions=tool_descriptions or "(no registered tool was called)",
+            tool_scrutiny=VERIFIER_TOOL_SCRUTINY_PRINCIPLE,
+        )]
+        prompt.append("Result dashboard (map + histogram):")
+        prompt.append({"mime_type": "image/jpeg", "data": dashboard_bytes})
+        if mean_spec_bytes:
+            prompt.append("Representative mean spectrum of the data:")
+            prompt.append({"mime_type": "image/png", "data": mean_spec_bytes})
+        resp = self.model.generate_content(
+            prompt, generation_config=None, safety_settings=self.safety_settings,
+        )
+        result, _ = self._parse_llm_response(resp)
+        return bool(result.get("valid", True)), result.get("critique", "")
+
+    def _review_required_output(self, dashboard_bytes, code_str, mean_spec_bytes,
+                                system_info, objective, feature_desc,
+                                result_summary, tool_descriptions) -> tuple[bool, str]:
+        """Combined visual + physical review for a REQUIRED output, in ONE voted
+        pass. Replaces the separate visual-QC then physics-sanity gates for
+        required deliverables: a single reviewer weighs the dashboard, the
+        method, the spectrum AND the deterministic tool evidence together, so it
+        cannot split-brain into 'looks like noise' (visual) vs 'saturation'
+        (physical) each blind to the tool's measurability proof. Same voting
+        policy as the physics sanity check (majority-to-reject, fail-open,
+        short-circuit); diagnostics (non-required maps) keep the lighter single
+        visual QC.
+        """
+        reject_votes, last_crit = 0, ""
+        for i in range(self.SANITY_VOTES):
+            try:
+                ok, crit = self._review_required_output_one(
+                    dashboard_bytes, code_str, mean_spec_bytes,
+                    system_info, objective, feature_desc,
+                    result_summary, tool_descriptions)
+            except Exception as e:
+                self.logger.warning(f"Combined result review crashed: {e}")
+                return True, ""  # fail-open
+            if not ok:
+                reject_votes += 1
+                last_crit = crit or last_crit
+            remaining = self.SANITY_VOTES - (i + 1)
+            if reject_votes >= self.SANITY_REJECT_MAJORITY:
+                return False, last_crit
+            if reject_votes + remaining < self.SANITY_REJECT_MAJORITY:
+                return True, ""
+        return True, ""
+
+    def _judge_salvage(self, dashboard_bytes, code_str, mean_spec_bytes,
+                       system_info, objective, tool_descriptions, result_summary):
+        """Final salvage judge (single call). When ALL attempts fail, decide from
+        the physics whether the best partial result is a defensible APPROXIMATE
+        answer worth presenting with caveats, or is meaningless and should be
+        withheld. Returns (present: bool, confidence: 'low'|'medium', caveat).
+        Fails OPEN (present, low, generic caveat) so a crash never silently drops
+        recoverable data — honesty via the caveat, not by discarding.
+        """
+        try:
+            meta_str = (json.dumps(system_info, default=str)[:1500]
+                        if system_info else "(none)")
+            prompt = [SPECTROSCOPY_SALVAGE_JUDGE_INSTRUCTIONS.format(
+                objective=objective or "(not specified)",
+                metadata=meta_str,
+                method=(code_str or "(unavailable)")[:6000],
+                tool_descriptions=tool_descriptions or "(no registered tool was called)",
+                result_summary=result_summary,
+            )]
+            if dashboard_bytes:
+                prompt.append("Representative result dashboard (map + histogram):")
+                prompt.append({"mime_type": "image/jpeg", "data": dashboard_bytes})
+            if mean_spec_bytes:
+                prompt.append("Representative mean spectrum of the data:")
+                prompt.append({"mime_type": "image/png", "data": mean_spec_bytes})
+            resp = self.model.generate_content(
+                prompt, generation_config=None, safety_settings=self.safety_settings)
+            result, _ = self._parse_llm_response(resp)
+            present = bool(result.get("present", True))
+            conf = str(result.get("confidence", "low")).lower()
+            if conf not in ("low", "medium"):
+                conf = "low"
+            caveat = (result.get("caveat") or
+                      "Result did not pass full verification; treat as approximate.")
+            return present, conf, caveat
+        except Exception as e:
+            self.logger.warning(f"Salvage judge crashed: {e}")
+            return True, "low", "Result did not pass full verification; treat as approximate."
+
 
 class RunSelfReflectionController:
     """
