@@ -29,6 +29,7 @@ from ..instruct import (
 
 from ....skills.hyperspectral.eels.eels import AGENT_METADATA_KEYS_TO_STRIP
 from ....skills._shared.curve_fitting_tools import plot_curve_to_bytes
+from ....skills._shared._registry import get_tools_for, get_tool_function
 from ....executors import ExecutionTimeout
 from ....utils.codegen_parse import parse_codegen_response
 
@@ -125,6 +126,43 @@ def _append_prior_knowledge_context(prompt: list, state: dict) -> None:
             prompt.append("\nKey findings:")
             for f in findings:
                 prompt.append(f"- {f}")
+
+
+def _active_skill_names(state: dict) -> list:
+    """Names of the skills currently active for this run (for registry tool
+    scoping). Empty when running skill-free (cold)."""
+    return [s.get("name") for s in (state.get("skills_loaded") or [])
+            if isinstance(s, dict) and s.get("name")]
+
+
+def _hyperspectral_tool_specs(state: dict):
+    """ToolSpecs the _shared registry exposes to the hyperspectral agent given
+    the active skills — the optional tools generated code may call."""
+    try:
+        return get_tools_for("hyperspectral", active_skills=_active_skill_names(state) or None)
+    except Exception:
+        return []
+
+
+def _registry_tool_callables(state: dict) -> dict:
+    """{name: callable} for the registered hyperspectral tools, resolved from
+    each spec's ``import_line`` (``from MODULE import NAME``). Best-effort — a
+    tool whose module/callable can't be imported is skipped, so a missing
+    optional dependency never breaks the sandbox setup.
+    """
+    import importlib
+    out = {}
+    for spec in _hyperspectral_tool_specs(state):
+        try:
+            il = getattr(spec, "import_line", "") or ""
+            if il.startswith("from ") and " import " in il:
+                mod_path, _, nm = il[len("from "):].partition(" import ")
+                out[spec.name] = getattr(importlib.import_module(mod_path.strip()), nm.strip())
+            else:
+                out[spec.name] = get_tool_function(spec.name, active_skills=_active_skill_names(state))
+        except Exception:
+            continue
+    return out
 
 
 def _auxiliary_display_items(state: dict) -> list:
@@ -2039,6 +2077,20 @@ class RunDynamicAnalysisController:
                 auxiliary_operands={k: v.shape for k, v in auxiliary_operands.items()},
             )
 
+            # Registered tools from the _shared registry (this agent + active
+            # skills). Pre-loaded into the sandbox globals below, so generated
+            # code MAY call them by name (no import) when one fits — the same
+            # optional-tool mechanism the image / curve agents use.
+            _tool_specs = _hyperspectral_tool_specs(state)
+            if _tool_specs:
+                base_prompt += (
+                    "\n\n### REGISTERED TOOLS (pre-loaded — call by name, no import)\n"
+                    "These functions are already in scope. Prefer one when it fits "
+                    "the task (e.g. deriving physical constants) over reimplementing it."
+                )
+                for _spec in _tool_specs:
+                    base_prompt += "\n" + _spec.to_prompt()
+
             # Append a preprocessing-mask hint when one exists and identifies
             # excluded pixels. The mask is already applied to the data (zero-
             # filled), so per-pixel fits will produce garbage values on
@@ -2089,8 +2141,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         "nnls": __import__("scipy.optimize", fromlist=["nnls"]).nnls,
                         "linregress": __import__("scipy.stats", fromlist=["linregress"]).linregress,
                         "find_peaks": __import__("scipy.signal", fromlist=["find_peaks"]).find_peaks,
-                        "gaussian_filter": __import__("scipy.ndimage", fromlist=["gaussian_filter"]).gaussian_filter
+                        "gaussian_filter": __import__("scipy.ndimage", fromlist=["gaussian_filter"]).gaussian_filter,
                     }
+                    # Inject registered tools (from the _shared registry) for the
+                    # hyperspectral agent + active skills, so generated code can
+                    # optionally call them by name — same mechanism the image /
+                    # curve agents use, not domain code hardcoded in this generic
+                    # controller.
+                    global_scope.update(_registry_tool_callables(state))
                     
                     # Execute Code
                     with ExecutionTimeout(seconds=self.executor_timeout):
