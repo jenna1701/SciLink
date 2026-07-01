@@ -1604,6 +1604,16 @@ measurability, …):
   is the CORRECT result even if the objective calls the sample a localized
   coupon "on an otherwise empty field." Reject uniformity ONLY as a trivial
   collapse (uniform at exactly 0 / a clip bound — nothing extracted).
+- The RESULT states a valid coverage (fraction of the field with a real, finite
+  non-zero value). Reconcile it with the morphology the OBJECTIVE and the data
+  imply — do NOT apply a fixed coverage threshold. Low coverage is CORRECT for a
+  feature that is genuinely localized (defects, dopants/impurities, a small
+  domain, a phase boundary, a sparse population) — do not reject those. It is a
+  masking/segmentation COLLAPSE only when the feature was expected to fill a
+  region (film / continuous layer / coupon), OR the field-MEAN spectrum clearly
+  shows the signal, yet the map retained just a few scattered pixels — i.e. a
+  real signal was dropped. Judge coverage against what is physically expected,
+  either way; the number is evidence, not a verdict.
 - A merely SURPRISING value is not a flaw if the method is sound and the data
   and tool evidence support it. Do not suppress genuine findings.
 - Reject ONLY when you can name a SPECIFIC methodological/physical flaw AND the

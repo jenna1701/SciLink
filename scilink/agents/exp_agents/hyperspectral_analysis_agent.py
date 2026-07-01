@@ -357,7 +357,22 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "scientific_claims": valid_claims,
             "output_directory": str(self.output_dir)
         }
-        
+
+        # A salvage / approximate / withheld outcome is NOT a clean success:
+        # downgrade the status and surface the honest caveats so a programmatic
+        # caller (or the meta agent) sees the uncertainty instead of a bare
+        # 'success'. Notes come from the dynamic-analysis salvage judge.
+        degradation = result_json.get("degradation_notes", [])
+        if degradation:
+            _rank = {"none": 0, "low": 1, "medium": 2}
+            worst = min(degradation,
+                        key=lambda d: _rank.get(d.get("confidence", "low"), 1))
+            response["status"] = "partial"
+            response["confidence"] = worst.get("confidence", "low")
+            response["warnings"] = [d["caveat"] for d in degradation if d.get("caveat")]
+            response["degraded_outputs"] = degradation
+
+
         self._log_action(
             action="analyze",
             input_ctx={"data": data_path},
@@ -838,7 +853,15 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     break
 
             self.logger.info("--- Analysis pipeline finished ---")
-            return synthesis_state.get("result_json"), synthesis_state.get("error_dict")
+            # Surface any degradation the dynamic-analysis stage recorded (salvage
+            # / withheld / approximate) so the top-level status is not a clean
+            # 'success'. The notes live on iteration_state (set by the salvage
+            # judge); attach them to result_json for analyze() to read.
+            _rj = synthesis_state.get("result_json")
+            _notes = iteration_state.get("degradation_notes", [])
+            if _rj is not None and _notes:
+                _rj["degradation_notes"] = _notes
+            return _rj, synthesis_state.get("error_dict")
 
         except FileNotFoundError:
             self._clear_stored_images()

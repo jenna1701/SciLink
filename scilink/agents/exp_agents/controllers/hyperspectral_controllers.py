@@ -2300,10 +2300,21 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                                             {"title": "Representative mean spectrum"})
                                     except Exception:
                                         mean_spec_bytes = b""  # tolerate; runs without it
+                                # Coverage: fraction of pixels carrying a real
+                                # (finite, non-zero) value. A tiny coverage for a
+                                # feature expected to fill a coherent region is a
+                                # masking/segmentation COLLAPSE the value stats
+                                # alone don't reveal (a few dozen plausible-valued
+                                # pixels look fine by range/mean).
+                                _finite = np.isfinite(result_map)
+                                _real = _finite & (np.abs(result_map) > 1e-9)
+                                _cov = 100.0 * float(_real.sum()) / max(result_map.size, 1)
                                 summary = (
                                     f"value range [{float(np.nanmin(result_map)):.4g}, "
                                     f"{float(np.nanmax(result_map)):.4g}], mean "
-                                    f"{float(np.nanmean(result_map)):.4g} {current_unit}")
+                                    f"{float(np.nanmean(result_map)):.4g} {current_unit}; "
+                                    f"valid coverage {_cov:.1f}% "
+                                    f"({int(_real.sum())} of {result_map.size} pixels finite & non-zero)")
                                 tool_descriptions = _used_tool_descriptions(state, code_str)
                                 self.logger.info(f"    🔎 Combined review on {feature_name}...")
                                 is_valid, critique = self._review_required_output(
@@ -2462,6 +2473,15 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         rep_dash, code_str, mean_spec_bytes or None,
                         state.get("system_info"), state.get("analysis_objective"),
                         _used_tool_descriptions(state, code_str), result_summary)
+
+                    # Record the degradation so the top-level status reflects it
+                    # (a salvage is NOT a clean success). Threaded up to analyze().
+                    state.setdefault("degradation_notes", []).append({
+                        "kind": "withheld" if not present else "approximate",
+                        "confidence": "none" if not present else conf,
+                        "missing_required": missing,
+                        "caveat": caveat,
+                    })
 
                     if not present:
                         self.logger.warning(
