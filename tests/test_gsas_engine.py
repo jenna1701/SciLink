@@ -260,6 +260,30 @@ def test_rietveld_cell_actually_refines(tmp_path):
     assert out["input_lattice"]["length_a"] == pytest.approx(a_start, abs=0.01)
 
 
+@pytest.mark.skipif(not (ge.gsas_available() and _pymatgen_available()),
+                    reason="needs GSAS-II + pymatgen")
+def test_rietveld_wrong_phase_flagged_not_converged(tmp_path):
+    # Adversarial: refine a Si structure against an NaCl-like pattern (wrong phase).
+    # The refinement must NOT report converged, and profile_corr must be a finite
+    # number (a diverged fit gives a flat Ycalc -> corr ~0, never None).
+    from scilink.skills.structure_matching.xrd.simulate_xrd import simulate_xrd_pattern
+    si = tmp_path / "Si.cif"
+    si.write_text(_SI_CIF)
+    nacl = tmp_path / "NaCl.cif"
+    nacl.write_text(
+        "data_NaCl\n_cell_length_a 5.6402\n_cell_length_b 5.6402\n_cell_length_c 5.6402\n"
+        "_cell_angle_alpha 90\n_cell_angle_beta 90\n_cell_angle_gamma 90\n"
+        "_symmetry_space_group_name_H-M 'F m -3 m'\n_symmetry_Int_Tables_number 225\n"
+        "loop_\n_atom_site_label\n_atom_site_fract_x\n_atom_site_fract_y\n_atom_site_fract_z\n"
+        "Na 0.0 0.0 0.0\nCl 0.5 0.5 0.5\n")
+    pattern = simulate_xrd_pattern(str(nacl), "CuKa", (20.0, 80.0), engine="gsas", crystallite_um=0.1)
+    out = ge.rietveld_refine(str(si), pattern["profile_two_theta"], pattern["profile_intensities"],
+                             "CuKa", two_theta_range=(20.0, 80.0))
+    assert isinstance(out["profile_corr"], float)      # a number, never None, even on divergence
+    assert out["converged"] is False                    # wrong phase caught
+    assert out["profile_corr"] < 0.5
+
+
 def test_rietveld_needs_dense_pattern():
     if not ge.gsas_available():
         pytest.skip("GSAS-II not installed")
