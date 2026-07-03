@@ -14,8 +14,10 @@ GSAS-II uniquely provides. Peak-based consumers are unaffected; profile-based
 consumers use the extra keys.
 
 This module is deliberately self-contained (numpy + a lazy GSAS-II import; no
-scilink imports) so it can be exercised in a GSAS-II-only environment. GSAS-II is
-an optional dependency: install the ``gsas`` extra (``pip install
+scilink imports) so it can be exercised in a GSAS-II-only environment. pymatgen,
+if present, is used only to canonicalize an ambiguous input CIF (see
+``_canonicalize_cif``); it is optional and the engine degrades gracefully without
+it. GSAS-II is an optional dependency: install the ``gsas`` extra (``pip install
 scilink[gsas]``, which pulls GSAS-II from source and needs a Fortran compiler).
 
 The simulation recipe is adapted, with permission, from the collaborator project
@@ -72,6 +74,37 @@ def gsas_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def _canonicalize_cif(structure_path: str, workdir: str) -> str:
+    """Re-express a CIF with explicit atom positions (P1) via pymatgen so GSAS-II's
+    structure-factor calculation is unambiguous and consistent with the pymatgen
+    engine.
+
+    An origin-choice-ambiguous CIF — only an H-M space-group symbol, no explicit
+    ``_symmetry_equiv_pos_as_xyz`` operators (common for terse minimal CIFs) —
+    can be resolved to a different origin by GSAS-II than by pymatgen, misplacing
+    atoms and producing physically wrong intensities (verified: anatase I4_1/amd
+    gave Fcalc(200)=0 from a symbol-only CIF, vs the correct strong (200) once
+    coordinates were explicit). Expanding to P1 first removes the ambiguity and
+    makes the two engines agree on the same input — the drop-in contract.
+
+    Real database CIFs (COD, Materials Project) carry full symmetry operators and
+    are already unambiguous; this only guards the terse-CIF tail. Falls back to
+    the original path if pymatgen is unavailable or the CIF cannot be parsed, in
+    which case correctness relies on the CIF carrying explicit symmetry."""
+    try:
+        from pymatgen.core import Structure
+        from pymatgen.io.cif import CifWriter
+    except Exception:
+        return structure_path
+    try:
+        structure = Structure.from_file(structure_path)
+        out = os.path.join(workdir, "canonical.cif")
+        CifWriter(structure, symprec=None).write_file(out)  # symprec=None -> P1, explicit sites
+        return out
+    except Exception:
+        return structure_path
 
 
 def _load_g2sc():
@@ -134,8 +167,13 @@ def simulate_gsas(
         with open(instprm, "w") as fh:
             fh.write(_INSTPRM_TEMPLATE.format(lam=lam))
 
+        # Normalize the CIF to explicit P1 (if pymatgen is available) so an
+        # origin-choice-ambiguous symbol-only CIF cannot be mis-resolved by
+        # GSAS-II relative to the pymatgen engine — see _canonicalize_cif.
+        cif_for_gsas = _canonicalize_cif(structure_path, tmpd)
+
         gpx = G2sc.G2Project(newgpx=os.path.join(tmpd, "sim.gpx"))
-        phase = gpx.add_phase(phasefile=structure_path, phasename="phase")
+        phase = gpx.add_phase(phasefile=cif_for_gsas, phasename="phase")
         hist = gpx.add_simulated_powder_histogram(
             histname="sim",
             iparams=instprm,
