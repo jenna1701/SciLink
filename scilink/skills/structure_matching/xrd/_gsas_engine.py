@@ -95,18 +95,27 @@ def gsas_available() -> bool:
         return False
 
 
-def _canonicalize_cif(structure_path: str, workdir: str) -> str:
-    """Re-express a CIF with explicit atom positions (P1) via pymatgen so GSAS-II's
-    structure-factor calculation is unambiguous and consistent with the pymatgen
-    engine.
+def _canonicalize_cif(structure_path: str, workdir: str, symprec: float = None) -> str:
+    """Re-express a CIF through pymatgen so GSAS-II's structure-factor calculation
+    is unambiguous and consistent with the pymatgen engine.
 
     An origin-choice-ambiguous CIF — only an H-M space-group symbol, no explicit
     ``_symmetry_equiv_pos_as_xyz`` operators (common for terse minimal CIFs) —
     can be resolved to a different origin by GSAS-II than by pymatgen, misplacing
     atoms and producing physically wrong intensities (verified: anatase I4_1/amd
     gave Fcalc(200)=0 from a symbol-only CIF, vs the correct strong (200) once
-    coordinates were explicit). Expanding to P1 first removes the ambiguity and
+    re-expressed via pymatgen). Re-writing via pymatgen removes the ambiguity and
     makes the two engines agree on the same input — the drop-in contract.
+
+    ``symprec`` controls how the re-written CIF carries symmetry:
+
+    * ``None`` (default) → expand to **P1** (explicit sites, no space group).
+      Correct for *simulation*: symmetry does not change the computed pattern.
+    * a float (e.g. 0.1) → re-detect and write **with the space group** preserved.
+      Required for *Rietveld refinement*: GSAS-II only adds unit-cell parameters
+      to the refinement when the phase carries a space group — a P1 phase silently
+      refuses to refine the cell. Both settings equally fix the origin ambiguity
+      (the atoms are pymatgen's correct interpretation either way).
 
     Real database CIFs (COD, Materials Project) carry full symmetry operators and
     are already unambiguous; this only guards the terse-CIF tail. Falls back to
@@ -120,7 +129,7 @@ def _canonicalize_cif(structure_path: str, workdir: str) -> str:
     try:
         structure = Structure.from_file(structure_path)
         out = os.path.join(workdir, "canonical.cif")
-        CifWriter(structure, symprec=None).write_file(out)  # symprec=None -> P1, explicit sites
+        CifWriter(structure, symprec=symprec).write_file(out)
         return out
     except Exception:
         return structure_path
@@ -302,9 +311,11 @@ def rietveld_refine(
         Refine the unit-cell parameters (default True). Turn OFF to hold the cell
         fixed (e.g. a trusted reference cell, or when the data is too sparse).
     refine_profile : bool
-        Refine isotropic sample broadening — crystallite Size and Mustrain
-        (default True). This is what matches the peak widths; turn OFF only if the
-        instrument profile already matches the data.
+        Refine isotropic sample broadening — microstrain (default True). This is
+        what matches the peak widths; turn OFF only if the instrument profile
+        already matches the data. (Only microstrain is refined, not a separate
+        crystallite size: the two are correlated broadening terms and refining
+        both destabilizes sparse/high-symmetry patterns.)
     refine_atoms : bool
         Also refine atomic coordinates + isotropic ADPs (default False). RISKY on
         noisy/low-resolution data — it can diverge or overfit; enable only for
@@ -328,7 +339,9 @@ def rietveld_refine(
         raise ValueError("Rietveld refinement needs a denser pattern (>=20 points in range).")
 
     with tempfile.TemporaryDirectory() as td:
-        cif = _canonicalize_cif(structure_path, td)
+        # symprec (not P1): Rietveld needs the space group so GSAS-II adds the
+        # unit-cell parameters to the refinement — a P1 phase silently refuses.
+        cif = _canonicalize_cif(structure_path, td, symprec=0.1)
         xy = os.path.join(td, "data.xy")
         esd = np.sqrt(np.maximum(y, 1.0))
         np.savetxt(xy, np.column_stack([x, y, esd]), fmt="%.6f")
@@ -340,6 +353,7 @@ def rietveld_refine(
         hist = gpx.add_powder_histogram(xy, iparams=instf, fmthint="xye")
         phase = gpx.add_phase(cif, phasename="phase")
         gpx.link_histogram_phase(hist, phase)
+        input_cell = dict(phase.get_cell())  # starting cell, to expose refinement drift
 
         def _rwp():
             r = hist.residuals
@@ -357,8 +371,12 @@ def rietveld_refine(
             "Sample Parameters": ["Scale"]}})]
         stages.append(("zero_offset", {"set": {"Instrument Parameters": ["Zero"]}}))
         if refine_profile:
+            # Isotropic microstrain absorbs the sample peak-broadening. Refining
+            # BOTH Mustrain and Size is over-parameterized (the two are correlated
+            # broadening terms) and destabilizes sparse/high-symmetry patterns —
+            # verified: a cubic fluorite pattern collapsed the cell with both, and
+            # converged cleanly with mustrain alone. So mustrain only, by default.
             stages.append(("mustrain", {"set": {"Mustrain": {"type": "isotropic", "refine": True}}}))
-            stages.append(("size", {"set": {"Size": {"type": "isotropic", "refine": True}}}))
         if refine_cell:
             stages.append(("cell", {"set": {"Cell": True}}))
         if refine_atoms:
@@ -378,7 +396,11 @@ def rietveld_refine(
             _, cell_esd = phase.get_cell_and_esd()
         except Exception:
             pass
-        size_um, microstrain = _extract_hap_broadening(phase, hist)
+        # Only microstrain is refined by default (see the mustrain stage note), so
+        # crystallite size is not separately determined — report it as None rather
+        # than a misleading unrefined placeholder.
+        _size_um, microstrain = _extract_hap_broadening(phase, hist)
+        size_um = None
 
         prof = {
             "two_theta": [float(v) for v in hist.getdata("X")],
@@ -389,13 +411,27 @@ def rietveld_refine(
         prof["residual"] = [o - c for o, c in zip(prof["y_obs"], prof["y_calc"])]
         res = dict(hist.residuals)
 
-    lattice = {k: float(cell[k]) for k in
-               ("length_a", "length_b", "length_c", "angle_alpha", "angle_beta", "angle_gamma", "volume")
-               if k in cell}
+    _cellkeys = ("length_a", "length_b", "length_c", "angle_alpha", "angle_beta", "angle_gamma", "volume")
+    lattice = {k: float(cell[k]) for k in _cellkeys if k in cell}
+    input_lattice = {k: float(input_cell[k]) for k in _cellkeys if k in input_cell}
+
+    # Convergence: Rietveld is a LOCAL optimizer. A starting cell too far from the
+    # truth (or a wrong phase) diverges — the cell runs away and the profile
+    # correlation crashes. Flag it: converged iff the final correlation is healthy
+    # AND the cell-refinement stage did not degrade the fit vs the best prior stage.
+    _corrs = [t["profile_corr"] for t in trace
+              if isinstance(t.get("profile_corr"), float) and t["profile_corr"] == t["profile_corr"]]
+    final_corr = trace[-1].get("profile_corr") if trace else None
+    best_pre = max(_corrs[:-1]) if len(_corrs) > 1 else (final_corr or 0.0)
+    converged = bool(final_corr is not None and final_corr == final_corr
+                     and final_corr >= 0.5 and final_corr >= best_pre - 0.1)
+
     return {
         "lattice": lattice,
         "lattice_esd": {k: float(v) for k, v in (cell_esd or {}).items()
                         if isinstance(v, (int, float))},
+        "input_lattice": input_lattice,
+        "converged": converged,
         "Rwp": trace[-1].get("Rwp") if trace else None,
         "profile_corr": trace[-1].get("profile_corr") if trace else None,
         "gof": _safe_gof(res),
@@ -406,7 +442,10 @@ def rietveld_refine(
         "wavelength": float(lam),
         "structure_path": structure_path,
         "note": ("For arbitrary-unit data (no counting statistics) read 'profile_corr' "
-                 "as the fit quality; 'Rwp' is inflated by nominal weights."),
+                 "as the fit quality; 'Rwp' is inflated by nominal weights. If "
+                 "'converged' is False the starting cell was too far off (or the "
+                 "phase is wrong) and the refined 'lattice' ran away — compare it "
+                 "against 'input_lattice' and do not trust it."),
     }
 
 

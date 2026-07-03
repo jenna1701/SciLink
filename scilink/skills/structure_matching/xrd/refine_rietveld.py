@@ -41,24 +41,32 @@ TOOL_SPEC = ToolSpec(
         "wavelength": {"type": "str | float", "description": "Source ('CuKa','MoKa',…) or wavelength in Å. Must match how the pattern was collected."},
         "two_theta_range": {"type": "tuple", "description": "Optional (min,max) crop of the measured pattern before refining — exclude a noisy low-angle upturn or an empty high-angle tail. None = full range."},
         "refine_cell": {"type": "bool", "description": "Refine the unit-cell parameters (default True). Turn OFF to hold a trusted reference cell fixed, or when the data is too sparse to constrain it."},
-        "refine_profile": {"type": "bool", "description": "Refine isotropic sample broadening — crystallite size + microstrain (default True). This is what matches the peak WIDTHS and yields the size/strain outputs. Turn OFF only if the instrument profile already matches the data. Note: for a high-symmetry pattern with few peaks (e.g. cubic) size vs strain can be ill-determined even though the cell refines well."},
+        "refine_profile": {"type": "bool", "description": "Refine isotropic sample broadening — microstrain (default True). This matches the peak WIDTHS and yields the microstrain output. Turn OFF only if the instrument profile already matches the data. Only microstrain is refined (not a separate crystallite size): the two are correlated broadening terms and refining both destabilizes sparse/high-symmetry patterns (a cubic pattern can collapse the cell)."},
         "refine_atoms": {"type": "bool", "description": "Also refine atomic coordinates + isotropic displacement parameters (default False). RISKY: on noisy or low-resolution data it can diverge or overfit. Enable ONLY for a high-quality pattern once the cell+profile fit is already good."},
         "n_background_terms": {"type": "int", "description": "Chebyshev background terms (default 6). RAISE (10–14) for a strongly curved or humped background; LOWER for a flat one."},
     },
     required=["structure_path", "two_theta", "intensity"],
     returns=(
-        "dict with 'lattice' (a,b,c,α,β,γ,volume) and 'lattice_esd', 'Rwp', "
+        "dict with 'lattice' (a,b,c,α,β,γ,volume) and 'lattice_esd', "
+        "'input_lattice' (the starting cell) and 'converged' (bool), 'Rwp', "
         "'profile_corr' (Yobs-vs-Ycalc correlation — the robust fit metric when "
         "the data has no counting statistics, e.g. arbitrary intensity units, "
-        "where Rwp is inflated), 'gof', 'crystallite_size_um', 'microstrain', "
+        "where Rwp is inflated), 'gof', 'microstrain' (refined isotropic "
+        "broadening; 'crystallite_size_um' is None — not separately refined), "
         "'convergence_trace' (per-stage Rwp/corr), and 'profile' "
-        "(two_theta / y_obs / y_calc / y_background / residual for plotting)."
+        "(two_theta / y_obs / y_calc / y_background / residual for plotting). "
+        "IMPORTANT: Rietveld is a LOCAL refinement — it needs a starting cell "
+        "within ~1% of the truth. If 'converged' is False the cell ran away "
+        "(starting model too far off or wrong phase); do NOT trust 'lattice' — "
+        "compare it to 'input_lattice'."
     ),
     when_to_use=(
-        "After a phase is identified, to refine its lattice parameters and extract "
-        "crystallite size / microstrain from the measured pattern, or to quantify "
-        "how well the structure fits the whole profile. Read 'profile_corr' (not "
-        "the absolute Rwp) as the fit quality when the data is in arbitrary units."
+        "After a phase is identified (its cell is already approximately right), to "
+        "refine its lattice parameters and extract crystallite size / microstrain "
+        "from the measured pattern, or to quantify how well the structure fits the "
+        "whole profile. Read 'profile_corr' (not the absolute Rwp) as the fit "
+        "quality when the data is in arbitrary units, and check 'converged'. Do "
+        "NOT run it on a far-off or unidentified structure — it will diverge."
     ),
 )
 

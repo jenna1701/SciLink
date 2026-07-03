@@ -212,14 +212,52 @@ def test_rietveld_roundtrip_recovers_cell(tmp_path):
                                crystallite_um=0.1)  # broadened -> realistic widths
     out = ge.rietveld_refine(str(cif), sim["profile_two_theta"], sim["profile_intensities"],
                              "CuKa", two_theta_range=(20.0, 80.0))
-    for k in ("lattice", "lattice_esd", "Rwp", "profile_corr", "crystallite_size_um",
-              "microstrain", "convergence_trace", "profile"):
+    for k in ("lattice", "input_lattice", "converged", "lattice_esd", "Rwp",
+              "profile_corr", "microstrain", "convergence_trace", "profile"):
         assert k in out
     assert out["lattice"]["length_a"] == pytest.approx(5.43088, abs=0.02)
     assert out["profile_corr"] > 0.9
+    assert out["converged"] is True
     assert len(out["convergence_trace"]) >= 3
     for pk in ("two_theta", "y_obs", "y_calc", "y_background", "residual"):
         assert len(out["profile"][pk]) == len(out["profile"]["two_theta"]) > 100
+
+
+@pytest.mark.skipif(not (ge.gsas_available() and _pymatgen_available()),
+                    reason="needs GSAS-II + pymatgen")
+def test_rietveld_cell_actually_refines(tmp_path):
+    # Regression guard: the unit cell must GENUINELY refine, not be a no-op.
+    # (A P1-canonicalized phase silently refuses cell refinement in GSAS-II, so
+    # the cell must be canonicalized WITH its space group.) Simulate a pattern
+    # from Si's true cell, feed a structure whose cell is perturbed +0.5%, and
+    # require the refinement to pull it back toward 5.431 Å and report converged.
+    from pymatgen.core import Structure
+    from pymatgen.io.cif import CifWriter
+    from scilink.skills.structure_matching.xrd.simulate_xrd import simulate_xrd_pattern
+    cif = tmp_path / "Si.cif"
+    cif.write_text(_SI_CIF)
+    sim = simulate_xrd_pattern(str(cif), "CuKa", (20.0, 80.0), engine="gsas", crystallite_um=0.1)
+
+    s = Structure.from_file(str(cif))
+    s.scale_lattice(s.volume * (1.005 ** 3))         # +0.5% cell
+    pert = tmp_path / "Si_pert.cif"
+    CifWriter(s).write_file(str(pert))
+    a_start = s.lattice.a
+    assert a_start > 5.45                             # perturbed away from truth
+
+    out = ge.rietveld_refine(str(pert), sim["profile_two_theta"], sim["profile_intensities"],
+                             "CuKa", two_theta_range=(20.0, 80.0))
+    a_ref = out["lattice"]["length_a"]
+    assert out["converged"] is True
+    # genuinely MOVED toward the truth — a no-op cell refinement (the bug this
+    # guards) would leave a_ref == a_start with the full offset intact. Require it
+    # to recover most of the perturbation (a sparse cubic pattern with broad peaks
+    # won't hit it exactly, but a no-op recovers zero).
+    err_start = abs(a_start - 5.43088)
+    err_ref = abs(a_ref - 5.43088)
+    assert err_ref < 0.6 * err_start                 # recovered >40% of the offset
+    assert a_ref < a_start - 0.01                     # and demonstrably moved
+    assert out["input_lattice"]["length_a"] == pytest.approx(a_start, abs=0.01)
 
 
 def test_rietveld_needs_dense_pattern():
