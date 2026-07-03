@@ -250,3 +250,197 @@ def _peak_pick(x: np.ndarray, y: np.ndarray, lam: float, rel_height: float = 0.0
     with np.errstate(divide="ignore", invalid="ignore"):
         d = lam / (2.0 * np.sin(theta))
     return tt, inten, d
+
+
+# --- Rietveld refinement (tier-3) --------------------------------------------
+#
+# Full-pattern least-squares refinement of a candidate structure against a
+# measured pattern, on the same GSAS-II wrapper as the simulation engine. The
+# staged protocol below is the load-bearing part: refine the cheap, well-
+# determined parameters first (background, scale) and the geometry (2theta zero)
+# BEFORE the unit cell — refining the cell against a pattern with an uncorrected
+# 2theta offset diverges (the cell chases the offset into invalid geometry). Peak
+# widths for a real specimen are dominated by sample broadening, so isotropic
+# Mustrain/Size (crystallite size + microstrain) are refined, not the instrument
+# Caglioti U/V/W (which are a calibration property, not a per-sample unknown).
+#
+# Metric note: for a pattern in ARBITRARY intensity units (no counting
+# statistics — the common case for archived/RRUFF-style data), the weighted Rwp
+# is inflated because the per-point weights (1/esd^2) are only nominal. The
+# profile-fit correlation (Yobs vs Ycalc) is the robust fit indicator there — the
+# same "score where there is signal" philosophy as peak_region_r2. Both are
+# returned; read the correlation when counting statistics are absent.
+
+def rietveld_refine(
+    structure_path: str,
+    two_theta,
+    intensity,
+    wavelength: Any = "CuKa",
+    two_theta_range: tuple = None,
+    refine_cell: bool = True,
+    refine_profile: bool = True,
+    refine_atoms: bool = False,
+    n_background_terms: int = 6,
+) -> dict[str, Any]:
+    """Rietveld-refine ``structure_path`` against a measured (two_theta, intensity)
+    pattern with GSAS-II. Returns refined lattice + esd, fit metrics (Rwp and the
+    robust profile-fit correlation), the refined profile (obs/calc/background/
+    residual), refined crystallite size + microstrain, and the per-stage
+    convergence trace. See the module comment for the protocol rationale.
+
+    Parameters
+    ----------
+    structure_path : str
+        CIF of the candidate phase (canonicalized to P1 like the sim engine).
+    two_theta, intensity : sequences
+        The measured pattern.
+    wavelength : float | str
+        Wavelength (Å) or anode alias ('CuKa', ...).
+    two_theta_range : (float, float) | None
+        Optional (min, max) crop of the measured pattern before refining.
+    refine_cell : bool
+        Refine the unit-cell parameters (default True). Turn OFF to hold the cell
+        fixed (e.g. a trusted reference cell, or when the data is too sparse).
+    refine_profile : bool
+        Refine isotropic sample broadening — crystallite Size and Mustrain
+        (default True). This is what matches the peak widths; turn OFF only if the
+        instrument profile already matches the data.
+    refine_atoms : bool
+        Also refine atomic coordinates + isotropic ADPs (default False). RISKY on
+        noisy/low-resolution data — it can diverge or overfit; enable only for
+        high-quality patterns where the cell/profile fit is already good.
+    n_background_terms : int
+        Chebyshev background terms (default 6). RAISE (10-14) for a strongly
+        curved/humped background; LOWER for a flat one.
+    """
+    import os
+    import tempfile
+
+    G2sc = _load_g2sc()
+    lam = _resolve_wavelength(wavelength)
+    x = np.asarray(two_theta, dtype=float)
+    y = np.asarray(intensity, dtype=float)
+    if two_theta_range is not None:
+        lo, hi = float(min(two_theta_range)), float(max(two_theta_range))
+        m = (x >= lo) & (x <= hi)
+        x, y = x[m], y[m]
+    if x.size < 20:
+        raise ValueError("Rietveld refinement needs a denser pattern (>=20 points in range).")
+
+    with tempfile.TemporaryDirectory() as td:
+        cif = _canonicalize_cif(structure_path, td)
+        xy = os.path.join(td, "data.xy")
+        esd = np.sqrt(np.maximum(y, 1.0))
+        np.savetxt(xy, np.column_stack([x, y, esd]), fmt="%.6f")
+        instf = os.path.join(td, "auto.instprm")
+        with open(instf, "w") as fh:
+            fh.write(_INSTPRM_TEMPLATE.format(lam=lam))
+
+        gpx = G2sc.G2Project(newgpx=os.path.join(td, "riet.gpx"))
+        hist = gpx.add_powder_histogram(xy, iparams=instf, fmthint="xye")
+        phase = gpx.add_phase(cif, phasename="phase")
+        gpx.link_histogram_phase(hist, phase)
+
+        def _rwp():
+            r = hist.residuals
+            return float(r.get("Rwp", r.get("wR", float("nan"))))
+
+        def _corr():
+            yo = np.asarray(hist.getdata("Yobs"), dtype=float)
+            yc = np.asarray(hist.getdata("Ycalc"), dtype=float)
+            if yo.size != yc.size or yo.size < 2:
+                return float("nan")
+            return float(np.corrcoef(yo, yc)[0, 1])
+
+        stages = [("background+scale", {"set": {
+            "Background": {"type": "chebyschev", "refine": True, "no. coeffs": int(n_background_terms)},
+            "Sample Parameters": ["Scale"]}})]
+        stages.append(("zero_offset", {"set": {"Instrument Parameters": ["Zero"]}}))
+        if refine_profile:
+            stages.append(("mustrain", {"set": {"Mustrain": {"type": "isotropic", "refine": True}}}))
+            stages.append(("size", {"set": {"Size": {"type": "isotropic", "refine": True}}}))
+        if refine_cell:
+            stages.append(("cell", {"set": {"Cell": True}}))
+        if refine_atoms:
+            stages.append(("atoms", {"set": {"Atoms": {"all": "XU"}}}))
+
+        trace = []
+        for label, st in stages:
+            try:
+                gpx.do_refinements([st])
+                trace.append({"stage": label, "Rwp": _rwp(), "profile_corr": _corr()})
+            except Exception as exc:  # a stage that diverges is recorded, not fatal
+                trace.append({"stage": label, "error": str(exc)[:200]})
+
+        cell = phase.get_cell()
+        cell_esd = {}
+        try:
+            _, cell_esd = phase.get_cell_and_esd()
+        except Exception:
+            pass
+        size_um, microstrain = _extract_hap_broadening(phase, hist)
+
+        prof = {
+            "two_theta": [float(v) for v in hist.getdata("X")],
+            "y_obs": [float(v) for v in hist.getdata("Yobs")],
+            "y_calc": [float(v) for v in hist.getdata("Ycalc")],
+            "y_background": [float(v) for v in hist.getdata("Background")],
+        }
+        prof["residual"] = [o - c for o, c in zip(prof["y_obs"], prof["y_calc"])]
+        res = dict(hist.residuals)
+
+    lattice = {k: float(cell[k]) for k in
+               ("length_a", "length_b", "length_c", "angle_alpha", "angle_beta", "angle_gamma", "volume")
+               if k in cell}
+    return {
+        "lattice": lattice,
+        "lattice_esd": {k: float(v) for k, v in (cell_esd or {}).items()
+                        if isinstance(v, (int, float))},
+        "Rwp": trace[-1].get("Rwp") if trace else None,
+        "profile_corr": trace[-1].get("profile_corr") if trace else None,
+        "gof": _safe_gof(res),
+        "crystallite_size_um": size_um,
+        "microstrain": microstrain,
+        "convergence_trace": trace,
+        "profile": prof,
+        "wavelength": float(lam),
+        "structure_path": structure_path,
+        "note": ("For arbitrary-unit data (no counting statistics) read 'profile_corr' "
+                 "as the fit quality; 'Rwp' is inflated by nominal weights."),
+    }
+
+
+def _safe_gof(res):
+    """Goodness-of-fit = Rwp / Rexp = wR / wRmin (GSAS residuals dict). None if
+    the expected-Rwp term is missing or zero (arbitrary-unit data)."""
+    wr, wrmin = res.get("wR"), res.get("wRmin")
+    try:
+        if wr and wrmin and wrmin > 0:
+            return float(wr) / float(wrmin)
+    except Exception:
+        pass
+    return None
+
+
+def _extract_hap_broadening(phase, hist):
+    """Best-effort read of the refined isotropic crystallite size (um) and
+    microstrain from the phase's histogram-and-phase (HAP) values. Returns
+    (size_um, microstrain), either possibly None if not present."""
+    try:
+        hap = phase.getHAPvalues(hist)
+    except Exception:
+        return None, None
+    size_um = microstrain = None
+    try:
+        sz = hap.get("Size")
+        if sz and isinstance(sz[1], (list, tuple)):
+            size_um = float(sz[1][0])
+    except Exception:
+        pass
+    try:
+        mu = hap.get("Mustrain")
+        if mu and isinstance(mu[1], (list, tuple)):
+            microstrain = float(mu[1][0])
+    except Exception:
+        pass
+    return size_um, microstrain

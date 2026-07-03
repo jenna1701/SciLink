@@ -42,9 +42,20 @@ The skill ships five tools the analysis script chains together:
   shift / scale / assignment optimization). Hundreds of milliseconds
   per candidate. Use for confident identification on real-lab patterns
   after the fast tier narrows the candidate list.
+- `refine_rietveld` — **refinement tier** (optional `gsas` extra). *After*
+  the phase is identified, Rietveld-refine that structure against the
+  measured pattern to extract accurate lattice parameters (+ esd),
+  crystallite size and microstrain, and quantify the whole-profile fit.
+  A staged GSAS-II refinement (background+scale → 2θ zero → sample
+  broadening → cell). This is a follow-up to identification, **not** part
+  of the identification loop — only run it once a candidate is confirmed,
+  and read `profile_corr` (not the absolute `Rwp`) as the fit quality when
+  the pattern is in arbitrary intensity units.
 
 Install dependencies: `pip install scilink[structure-matching]` (pymatgen
-with the XRD analysis module, mp-api, pulp).
+with the XRD analysis module, mp-api, pulp). Rietveld refinement
+additionally needs `pip install scilink[gsas]` (GSAS-II, built from source
+— see the `simulate_xrd_pattern` `gsas` engine docs for the recipe).
 
 **Extending the backend list.** Materials Project, local CIF, and COD
 ship in-package. ICSD, OQMD, AFLOW, NOMAD, and any custom database

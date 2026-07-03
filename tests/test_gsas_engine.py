@@ -186,6 +186,49 @@ def test_ambiguous_cif_intensities_recovered(tmp_path):
     assert tt[int(np.argmax(I))] == pytest.approx(25.28, abs=0.15)
 
 
+def test_refine_rietveld_registered_and_knobs():
+    from scilink.skills.structure_matching.xrd.refine_rietveld import TOOL_SPEC
+    from scilink.skills._shared._registry import get_tools_for
+    names = {t.name for t in get_tools_for("structure_matching", active_skills=["xrd"])}
+    assert "refine_rietveld" in names
+    # tunable knobs surfaced with guidance (not hidden in the signature)
+    for k in ("refine_cell", "refine_profile", "refine_atoms", "n_background_terms"):
+        assert k in TOOL_SPEC.parameters
+    assert "RISKY" in TOOL_SPEC.parameters["refine_atoms"]["description"]
+    # returns doc names the robust arbitrary-units fit metric
+    assert "profile_corr" in TOOL_SPEC.returns
+
+
+@pytest.mark.skipif(not (ge.gsas_available() and _pymatgen_available()),
+                    reason="needs GSAS-II + pymatgen")
+def test_rietveld_roundtrip_recovers_cell(tmp_path):
+    # Simulate a broadened Si profile (the "measurement"), then Rietveld-refine
+    # the same structure against it: the fit must be good (high profile_corr),
+    # the refined cell must stay at Si's a=5.431 Å, and the contract keys present.
+    from scilink.skills.structure_matching.xrd.simulate_xrd import simulate_xrd_pattern
+    cif = tmp_path / "Si.cif"
+    cif.write_text(_SI_CIF)
+    sim = simulate_xrd_pattern(str(cif), "CuKa", (20.0, 80.0), engine="gsas",
+                               crystallite_um=0.1)  # broadened -> realistic widths
+    out = ge.rietveld_refine(str(cif), sim["profile_two_theta"], sim["profile_intensities"],
+                             "CuKa", two_theta_range=(20.0, 80.0))
+    for k in ("lattice", "lattice_esd", "Rwp", "profile_corr", "crystallite_size_um",
+              "microstrain", "convergence_trace", "profile"):
+        assert k in out
+    assert out["lattice"]["length_a"] == pytest.approx(5.43088, abs=0.02)
+    assert out["profile_corr"] > 0.9
+    assert len(out["convergence_trace"]) >= 3
+    for pk in ("two_theta", "y_obs", "y_calc", "y_background", "residual"):
+        assert len(out["profile"][pk]) == len(out["profile"]["two_theta"]) > 100
+
+
+def test_rietveld_needs_dense_pattern():
+    if not ge.gsas_available():
+        pytest.skip("GSAS-II not installed")
+    with pytest.raises(ValueError):
+        ge.rietveld_refine("x.cif", [10.0, 20.0], [1.0, 2.0], "CuKa")
+
+
 @pytest.mark.skipif(not ge.gsas_available(), reason="GSAS-II not installed")
 def test_full_simulation_physics(tmp_path):
     # Minimal Si CIF (diamond cubic, a=5.43088) -> exact (111)/(220) at CuKa,
