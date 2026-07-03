@@ -1534,19 +1534,182 @@ Determine if this result captures a REAL physical signal, even if that signal is
 In spectroscopy, some features (like impurities) only exist in small regions.
 If the Histogram shows a large pile-up at zero/bounds (background) BUT there is a distinct, smaller population distribution elsewhere, **THIS IS VALID.**
 
+### CRITICAL: HANDLING HOMOGENEOUS RESULTS
+A uniform or single-valued map is NOT, by itself, a failure. The measured
+quantity or feature can be genuinely homogeneous — e.g. a uniform film or
+coating, a sample that fills the field of view, or a property that is
+constant across the region. In those cases a near-uniform map (or a presence
+mask that is all-present / all-absent) is the physically CORRECT result.
+Spatial contrast is not required for validity. Reject uniformity ONLY when the
+single value is a trivial collapse that means the algorithm extracted nothing
+where signal was expected (see Failure Criterion 2).
+
 ### FAILURE CRITERIA (Reject ONLY if these are true):
 1. **Total Noise:** The map is pure 'static' (salt-and-pepper) with ZERO recognizable structure.
-2. **Total Algorithm Failure:** The histogram is a **SINGLE** sharp spike (Dirac delta) containing 100% of the data.
-3. **Complete Rail-Gazing:** The data is piled up at the min/max edges with **NO secondary distribution** visible.
+2. **Trivial Collapse:** The map is uniform AT A TRIVIAL VALUE that means no signal was extracted (e.g. exactly 0 / exactly a clip bound everywhere) AND the feature is one that should vary or appear somewhere — i.e. the algorithm produced nothing, not a real homogeneous measurement. A uniform map at a NON-trivial, physically plausible value (a real thickness, a real concentration, all-present where the sample fills the frame) is NOT this — accept it.
+3. **Complete Rail-Gazing:** The data is piled up at the min/max edges with **NO secondary distribution** visible AND no physical reason for the field to be homogeneous.
 
 ### SUCCESS CRITERIA (Accept if present):
 - **Structure:** Does the map show ANY structured domains, even if they are small?
 - **Population:** Is there a visible distribution (bell curve, tail, or cluster) separate from the background spike?
+- **Plausible homogeneity:** Is the map uniform (or near-uniform) at a physically meaningful value consistent with a homogeneous sample or a feature that fills/is-absent-from the field? That is a valid measurement, not a failure.
 
 ### OUTPUT FORMAT
 Return a JSON object with:
 - 'valid': boolean
 - 'critique': string (Briefly explain decision)
+"""
+
+
+SPECTROSCOPY_RESULT_REVIEW_INSTRUCTIONS = """
+You are a senior scientist doing a SINGLE combined review of one automated
+per-pixel result the user explicitly asked for. Judge BOTH in one decision:
+  (A) SIGNAL — does this capture a real extracted signal, not pure noise or a
+      trivial collapse (uniform at exactly 0 / a clip bound where something was
+      expected)?
+  (B) SOUNDNESS — is the METHOD appropriate and the VALUE physically plausible
+      given what the data actually shows?
+Reason from the physics, the data, and the evidence below — NEVER from a
+pre-expected number.
+
+### OBJECTIVE
+{objective}
+
+### DATA CONTEXT (metadata)
+{metadata}
+
+### METHOD — the generated code that produced this result
+```python
+{method}
+```
+
+### RESULT
+{result_summary}
+You are also shown the result dashboard (map + histogram) and a representative
+mean spectrum of the data.
+
+### TOOLS USED BY THE METHOD
+The generated code called these vetted, purpose-built helper tools — here is
+what each already handles robustly (window selection, flux gating,
+measurability, …):
+{tool_descriptions}
+
+{tool_scrutiny}
+
+### KEY PRINCIPLES
+- Trust the DATA over the objective's geometric framing. A uniform or
+  full-field result is VALID when the signal genuinely fills the field: if the
+  tool evidence shows a coherent, high-SNR feature present in most/all pixels
+  (e.g. a measurable edge in ~all pixels), a uniform map or an all-present mask
+  is the CORRECT result even if the objective calls the sample a localized
+  coupon "on an otherwise empty field." Reject uniformity ONLY as a trivial
+  collapse (uniform at exactly 0 / a clip bound — nothing extracted).
+- The RESULT states a valid coverage (fraction of the field with a real, finite
+  non-zero value). Reconcile it with the morphology the OBJECTIVE and the data
+  imply — do NOT apply a fixed coverage threshold. Low coverage is CORRECT for a
+  feature that is genuinely localized (defects, dopants/impurities, a small
+  domain, a phase boundary, a sparse population) — do not reject those. It is a
+  masking/segmentation COLLAPSE only when the feature was expected to fill a
+  region (film / continuous layer / coupon), OR the field-MEAN spectrum clearly
+  shows the signal, yet the map retained just a few scattered pixels — i.e. a
+  real signal was dropped. Judge coverage against what is physically expected,
+  either way; the number is evidence, not a verdict.
+- A merely SURPRISING value is not a flaw if the method is sound and the data
+  and tool evidence support it. Do not suppress genuine findings.
+- Reject ONLY when you can name a SPECIFIC methodological/physical flaw AND the
+  direction of the fix (which estimator / window / step to use instead).
+
+### OUTPUT FORMAT
+Return a JSON object:
+- 'valid': boolean (true = accept; false = clear flaw)
+- 'critique': string (if false: name the specific flaw and corrective direction)
+"""
+
+
+SPECTROSCOPY_SALVAGE_JUDGE_INSTRUCTIONS = """
+You are a senior scientist making a FINAL salvage decision. Automated extraction
+did NOT fully pass verification after all retries. You are shown the BEST partial
+result produced (a representative dashboard, the method code, a representative
+mean spectrum, and the tools it used). Judge FROM THE PHYSICS AND THE DATA
+whether this partial result is a physically DEFENSIBLE approximate answer worth
+reporting WITH EXPLICIT CAVEATS, or is physically meaningless (trivial collapse
+to zero, pure noise, or a clear artifact) and must be withheld.
+
+Presenting an APPROXIMATE / uncertain result is acceptable — provided its
+limitations and uncertainty are stated honestly. Withhold ONLY if there is no
+real signal to report.
+
+### OBJECTIVE
+{objective}
+
+### DATA CONTEXT (metadata)
+{metadata}
+
+### METHOD (generated code)
+```python
+{method}
+```
+
+### TOOLS USED BY THE METHOD
+{tool_descriptions}
+
+### PARTIAL RESULT
+{result_summary}
+
+### OUTPUT FORMAT
+Return a JSON object:
+- 'present': boolean (true = report it as approximate with caveats; false = withhold, no real signal)
+- 'confidence': "low" or "medium" (never "high" — this is a salvage of an unverified result)
+- 'caveat': ONE honest sentence stating the key limitation / uncertainty a reader MUST know
+"""
+
+
+SPECTROSCOPY_PHYSICS_SANITY_INSTRUCTIONS = """
+You are a senior scientist doing a PHYSICAL-SOUNDNESS review of one automated
+per-pixel result. Visual quality was already checked separately — your job is
+different: judge whether the METHOD is appropriate and the RESULT is physically
+plausible given what the data actually shows. Reason from the physics and the
+data, NEVER from a pre-expected number.
+
+### OBJECTIVE
+{objective}
+
+### DATA CONTEXT (metadata)
+{metadata}
+
+### METHOD — the generated code that produced this result
+```python
+{method}
+```
+
+### RESULT
+{result_summary}
+You are also shown the result dashboard (map + histogram) and a representative
+mean spectrum of the data.
+
+### YOUR TASK
+Decide if there is a CLEAR methodological or physical flaw that makes this
+result wrong. Typical real flaws:
+- the method uses an estimator that is BIASED for this data — e.g. a global
+  fit over a spectral region where the signal saturates / clips / violates the
+  model's assumptions, and the result reflects that bias;
+- the reported value is contradicted by a feature plainly visible in the
+  spectrum (e.g. a strong absorption edge/step or peak whose size is
+  inconsistent with the value by a large factor);
+- the method skips a step the physics/objective requires (e.g. no flat-field
+  normalization when an I0 is provided).
+
+Be CONSERVATIVE — default to VALID:
+- A merely SURPRISING value is NOT a flaw if the method is sound and the data
+  supports it. Do not suppress genuine findings.
+- Do not flag stylistic or minor issues, or values you simply cannot verify.
+- Reject ONLY when you can name the specific methodological/physical flaw AND
+  the direction of the fix (which estimator / window / step to use instead).
+
+### OUTPUT FORMAT
+Return a JSON object:
+- 'valid': boolean (true = physically sound enough to accept; false = clear flaw)
+- 'critique': string (if false: name the specific flaw and the corrective direction)
 """
 
 

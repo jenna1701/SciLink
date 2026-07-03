@@ -357,7 +357,22 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "scientific_claims": valid_claims,
             "output_directory": str(self.output_dir)
         }
-        
+
+        # A salvage / approximate / withheld outcome is NOT a clean success:
+        # downgrade the status and surface the honest caveats so a programmatic
+        # caller (or the meta agent) sees the uncertainty instead of a bare
+        # 'success'. Notes come from the dynamic-analysis salvage judge.
+        degradation = result_json.get("degradation_notes", [])
+        if degradation:
+            _rank = {"none": 0, "low": 1, "medium": 2}
+            worst = min(degradation,
+                        key=lambda d: _rank.get(d.get("confidence", "low"), 1))
+            response["status"] = "partial"
+            response["confidence"] = worst.get("confidence", "low")
+            response["warnings"] = [d["caveat"] for d in degradation if d.get("caveat")]
+            response["degraded_outputs"] = degradation
+
+
         self._log_action(
             action="analyze",
             input_ctx={"data": data_path},
@@ -605,13 +620,21 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         try:
             is_curve = False
             is_image = False
+            is_cube = False
 
             if ext == '.npy':
-                arr = np.load(auxiliary_data)
+                arr = np.load(auxiliary_data, mmap_mode='r')
                 if arr.ndim == 1:
                     is_curve = True
                 elif arr.ndim == 2 and min(arr.shape) <= 2:
                     is_curve = True
+                elif arr.ndim >= 3 and arr.shape[-1] > 4:
+                    # A spectral datacube companion (e.g. an I0/flat-field
+                    # baseline), NOT an RGB(A) image. Keep it as a raw numerical
+                    # operand so the per-pixel code-gen can normalize against it
+                    # (e.g. transmission = data / baseline). A trailing axis of
+                    # 3 or 4 is treated as an image below.
+                    is_cube = True
                 else:
                     is_image = True
             elif ext in curve_extensions:
@@ -678,6 +701,41 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                         convert_numpy_to_jpeg_bytes(img)
                     )
                 result["auxiliary_mime_type"] = "image/jpeg"
+
+            elif is_cube:
+                # Same-grid companion datacube (e.g. an I0 / flat-field
+                # baseline). Loaded as a raw float array so it can serve as a
+                # per-pixel numerical operand for the code-gen (the operand
+                # alignment gate keeps it only if its shape matches the primary
+                # cube). We deliberately do NOT route it through ``load_image``,
+                # which would cast the counts to uint8 and destroy their scale.
+                cube = np.asarray(np.load(auxiliary_data), dtype=float)
+                result["auxiliary_array"] = cube
+                result["auxiliary_summary"] = (
+                    f"Companion datacube with shape {cube.shape} "
+                    f"(dtype: {cube.dtype}). Value range: "
+                    f"[{float(np.nanmin(cube)):.4g}, {float(np.nanmax(cube)):.4g}]. "
+                    "Intended as a same-grid per-pixel operand (e.g. an I0 / "
+                    "flat-field baseline to divide the primary by)."
+                )
+                # Show the spatial-mean spectrum so the LLM can see the
+                # baseline's spectral shape (a cube has no single 2D rendering).
+                try:
+                    mean_spec = np.asarray(cube).reshape(-1, cube.shape[-1]).mean(0)
+                    plot_data = np.column_stack(
+                        [np.arange(mean_spec.size), mean_spec]
+                    )
+                    result["auxiliary_plot_bytes"] = plot_curve_to_bytes(
+                        plot_data,
+                        {"title": f"{result['auxiliary_label']} "
+                                  "(spatial-mean spectrum)"},
+                    )
+                    result["auxiliary_mime_type"] = "image/png"
+                except Exception as _plot_err:
+                    self.logger.warning(
+                        f"Could not render mean spectrum for cube auxiliary: "
+                        f"{_plot_err}"
+                    )
 
         except Exception as e:
             self.logger.warning(f"Failed to load auxiliary data: {e}")
@@ -795,7 +853,15 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     break
 
             self.logger.info("--- Analysis pipeline finished ---")
-            return synthesis_state.get("result_json"), synthesis_state.get("error_dict")
+            # Surface any degradation the dynamic-analysis stage recorded (salvage
+            # / withheld / approximate) so the top-level status is not a clean
+            # 'success'. The notes live on iteration_state (set by the salvage
+            # judge); attach them to result_json for analyze() to read.
+            _rj = synthesis_state.get("result_json")
+            _notes = iteration_state.get("degradation_notes", [])
+            if _rj is not None and _notes:
+                _rj["degradation_notes"] = _notes
+            return _rj, synthesis_state.get("error_dict")
 
         except FileNotFoundError:
             self._clear_stored_images()
