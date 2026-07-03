@@ -58,7 +58,11 @@ TOOL_SPEC = ToolSpec(
         "IMPORTANT: Rietveld is a LOCAL refinement — it needs a starting cell "
         "within ~1% of the truth. If 'converged' is False the cell ran away "
         "(starting model too far off or wrong phase); do NOT trust 'lattice' — "
-        "compare it to 'input_lattice'."
+        "compare it to 'input_lattice'. 'converged' is necessary but NOT "
+        "sufficient: a wrong-but-plausible low-symmetry (triclinic) structure can "
+        "reach a moderate profile_corr (~0.85) with a wrong cell and pass — so "
+        "corroborate a low-symmetry / modest-corr result against the identification "
+        "score and the expected cell before trusting it."
     ),
     when_to_use=(
         "After a phase is identified (its cell is already approximately right), to "

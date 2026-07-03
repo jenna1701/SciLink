@@ -417,14 +417,22 @@ def rietveld_refine(
 
     # Convergence: Rietveld is a LOCAL optimizer. A starting cell too far from the
     # truth (or a wrong phase) diverges — the cell runs away and the profile
-    # correlation crashes. Flag it: converged iff the final correlation is healthy
-    # AND the cell-refinement stage did not degrade the fit vs the best prior stage.
+    # correlation crashes. Compute the final fit correlation from the ACTUAL final
+    # profile (robust to a last stage that errored, where the trace lacks a corr —
+    # a catastrophically diverged refinement gives a flat Ycalc -> corr ~0, not
+    # None). converged iff the final correlation is healthy AND the cell stage did
+    # not degrade the fit vs the best prior stage.
+    _yo, _yc = np.asarray(prof["y_obs"], float), np.asarray(prof["y_calc"], float)
+    if _yo.size > 1 and np.std(_yc) > 0 and np.std(_yo) > 0:
+        final_corr = float(np.corrcoef(_yo, _yc)[0, 1])
+    else:
+        final_corr = 0.0  # degenerate (flat) calc pattern -> total divergence
+    if final_corr != final_corr:  # nan guard
+        final_corr = 0.0
     _corrs = [t["profile_corr"] for t in trace
               if isinstance(t.get("profile_corr"), float) and t["profile_corr"] == t["profile_corr"]]
-    final_corr = trace[-1].get("profile_corr") if trace else None
-    best_pre = max(_corrs[:-1]) if len(_corrs) > 1 else (final_corr or 0.0)
-    converged = bool(final_corr is not None and final_corr == final_corr
-                     and final_corr >= 0.5 and final_corr >= best_pre - 0.1)
+    best_pre = max(_corrs[:-1]) if len(_corrs) > 1 else final_corr
+    converged = bool(final_corr >= 0.5 and final_corr >= best_pre - 0.1)
 
     return {
         "lattice": lattice,
@@ -433,7 +441,7 @@ def rietveld_refine(
         "input_lattice": input_lattice,
         "converged": converged,
         "Rwp": trace[-1].get("Rwp") if trace else None,
-        "profile_corr": trace[-1].get("profile_corr") if trace else None,
+        "profile_corr": final_corr,
         "gof": _safe_gof(res),
         "crystallite_size_um": size_um,
         "microstrain": microstrain,
@@ -445,7 +453,12 @@ def rietveld_refine(
                  "as the fit quality; 'Rwp' is inflated by nominal weights. If "
                  "'converged' is False the starting cell was too far off (or the "
                  "phase is wrong) and the refined 'lattice' ran away — compare it "
-                 "against 'input_lattice' and do not trust it."),
+                 "against 'input_lattice' and do not trust it. 'converged' is "
+                 "necessary but NOT sufficient: a wrong-but-plausible structure "
+                 "(especially low-symmetry / triclinic) can reach a moderate "
+                 "profile_corr (~0.85) with a wrong cell and pass — so corroborate "
+                 "a low-symmetry result with the identification score and expected "
+                 "cell, and treat a modest profile_corr with caution."),
     }
 
 
