@@ -131,11 +131,13 @@ def test_peak_pick_empty_profile():
     assert len(tt) == len(inten) == len(d) == 0
 
 
-def test_increasing_range_required():
+def test_degenerate_range_rejected():
+    # A reversed range is normalized via min/max (forgiving); only a degenerate
+    # zero-width range is invalid. The check fires before any GSAS/CIF work.
     if not ge.gsas_available():
         pytest.skip("GSAS-II not installed")
     with pytest.raises(ValueError):
-        ge.simulate_gsas("dummy.cif", "CuKa", (90.0, 10.0))
+        ge.simulate_gsas("dummy.cif", "CuKa", (50.0, 50.0))
 
 
 def test_actionable_error_without_gsas():

@@ -17,8 +17,27 @@ This module is deliberately self-contained (numpy + a lazy GSAS-II import; no
 scilink imports) so it can be exercised in a GSAS-II-only environment. pymatgen,
 if present, is used only to canonicalize an ambiguous input CIF (see
 ``_canonicalize_cif``); it is optional and the engine degrades gracefully without
-it. GSAS-II is an optional dependency: install the ``gsas`` extra (``pip install
-scilink[gsas]``, which pulls GSAS-II from source and needs a Fortran compiler).
+it.
+
+Installation
+------------
+GSAS-II is an optional dependency built from source, so a Fortran compiler must
+be present *at install time*. The verified recipe (conda provides the compiler
+toolchain):
+
+    conda create -n <env> python=3.12
+    conda activate <env>
+    conda install -c conda-forge fortran-compiler meson ninja
+    pip install "scilink[gsas]"        # or: pip install -e ".[gsas]" from a checkout
+
+The ``gsas`` extra pulls GSAS-II from its git repository
+(``git+https://github.com/AdvancedPhotonSource/GSAS-II.git``) and compiles its
+Fortran extensions against the environment's numpy. Install scilink/pymatgen
+*before* GSAS-II so the compile links against the final numpy ABI. Note: the
+compiler activation only happens inside an activated conda env — building via a
+bare ``conda run`` (without activation) can fail with "gfortran cannot compile
+programs" because ``CONDA_BUILD_SYSROOT`` is unset; use ``conda activate`` (or
+source the env's activate scripts) for the build.
 
 The simulation recipe is adapted, with permission, from the collaborator project
 PhaseTransitionGUI (``phase_analysis.pipeline.simulation.gsas2powdersim``);
