@@ -142,25 +142,27 @@ either-alone:
   is the blind / unknown-sample case, and it is **index-first**: run
   `extract_peaks` (feed the indexer ALL confident peaks — lower
   `prominence_frac` if it returns fewer than ~10), then `index_pattern`
-  to recover candidate unit cells from the peak positions alone. The
-  indexed cell does three things: its crystal system and Bravais lattice
-  prune the hypothesis space; its `lattice_param_ranges` go into the
-  `search_structures` query as a lattice filter (drastically narrowing
-  false hits); and its volume bounds the plausible formula content
-  (V≈40–170 Å³ suggests a small binary/elemental cell, several hundred
-  Å³ a complex compound). Then make a **single** `search_structures`
-  call with a list-of-lists chemistry hypothesis (e.g.
-  `chemistry=[["Si"], ["C"], ["Ge"], ["Ti","O"]]`) plus the lattice
-  filter. The tool dispatches one DB query per hypothesis, dedupes, and
-  merges results. **Never loop over single-chemistry `search_structures`
-  calls** — that path has historically broken on consolidation, and the
-  tool is built to handle multiple hypotheses in one invocation.
-  Indexing caveats (see the tool docs): solutions come in families
-  (×1/2 subcells, ×√2/×√3 supercells), so when the top cell finds no
-  DB match, try the other candidates and volume-related multiples; the
-  simulate+score loop — not M20 — is the arbiter of a candidate cell.
-  Finally, whatever phase wins scoring, its cell should agree with the
-  indexed cell — a disagreement means one of the two is wrong.
+  to recover candidate unit cells from the peak positions alone. Then
+  search by the CELL, not by guessed elements: a `search_structures`
+  call may omit `chemistry` entirely and pass the indexed cell's
+  `lattice_param_ranges` as the query key (served by COD and local-CIF;
+  MP requires chemistry). For a NON-cubic cell pass the
+  permutation-invariant `volume` range rather than per-axis a/b/c
+  ranges — a database entry's axis convention may be a permutation of
+  the indexed cell's, and per-axis windows would false-reject it. The
+  cell-only hit list intentionally includes chemically different phases
+  sharing the cell (e.g. a Si-cell query also returns solid Ar); the
+  simulate+score loop discriminates them — intensities carry the
+  chemistry. Add a chemistry list-of-lists to the same call only as a
+  *refinement* when composition hints exist. **Never loop over
+  single-chemistry `search_structures` calls** — one call handles
+  multiple hypotheses. Indexing caveats (see the tool docs): solutions
+  come in families (×1/2 subcells, ×√2/×√3 supercells), so when the top
+  cell finds no DB match, try the other candidates and volume-related
+  multiples; the simulate+score loop — not M20 — is the arbiter of a
+  candidate cell. Finally, whatever phase wins scoring, its cell should
+  agree with the indexed cell — a disagreement means one of the two is
+  wrong.
 
 **Recognizing the multi-phase trigger.** Any of these phrasings in
 `system_info` / notes mean "use `score_xrd_match_multiphase`":

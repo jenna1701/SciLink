@@ -697,10 +697,15 @@ def index_pattern(
     }
     if out_cells:
         best = out_cells[0]
-        # Ready-made DB filter around the best cell: ±2% covers determination /
-        # temperature / composition differences between the sample and databases.
+        # Ready-made DB filter around the best cell: ±2% per edge covers
+        # determination / temperature / composition differences between the
+        # sample and databases. The ±6% 'volume' range (edges cubed) is
+        # PERMUTATION-INVARIANT — prefer it as the primary cell filter, since a
+        # database entry's axis convention may not match the indexed cell's.
         result["lattice_param_ranges"] = {
             k: (round(best[k] * 0.98, 4), round(best[k] * 1.02, 4))
             for k in ("a", "b", "c")
         }
+        result["lattice_param_ranges"]["volume"] = (
+            round(best["volume"] * 0.94, 2), round(best["volume"] * 1.06, 2))
     return result

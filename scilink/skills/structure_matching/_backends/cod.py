@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Optional
 
 from ._base import QuerySpec, StructureCandidate
+from .local_cif import _lattice_within_ranges
 
 try:
     from pymatgen.core import Structure
@@ -111,12 +112,13 @@ class CODBackend:
         if not self.is_available():
             return []
         wanted = {e for e in spec.chemistry}
-        if not wanted:
+        if not wanted and not spec.lattice_param_ranges:
             return []
 
         # Prefer the local db (fast, offline); fall back to COD's REST search
-        # when there is no db.
-        if self._has_local_db():
+        # when there is no db. Cell-only (blind) queries ALWAYS use the REST
+        # API — the local metadata db carries no cell parameters.
+        if self._has_local_db() and wanted:
             rows = self._search_db(wanted, spec)
         else:
             rows = self._search_web(wanted, spec)
@@ -124,6 +126,11 @@ class CODBackend:
         for cid, formula, sg, sg_number in rows:
             struct = self._load_structure(int(cid))
             if struct is None:
+                continue
+            # Post-load lattice filter (exact, on the parsed structure). The
+            # REST cell filter is a coarse pre-filter; the local db has none.
+            if spec.lattice_param_ranges and not _lattice_within_ranges(
+                    struct.lattice, spec.lattice_param_ranges):
                 continue
             extra = len(_formula_elements(formula) - wanted)
             candidates.append(StructureCandidate(
@@ -178,11 +185,27 @@ class CODBackend:
         return [(cid, formula, sg, sg_number) for _, _, cid, formula, sg, sg_number in scored]
 
     def _search_web(self, wanted: set[str], spec: QuerySpec) -> list[tuple]:
-        """COD REST element search (no local db). Same vetted domain; returns
-        the same (id, formula, sg, sgNumber) rows as the local-db path."""
+        """COD REST search (no local db, or cell-only). Same vetted domain;
+        returns the same (id, formula, sg, sgNumber) rows as the local-db path.
+
+        Queries by element (el1..elN) when chemistry is given, and/or by unit
+        cell when ``spec.lattice_param_ranges`` is set — COD's API supports
+        cell-edge windows (amin/amax, bmin/bmax, cmin/cmax in Å) and a volume
+        window (vmin/vmax in Å^3, permutation-invariant, key 'volume'). The
+        cell-only form is the blind-identification path (cell from
+        index_pattern, no chemistry known)."""
         import json
         import urllib.parse
         params = [(f"el{i}", el) for i, el in enumerate(sorted(wanted), 1)]
+        if spec.lattice_param_ranges:
+            for axis in ("a", "b", "c"):
+                if axis in spec.lattice_param_ranges:
+                    lo, hi = spec.lattice_param_ranges[axis]
+                    params += [(f"{axis}min", f"{float(lo):.4f}"),
+                               (f"{axis}max", f"{float(hi):.4f}")]
+            if "volume" in spec.lattice_param_ranges:
+                lo, hi = spec.lattice_param_ranges["volume"]
+                params += [("vmin", f"{float(lo):.2f}"), ("vmax", f"{float(hi):.2f}")]
         params.append(("format", "json"))
         url = "https://www.crystallography.net/cod/result?" + urllib.parse.urlencode(params)
         try:
@@ -201,7 +224,7 @@ class CODBackend:
                 continue
             formula = row.get("formula")
             els = _formula_elements(formula)
-            if not wanted.issubset(els):
+            if wanted and not wanted.issubset(els):
                 continue
             sg_number = row.get("sgNumber")
             if hints is not None:
