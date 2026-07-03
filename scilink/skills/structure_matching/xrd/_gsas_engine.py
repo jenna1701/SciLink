@@ -496,3 +496,211 @@ def _extract_hap_broadening(phase, hist):
     except Exception:
         pass
     return size_um, microstrain
+
+
+# --- Autoindexing (blind / chemistry-free identification) ---------------------
+#
+# Powder autoindexing recovers candidate UNIT CELLS from peak positions alone —
+# the entry point to identification when the sample chemistry is unknown, since
+# the structure-database search can then filter by lattice parameters instead of
+# elements. Wraps GSAS-II's ITO-style ``GSASIIindex.DoIndexPeaks`` (random-cell
+# volume sweep per Bravais lattice, least-squares refinement, M20/X20 de Wolff
+# figures of merit).
+#
+# Practical behavior established empirically:
+# * Peak count is load-bearing: ~6 peaks fails outright; >=10 clean peaks indexes
+#   a cubic cell exactly. Feed it every confident peak, not just the strongest.
+# * Equal-M20 SUPERLATTICE ALIASES are normal (e.g. Si returns a=7.68=5.43*sqrt2
+#   alongside a=5.43 at the same M20). The standard resolution — prefer the
+#   SMALLEST volume among (near-)equal-M20 solutions — is applied in the sort.
+# * Low symmetry is intrinsically unreliable: monoclinic/triclinic searches are
+#   slow and prone to false cells with imperfect peak lists. Triclinic is
+#   therefore excluded from the default lattice set (opt in explicitly).
+
+# GSAS-II Bravais-lattice order used by DoIndexPeaks' ``bravais`` flag list.
+_BRAVAIS_NAMES = [
+    "Cubic-F", "Cubic-I", "Cubic-P", "Trigonal-R", "Trigonal/Hexagonal-P",
+    "Tetragonal-I", "Tetragonal-P", "Orthorhombic-F", "Orthorhombic-I",
+    "Orthorhombic-A", "Orthorhombic-B", "Orthorhombic-C", "Orthorhombic-P",
+    "Monoclinic-I", "Monoclinic-A", "Monoclinic-C", "Monoclinic-P", "Triclinic",
+]
+_SYSTEM_TO_IBRAV = {
+    "cubic": [0, 1, 2],
+    "trigonal": [3, 4],
+    "hexagonal": [4],
+    "tetragonal": [5, 6],
+    "orthorhombic": [7, 8, 9, 10, 11, 12],
+    "monoclinic": [13, 14, 15, 16],
+    "triclinic": [17],
+}
+_IBRAV_TO_SYSTEM = {i: s for s, idxs in _SYSTEM_TO_IBRAV.items() for i in idxs
+                    if not (s in ("hexagonal",) )}  # ibrav 4 reports as 'trigonal/hexagonal' below
+
+
+def index_pattern(
+    two_theta_peaks,
+    wavelength: Any = "CuKa",
+    crystal_systems: list = None,
+    zero_offset: float = 0.0,
+    max_nc_no: int = 4,
+    start_volume: float = 25.0,
+    timeout_per_lattice: float = 30.0,
+    m20_min: float = 2.0,
+    top_n: int = 10,
+) -> dict[str, Any]:
+    """Autoindex a powder pattern: peak positions -> ranked candidate unit cells.
+
+    See the section comment above for the method and its empirically established
+    behavior (peak count, superlattice aliases, low-symmetry caveats).
+
+    Parameters
+    ----------
+    two_theta_peaks : sequence of float
+        Peak positions in 2θ degrees (e.g. ``extract_peaks``' 'positions').
+        Feed ALL confident peaks — indexing needs >=10 to be reliable.
+    wavelength : float | str
+        Wavelength in Å or anode alias ('CuKa', ...). Must match the measurement.
+    crystal_systems : list[str] | None
+        Which crystal systems to search: subset of ['cubic','trigonal',
+        'hexagonal','tetragonal','orthorhombic','monoclinic','triclinic'].
+        Default: all EXCEPT triclinic (slow, unreliable). Narrow it when the
+        pattern's look suggests high symmetry (few peaks -> try ['cubic',
+        'tetragonal','hexagonal'] first: much faster, fewer false cells).
+    zero_offset : float
+        2θ zero correction (degrees) applied by the indexer (default 0).
+    max_nc_no : int
+        Max ratio of calculated-to-observed reflections (de Wolff Nc/Nobs cap,
+        default 4). RAISE to allow larger cells; LOWER to force parsimony.
+    start_volume : float
+        Starting cell volume (Å^3) for the sweep (default 25). The sweep grows
+        volume automatically, so only RAISE this to skip past small cells when
+        you already know the cell is large (speeds the search up).
+    timeout_per_lattice : float
+        Seconds allowed per Bravais lattice before moving on (default 30).
+        RAISE for a thorough (esp. monoclinic) search; LOWER for a quick triage.
+    m20_min : float
+        Minimum de Wolff M20 figure of merit to keep a cell (default 2). RAISE
+        (10-20) to keep only convincing solutions.
+    top_n : int
+        Max candidate cells returned (default 10).
+    """
+    import contextlib
+    import io
+
+    try:
+        from GSASII import GSASIIindex as G2indx
+    except Exception as exc:  # pragma: no cover - env-dependent
+        raise RuntimeError(
+            "index_pattern requires GSAS-II (GSASIIindex). Install the optional "
+            "extra: pip install 'scilink[gsas]' (see module docstring for the "
+            "Fortran-compiler recipe)."
+        ) from exc
+
+    lam = _resolve_wavelength(wavelength)
+    tts = sorted(float(t) for t in two_theta_peaks)
+    if len(tts) < 5:
+        raise ValueError(
+            f"index_pattern needs at least 5 peak positions (got {len(tts)}); "
+            "autoindexing is only reliable with >=10."
+        )
+    warnings = []
+    if len(tts) < 10:
+        warnings.append(
+            f"only {len(tts)} peaks supplied — autoindexing is unreliable below "
+            "~10 peaks; treat any solution with suspicion."
+        )
+
+    # 9-column Index-Peak-List rows: [2theta, I, use, indexed, h, k, l, d-obs, d-calc],
+    # sorted by DESCENDING d (the indexer reads dmax/dmin from the ends).
+    peaks = []
+    for tt in tts:
+        d = lam / (2.0 * np.sin(np.radians(tt / 2.0)))
+        peaks.append([tt, 100.0, True, False, 0, 0, 0, float(d), 0.0])
+    peaks.sort(key=lambda p: -p[7])
+
+    if crystal_systems is None:
+        crystal_systems = ["cubic", "trigonal", "hexagonal", "tetragonal",
+                           "orthorhombic", "monoclinic"]
+    bad = [s for s in crystal_systems if s not in _SYSTEM_TO_IBRAV]
+    if bad:
+        raise ValueError(f"unknown crystal system(s) {bad}; "
+                         f"choose from {sorted(_SYSTEM_TO_IBRAV)}")
+    bravais = [False] * len(_BRAVAIS_NAMES)
+    for s in crystal_systems:
+        for i in _SYSTEM_TO_IBRAV[s]:
+            bravais[i] = True
+
+    # controls layout (GSAS-II 'Unit Cells List'): [zero-flag, zero, Nc/No max, start V]
+    controls = [0, float(zero_offset), int(max_nc_no), float(start_volume)]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):  # DoIndexPeaks prints its whole search log
+        ok, dmin, cells = G2indx.DoIndexPeaks(
+            peaks, controls, bravais, None,
+            timeout=float(timeout_per_lattice), M20_min=float(m20_min))
+
+    # Dedupe near-identical cells (same lattice within 0.2%), keeping best M20;
+    # then sort by M20 desc with SMALLEST VOLUME first among near-equal M20
+    # (superlattice-alias resolution). "Near-equal" is a 1% relative bucket —
+    # aliases score M20 equal only to ~6 digits, so a strict float sort would
+    # never reach the volume tie-break.
+    uniq = []
+    for c in cells:
+        vec = np.array(c[3:10], dtype=float)  # a,b,c,al,be,ga,V
+        for u in uniq:
+            if u["ibrav"] == int(c[2]) and np.allclose(vec, u["_vec"], rtol=2e-3):
+                if c[0] > u["M20"]:
+                    u.update(M20=float(c[0]), X20=int(c[1]), _vec=vec)
+                break
+        else:
+            uniq.append({"M20": float(c[0]), "X20": int(c[1]), "ibrav": int(c[2]),
+                         "_vec": vec})
+
+    def _m20_bucket(m20):
+        import math
+        return int(round(math.log(max(m20, 1e-9)) / math.log(1.01)))
+
+    uniq.sort(key=lambda u: (-_m20_bucket(u["M20"]), u["_vec"][6]))
+
+    out_cells = []
+    for u in uniq[:int(top_n)]:
+        a, b, c_, al, be, ga, vol = (float(x) for x in u["_vec"])
+        ib = u["ibrav"]
+        system = ("trigonal/hexagonal" if ib in (3, 4)
+                  else _IBRAV_TO_SYSTEM.get(ib, "?"))
+        out_cells.append({
+            "M20": round(u["M20"], 2), "X20": u["X20"],
+            "bravais": _BRAVAIS_NAMES[ib], "crystal_system": system,
+            "a": a, "b": b, "c": c_, "alpha": al, "beta": be, "gamma": ga,
+            "volume": vol,
+        })
+
+    result = {
+        "candidate_cells": out_cells,
+        "n_peaks_used": len(tts),
+        "dmin_angstrom": float(min(p[7] for p in peaks)),
+        "wavelength": float(lam),
+        "warnings": warnings,
+        "note": (
+            "Candidates sorted by M20 (de Wolff figure of merit), smallest volume "
+            "first among near-equal M20 (a larger equal-M20 cell is usually a "
+            "superlattice alias of the smaller one). M20 > ~10 with X20 = 0 is a "
+            "convincing solution; M20 near the cutoff is a guess. Indexing "
+            "solutions come in FAMILIES related by common factors (x1/2 subcells "
+            "from lattice centering, xsqrt2 / xsqrt3 supercells), so the true "
+            "cell may be a simple multiple of a candidate — if a database search "
+            "around the top cell finds nothing, try the other candidates and "
+            "volume-related multiples of them. The downstream simulate+score "
+            "loop is the arbiter: a wrong cell yields no scoring match, so "
+            "iterate (more peaks, narrowed crystal_systems, zero_offset) rather "
+            "than trust M20 alone."
+        ),
+    }
+    if out_cells:
+        best = out_cells[0]
+        # Ready-made DB filter around the best cell: ±2% covers determination /
+        # temperature / composition differences between the sample and databases.
+        result["lattice_param_ranges"] = {
+            k: (round(best[k] * 0.98, 4), round(best[k] * 1.02, 4))
+            for k in ("a", "b", "c")
+        }
+    return result

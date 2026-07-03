@@ -42,6 +42,13 @@ The skill ships five tools the analysis script chains together:
   shift / scale / assignment optimization). Hundreds of milliseconds
   per candidate. Use for confident identification on real-lab patterns
   after the fast tier narrows the candidate list.
+- `index_pattern` — **blind-identification entry point** (optional `gsas`
+  extra). Autoindexing: recovers ranked candidate unit cells (lattice
+  parameters + Bravais + de Wolff M20) from peak positions alone — no
+  chemistry needed. Use it when the sample composition is unknown, then
+  search databases with the recovered lattice as a filter; also useful to
+  corroborate a chemistry-led ID (indexed cell must match the identified
+  phase). Needs ≥10 clean peaks; unreliable for triclinic.
 - `refine_rietveld` — **refinement tier** (optional `gsas` extra). *After*
   the phase is identified, Rietveld-refine that structure against the
   measured pattern to extract accurate lattice parameters (+ esd),
@@ -131,16 +138,29 @@ either-alone:
   available as a fallback when only one phase's identity matters and
   the per-phase decomposition isn't needed.
 
-- **Post-fit pattern (no chemistry hypothesis)** — no hint at all. Run
-  `extract_peaks` first to estimate the dominant peak positions, infer
-  an approximate lattice from the strongest peak via Bragg's law for a
-  guessed crystal system, then make a **single** `search_structures`
+- **Post-fit pattern (no chemistry hypothesis)** — no hint at all. This
+  is the blind / unknown-sample case, and it is **index-first**: run
+  `extract_peaks` (feed the indexer ALL confident peaks — lower
+  `prominence_frac` if it returns fewer than ~10), then `index_pattern`
+  to recover candidate unit cells from the peak positions alone. The
+  indexed cell does three things: its crystal system and Bravais lattice
+  prune the hypothesis space; its `lattice_param_ranges` go into the
+  `search_structures` query as a lattice filter (drastically narrowing
+  false hits); and its volume bounds the plausible formula content
+  (V≈40–170 Å³ suggests a small binary/elemental cell, several hundred
+  Å³ a complex compound). Then make a **single** `search_structures`
   call with a list-of-lists chemistry hypothesis (e.g.
-  `chemistry=[["Si"], ["C"], ["Ge"], ["Ti","O"]]`). The tool dispatches
-  one DB query per hypothesis, dedupes, and merges results. **Never
-  loop over single-chemistry `search_structures` calls** — that path
-  has historically broken on consolidation, and the tool is built to
-  handle multiple hypotheses in one invocation.
+  `chemistry=[["Si"], ["C"], ["Ge"], ["Ti","O"]]`) plus the lattice
+  filter. The tool dispatches one DB query per hypothesis, dedupes, and
+  merges results. **Never loop over single-chemistry `search_structures`
+  calls** — that path has historically broken on consolidation, and the
+  tool is built to handle multiple hypotheses in one invocation.
+  Indexing caveats (see the tool docs): solutions come in families
+  (×1/2 subcells, ×√2/×√3 supercells), so when the top cell finds no
+  DB match, try the other candidates and volume-related multiples; the
+  simulate+score loop — not M20 — is the arbiter of a candidate cell.
+  Finally, whatever phase wins scoring, its cell should agree with the
+  indexed cell — a disagreement means one of the two is wrong.
 
 **Recognizing the multi-phase trigger.** Any of these phrasings in
 `system_info` / notes mean "use `score_xrd_match_multiphase`":

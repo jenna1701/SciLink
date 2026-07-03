@@ -291,6 +291,65 @@ def test_rietveld_needs_dense_pattern():
         ge.rietveld_refine("x.cif", [10.0, 20.0], [1.0, 2.0], "CuKa")
 
 
+# --- index_pattern (autoindexing for blind identification) --------------------
+
+# Si Cu-Kα peak positions (diamond cubic a=5.43088): 111..533. >=10 peaks — the
+# empirically established reliability floor for autoindexing.
+_SI_PEAKS = [28.442, 47.303, 56.121, 69.130, 76.377, 88.032,
+             94.954, 106.710, 114.092, 127.547, 136.897]
+
+
+def test_index_pattern_registered_and_knobs():
+    from scilink.skills.structure_matching.xrd.index_pattern import TOOL_SPEC
+    from scilink.skills._shared._registry import get_tools_for
+    names = {t.name for t in get_tools_for("structure_matching", active_skills=["xrd"])}
+    assert "index_pattern" in names
+    for k in ("crystal_systems", "timeout_per_lattice", "m20_min", "max_nc_no",
+              "zero_offset", "start_volume", "top_n"):
+        assert k in TOOL_SPEC.parameters
+    # blind-workflow guidance is on the LLM-facing surface
+    assert "chemistry" in TOOL_SPEC.description.lower()
+    assert "triclinic" in TOOL_SPEC.parameters["crystal_systems"]["description"]
+
+
+def test_index_pattern_input_guards():
+    if not ge.gsas_available():
+        pytest.skip("GSAS-II not installed")
+    with pytest.raises(ValueError):                      # too few peaks
+        ge.index_pattern([28.4, 47.3, 56.1], "CuKa")
+    with pytest.raises(ValueError):                      # unknown system name
+        ge.index_pattern(_SI_PEAKS, "CuKa", crystal_systems=["quasicrystal"])
+
+
+@pytest.mark.skipif(not ge.gsas_available(), reason="GSAS-II not installed")
+def test_index_pattern_recovers_si_cell():
+    # Blind cold-start: 11 Si peak positions, no chemistry -> the top candidate
+    # must be the true a=5.4309 cell, NOT its equal-M20 sqrt2 superlattice alias
+    # (guards the near-equal-M20 smallest-volume ranking).
+    r = ge.index_pattern(_SI_PEAKS, "CuKa", crystal_systems=["cubic"])
+    assert r["candidate_cells"], "no cells found"
+    best = r["candidate_cells"][0]
+    assert best["a"] == pytest.approx(5.4309, abs=0.01)
+    assert best["crystal_system"] == "cubic"
+    assert best["M20"] > 10
+    # ready-made DB filter brackets the true cell
+    lo, hi = r["lattice_param_ranges"]["a"]
+    assert lo < 5.4309 < hi
+    assert not r["warnings"]
+
+
+@pytest.mark.skipif(not ge.gsas_available(), reason="GSAS-II not installed")
+def test_index_pattern_recovers_quartz_cell():
+    # Non-cubic: alpha-quartz (trigonal a=4.913, c=5.405) from 17 peak positions.
+    qz = [20.86, 26.64, 36.54, 39.47, 40.30, 42.45, 45.79, 50.14, 54.87,
+          55.32, 59.96, 64.03, 65.79, 67.74, 68.14, 68.32, 73.47]
+    r = ge.index_pattern(qz, 1.5406, crystal_systems=["trigonal", "hexagonal"])
+    best = r["candidate_cells"][0]
+    assert best["a"] == pytest.approx(4.913, abs=0.02)
+    assert best["c"] == pytest.approx(5.405, abs=0.02)
+    assert best["gamma"] == pytest.approx(120.0, abs=0.1)
+
+
 @pytest.mark.skipif(not ge.gsas_available(), reason="GSAS-II not installed")
 def test_full_simulation_physics(tmp_path):
     # Minimal Si CIF (diamond cubic, a=5.43088) -> exact (111)/(220) at CuKa,
