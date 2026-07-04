@@ -74,6 +74,15 @@ The skill ships five tools the analysis script chains together:
   smallest. Do NOT judge a cell by simulating same-cell structures:
   intensities belong to the structure, not the cell, and a correct cell
   with a wrong structure scores badly.
+- `determine_space_group` — **systematic-absence analysis** (no extra
+  deps). After a cell is Le-Bail-validated, tests the International-
+  Tables reflection conditions (centerings, screw axes, glide planes)
+  against which lines are observed vs absent, and returns the evidence
+  plus frequency-ranked COMMON space groups consistent with it. Powder
+  absences often cannot decide a unique group (extinction-symbol twins
+  are indistinguishable) — treat the output as evidence, corroborate the
+  final choice with a Le Bail fit under that group. New-phase workflow
+  only; a database-identified phase already has its group.
 - `refine_rietveld` — **refinement tier** (optional `gsas` extra). *After*
   the phase is identified, Rietveld-refine that structure against the
   measured pattern to extract accurate lattice parameters (+ esd),
