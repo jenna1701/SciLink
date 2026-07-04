@@ -42,6 +42,21 @@ The skill ships five tools the analysis script chains together:
   shift / scale / assignment optimization). Hundreds of milliseconds
   per candidate. Use for confident identification on real-lab patterns
   after the fast tier narrows the candidate list.
+- `search_match_pattern` — **fingerprint search-match, the FIRST-choice
+  blind route**. Identifies an unknown whose phase is probably known to
+  science (the overwhelming majority of lab work) by Hanawalt-style
+  matching of the measured d-lines + intensities against a PRECOMPUTED
+  reference library (built once from a CIF collection, e.g. a COD
+  mirror, via `build_fingerprint_library`). Deterministic, offline, no
+  chemistry needed. Only when it returns no convincing match fall back
+  to the indexing route below (possible new phase).
+- `calibrate_zero` — **2θ calibration from an internal standard** (Si /
+  LaB₆ / corundum mixed into the sample). Fits zero error + specimen
+  displacement from the standard's exactly-known lines and returns the
+  corrected sample peak list. When a standard is present, run it FIRST —
+  indexing and lattice refinement are exquisitely sensitive to zero
+  error. Prefer its `corrected_peaks` over passing `zero_offset` alone
+  (the two aberration terms trade off; their sum is what's accurate).
 - `index_pattern` — **blind-identification entry point** (optional `gsas`
   extra). Autoindexing: recovers ranked candidate unit cells (lattice
   parameters + Bravais + de Wolff M20) from peak positions alone — no
@@ -149,7 +164,13 @@ either-alone:
   the per-phase decomposition isn't needed.
 
 - **Post-fit pattern (no chemistry hypothesis)** — no hint at all. This
-  is the blind / unknown-sample case, and it is **index-first**: run
+  is the blind / unknown-sample case. **Fingerprint first**: run
+  `extract_peaks` then `search_match_pattern` against the reference
+  library (with `calibrate_zero` first when an internal standard is
+  present) — a convincing figure of merit identifies the phase in one
+  deterministic call; confirm by simulating the hit and refining. Only
+  when no library match is convincing take the **indexing route**
+  (possible new phase): run
   `extract_peaks` (feed the indexer ALL confident peaks — lower
   `prominence_frac` if it returns fewer than ~10), then `index_pattern`
   to recover candidate unit cells from the peak positions alone.
