@@ -72,20 +72,27 @@ def build_shard(shard: str, work: str, workers: int) -> str:
     print(f"[shard {shard}] {len(files)} CIFs; fingerprinting on {workers} workers",
           flush=True)
 
-    # chunk via symlink dirs (build_fingerprint_library walks a directory)
+    # chunk via symlink dirs (build_fingerprint_library walks a directory).
+    # MANY more chunks than workers: COD entry cost varies by orders of
+    # magnitude (large organic cells), so coarse chunks leave one straggler
+    # holding the whole shard (observed: 7/8 chunks done, 1 at 11+ CPU-hours).
     chunks_root = os.path.join(work, f"chunks_{tag}")
     shutil.rmtree(chunks_root, ignore_errors=True)
+    n_chunks = workers * 8
     tasks = []
-    for w in range(workers):
+    for w in range(n_chunks):
+        chunk_files = files[w::n_chunks]
+        if not chunk_files:
+            continue
         cdir = os.path.join(chunks_root, str(w))
         os.makedirs(cdir, exist_ok=True)
-        for f in files[w::workers]:
+        for f in chunk_files:
             os.symlink(f, os.path.join(cdir, os.path.basename(f)))
         tasks.append((cdir, os.path.join(chunks_root, f"part_{w}.parquet")))
 
     t0 = time.time()
     with mp.Pool(workers) as pool:
-        results = pool.map(_fingerprint_chunk, tasks)
+        results = pool.map(_fingerprint_chunk, tasks, chunksize=1)
     n_ok = sum(r.get("n_indexed", 0) for r in results)
     errs = [r for r in results if "error" in r]
     print(f"[shard {shard}] indexed {n_ok} in {time.time()-t0:.0f}s; "

@@ -59,6 +59,7 @@ def build_fingerprint_library(
     two_theta_max: float = 90.0,
     top_k: int = _TOP_K,
     min_lines: int = 3,
+    max_sites: int = 500,
 ) -> dict[str, Any]:
     """Build a fingerprint library (parquet) from a directory tree of CIFs.
 
@@ -70,7 +71,13 @@ def build_fingerprint_library(
     Curation applied: unparsable CIFs skipped (counted), duplicates collapsed
     by (reduced formula, rounded cell) keeping the first seen, entries with
     fewer than ``min_lines`` lines skipped. Partial occupancies are kept (they
-    are physical) but flagged ``disordered``.
+    are physical) but flagged ``disordered``. Entries with more than
+    ``max_sites`` sites are skipped (counted as ``n_skipped_large``): kinematic
+    pattern cost scales ~ sites x reflections — single macromolecular entries
+    can take MINUTES (observed: one COD chunk burned 11+ CPU-hours) — and a
+    thousand overlapping weak lines make a useless powder fingerprint. Typical
+    phase-ID targets are well under 200 sites; RAISE max_sites only if you
+    genuinely need very large-cell organics and can pay the compute.
 
     Returns a summary dict: {'n_indexed', 'n_skipped', 'n_duplicates', 'path'}.
     """
@@ -82,7 +89,7 @@ def build_fingerprint_library(
     calc = XRDCalculator(wavelength="CuKa")  # internal grid only; stored as d
     rows = []
     seen: set = set()
-    n_skip = n_dup = 0
+    n_skip = n_dup = n_large = 0
     for root, _dirs, files in os.walk(cif_dir):
         for fn in sorted(files):
             if not fn.lower().endswith(".cif"):
@@ -90,6 +97,13 @@ def build_fingerprint_library(
             path = os.path.join(root, fn)
             try:
                 s = Structure.from_file(path)
+            except Exception:
+                n_skip += 1
+                continue
+            if len(s) > int(max_sites):
+                n_large += 1
+                continue
+            try:
                 pat = calc.get_pattern(s, two_theta_range=(5.0, float(two_theta_max)))
             except Exception:
                 n_skip += 1
@@ -136,7 +150,7 @@ def build_fingerprint_library(
     df.to_parquet(out_path, index=False)
     _LIB_CACHE.pop(os.path.abspath(out_path), None)
     return {"n_indexed": len(rows), "n_skipped": n_skip,
-            "n_duplicates": n_dup, "path": out_path}
+            "n_skipped_large": n_large, "n_duplicates": n_dup, "path": out_path}
 
 
 def _load_library(library_path: Optional[str]):
