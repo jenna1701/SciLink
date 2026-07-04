@@ -44,6 +44,8 @@ TOOL_SPEC = ToolSpec(
         "crystal_systems": {"type": "list[str]", "description": "Crystal systems to search, from ['cubic','trigonal','hexagonal','tetragonal','orthorhombic','monoclinic','triclinic']. DEFAULT (omit) = staged symmetry descent: cubic → tetragonal/hexagonal/trigonal → orthorhombic → monoclinic, stopping at the first level with a convincing solution (M20 ≥ stage_stop_m20, X20 = 0) — the standard defense against the false-low-symmetry trap: a spurious monoclinic cell can index every peak with a spectacular M20, and M20 is only comparable WITHIN a symmetry level, never across levels. Pass an explicit list to search exactly those systems (no staging); triclinic only ever runs when explicitly requested."},
         "stage_stop_m20": {"type": "float", "description": "Staged mode only: stop descending to lower symmetry once a stage yields M20 ≥ this with X20 = 0 (default 10). RAISE to keep descending unless the high-symmetry solution is overwhelming; LOWER to stop earlier."},
         "seed": {"type": "int", "description": "Random seed for the stochastic cell search (default 0 = reproducible). CHANGE it to re-roll the search when the candidates all look like aliases of each other or nothing convincing was found."},
+        "alias_m20_factor": {"type": "float", "description": "M20 ratio below which two solutions count as alias-equivalent and the SMALLEST cell is ranked first (default 2 — a supercell's extra parameters inflate its M20 without being more right, so M20 differences under ~2× are not decisive). RAISE to prefer small cells more aggressively; ~1 ranks strictly by M20."},
+        "min_cell_volume": {"type": "float", "description": "Physical floor in Å³: solutions with smaller cells are discarded as arithmetic subcell artifacts (default 15 — a cell below ~15 Å³ cannot contain an atom; smallest real cells ~20 Å³)."},
         "zero_offset": {"type": "float", "description": "2θ zero correction in degrees applied during indexing (default 0). Set if the diffractometer zero error is known; an uncorrected zero shifts all d-spacings and degrades M20."},
         "max_nc_no": {"type": "int", "description": "de Wolff cap on calculated/observed reflection ratio (default 4). RAISE to allow larger unit cells (more calculated lines per observed peak); LOWER to force parsimony on simple patterns."},
         "start_volume": {"type": "float", "description": "Starting cell volume in Å^3 for the search sweep (default 25). The sweep grows volume automatically — RAISE only to skip small cells when the cell is known to be large (speeds the search)."},
@@ -98,6 +100,8 @@ def index_pattern(
     top_n: int = 10,
     stage_stop_m20: float = 10.0,
     seed: int = 0,
+    alias_m20_factor: float = 2.0,
+    min_cell_volume: float = 15.0,
 ) -> dict[str, Any]:
     """Autoindex a powder pattern into candidate unit cells. See ``TOOL_SPEC``.
 
@@ -108,5 +112,6 @@ def index_pattern(
         two_theta_peaks, wavelength=wavelength, crystal_systems=crystal_systems,
         zero_offset=zero_offset, max_nc_no=max_nc_no, start_volume=start_volume,
         timeout_per_lattice=timeout_per_lattice, m20_min=m20_min, top_n=top_n,
-        stage_stop_m20=stage_stop_m20, seed=seed,
+        stage_stop_m20=stage_stop_m20, seed=seed, alias_m20_factor=alias_m20_factor,
+        min_cell_volume=min_cell_volume,
     )

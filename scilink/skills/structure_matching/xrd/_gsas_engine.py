@@ -549,6 +549,8 @@ def index_pattern(
     top_n: int = 10,
     stage_stop_m20: float = 10.0,
     seed: int = 0,
+    alias_m20_factor: float = 2.0,
+    min_cell_volume: float = 15.0,
 ) -> dict[str, Any]:
     """Autoindex a powder pattern: peak positions -> ranked candidate unit cells.
 
@@ -599,6 +601,16 @@ def index_pattern(
         result reproducible (default 0). CHANGE it to re-roll the stochastic
         search when the candidates look like aliases of each other; None uses
         fresh randomness each call.
+    alias_m20_factor : float
+        M20 ratio below which two solutions are treated as alias-equivalent and
+        the SMALLEST cell wins (default 2, de Wolff practice — a supercell's
+        extra parameters inflate its M20 without being more right). RAISE to
+        prefer small cells more aggressively; set near 1 to rank strictly by
+        M20.
+    min_cell_volume : float
+        Physical floor (Å^3) below which a solution is discarded as an
+        arithmetic subcell artifact (default 15 — a cell below ~15 Å^3 cannot
+        contain an atom; the smallest real cells, bcc metals, are ~20 Å^3).
     """
     import contextlib
     import io
@@ -693,13 +705,25 @@ def index_pattern(
         _random.setstate(_rng_state)
 
     # Dedupe near-identical cells (same lattice within 0.2%), keeping best M20;
-    # then sort by M20 desc with SMALLEST VOLUME first among near-equal M20
-    # (superlattice-alias resolution). "Near-equal" is a 1% relative bucket —
-    # aliases score M20 equal only to ~6 digits, so a strict float sort would
-    # never reach the volume tie-break.
+    # then sort by M20 desc with SMALLEST VOLUME first among alias-equivalent
+    # M20 (superlattice-alias resolution). Alias-equivalence is a FACTOR bucket
+    # (default 2x, de Wolff practice): a supercell fits peaks with smaller
+    # residuals (more parameters), inflating its M20 well past the true cell's
+    # (observed live: a sqrt5 x sqrt5 x 2 supercell at M20=26 outranked the true
+    # cell at M20=19), so M20 differences below ~2x are NOT decisive between
+    # alias cells — the smallest cell wins. A genuinely better solution beats
+    # the bucket by exceeding the factor.
     uniq = []
     for c in cells:
         vec = np.array(c[3:10], dtype=float)  # a,b,c,al,be,ga,V
+        if vec[6] < float(min_cell_volume) or min(vec[0], vec[1], vec[2]) < 2.0:
+            # Physical floors: a unit cell below ~15 A^3 cannot contain an atom
+            # (the smallest real cells — bcc metals — are ~20 A^3), and no real
+            # crystal has a cell edge under 2 A (shortest known ~2.29 A, Be).
+            # Such solutions are arithmetic subcell artifacts of the d-spacing
+            # set (GSAS's own halfCell post-step can emit them below its 2.5 A
+            # search floor).
+            continue
         for u in uniq:
             if u["ibrav"] == int(c[2]) and np.allclose(vec, u["_vec"], rtol=2e-3):
                 if c[0] > u["M20"]:
@@ -711,7 +735,8 @@ def index_pattern(
 
     def _m20_bucket(m20):
         import math
-        return int(round(math.log(max(m20, 1e-9)) / math.log(1.01)))
+        factor = max(float(alias_m20_factor), 1.001)
+        return int(math.floor(math.log(max(m20, 1e-9)) / math.log(factor)))
 
     uniq.sort(key=lambda u: (-_m20_bucket(u["M20"]), u["_vec"][6]))
 
