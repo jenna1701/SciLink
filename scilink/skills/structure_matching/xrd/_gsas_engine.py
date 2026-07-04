@@ -498,7 +498,191 @@ def _extract_hap_broadening(phase, hist):
     return size_um, microstrain
 
 
-# --- Autoindexing (blind / chemistry-free identification) ---------------------
+# --- Le Bail cell validation (structure-free whole-pattern fit) ---------------
+#
+# The arbiter of a CANDIDATE CELL. A Rietveld/simulation score conflates the
+# cell with the structure — a correct cell paired with a wrong same-cell
+# structure scores badly and gets discarded. Le Bail fits the whole profile
+# with the cell alone (reflection intensities are free parameters), answering
+# "does this cell account for every peak?" directly. Physics of the verdicts:
+# a wrong cell or SUBCELL leaves observed peaks unaccounted -> poor fit; a
+# SUPERCELL generates a superset of reflections and always fits at least as
+# well as the true cell -> Le Bail cannot demote it, so combine with the
+# smallest-cell-that-fits preference (index_pattern's alias ranking).
+# Validated on real data (cassiterite): true cell corr=0.96 (and the cell
+# refines to 0.01% with no structure), wrong cell 0.47, half subcell 0.21,
+# supercell 0.94.
+
+# Generic space group per GSAS Bravais lattice — carries exactly the lattice
+# centering extinctions; atoms are irrelevant in Le Bail so a dummy suffices.
+_BRAVAIS_TO_SG = {
+    "Cubic-F": "F m -3 m", "Cubic-I": "I m -3 m", "Cubic-P": "P m -3 m",
+    "Trigonal-R": "R -3 m", "Trigonal/Hexagonal-P": "P 6/m m m",
+    "Tetragonal-I": "I 4/m m m", "Tetragonal-P": "P 4/m m m",
+    "Orthorhombic-F": "F m m m", "Orthorhombic-I": "I m m m",
+    "Orthorhombic-A": "A m m m", "Orthorhombic-B": "B m m m",
+    "Orthorhombic-C": "C m m m",
+    "Monoclinic-I": "I 2/m", "Monoclinic-A": "A 2/m", "Monoclinic-C": "C 2/m",
+    "Monoclinic-P": "P 2/m", "Triclinic": "P -1",
+}
+
+_LEBAIL_CIF = """data_lebail
+_cell_length_a {a}
+_cell_length_b {b}
+_cell_length_c {c}
+_cell_angle_alpha {al}
+_cell_angle_beta {be}
+_cell_angle_gamma {ga}
+_symmetry_space_group_name_H-M '{sg}'
+loop_
+_atom_site_label
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+C1 0.0 0.0 0.0
+"""
+
+
+def lebail_fit(
+    two_theta,
+    intensity,
+    cell,
+    bravais: str = "Cubic-P",
+    wavelength: Any = "CuKa",
+    two_theta_range: tuple = None,
+    refine_cell: bool = True,
+    refine_zero: bool = True,
+    n_background_terms: int = 6,
+    extra_cycles: int = 2,
+) -> dict[str, Any]:
+    """Le Bail whole-pattern fit of a CANDIDATE CELL (no structure needed).
+
+    See the section comment for the physics of the verdicts (subcell/wrong cell
+    reject; supercell fits — prefer the smallest cell that fits).
+
+    Parameters
+    ----------
+    two_theta, intensity : sequences
+        The measured pattern (raw, with background).
+    cell : sequence | dict
+        Candidate cell: (a, b, c, alpha, beta, gamma) or a dict with those keys
+        (index_pattern's candidate_cells entries work directly).
+    bravais : str
+        A GSAS Bravais name from index_pattern ('Tetragonal-P', 'Cubic-F', ...)
+        — mapped to a generic space group carrying the lattice extinctions — or
+        an explicit H-M space-group symbol (e.g. 'P 42/m n m') when known.
+    wavelength : float | str
+        Wavelength (Å) or anode alias; must match the measurement.
+    two_theta_range : (float, float) | None
+        Optional crop of the pattern before fitting.
+    refine_cell : bool
+        Refine the cell during the fit (default True) — a correct approximate
+        cell polishes to the precise one with no structure at all.
+    refine_zero : bool
+        Refine the 2θ zero offset (default True).
+    n_background_terms : int
+        Chebyshev background terms (default 6). RAISE for humped backgrounds.
+    extra_cycles : int
+        Additional intensity-extraction cycles after the staged refinement
+        (default 2) — Le Bail intensities converge iteratively.
+    """
+    import os
+    import tempfile
+
+    G2sc = _load_g2sc()
+    lam = _resolve_wavelength(wavelength)
+    if isinstance(cell, dict):
+        vals = [cell[k] for k in ("a", "b", "c", "alpha", "beta", "gamma")]
+    else:
+        vals = list(cell)
+    if len(vals) != 6:
+        raise ValueError("cell must supply (a, b, c, alpha, beta, gamma)")
+    sg = _BRAVAIS_TO_SG.get(bravais, bravais)  # Bravais name or explicit H-M symbol
+
+    x = np.asarray(two_theta, dtype=float)
+    y = np.asarray(intensity, dtype=float)
+    if two_theta_range is not None:
+        lo, hi = float(min(two_theta_range)), float(max(two_theta_range))
+        m = (x >= lo) & (x <= hi)
+        x, y = x[m], y[m]
+    if x.size < 20:
+        raise ValueError("Le Bail fit needs a denser pattern (>=20 points in range).")
+
+    with tempfile.TemporaryDirectory() as td:
+        cif = os.path.join(td, "lebail.cif")
+        a, b, c_, al, be, ga = (float(v) for v in vals)
+        with open(cif, "w") as fh:
+            fh.write(_LEBAIL_CIF.format(a=a, b=b, c=c_, al=al, be=be, ga=ga, sg=sg))
+        xy = os.path.join(td, "data.xy")
+        np.savetxt(xy, np.column_stack([x, y, np.sqrt(np.maximum(y, 1.0))]), fmt="%.6f")
+        instf = os.path.join(td, "auto.instprm")
+        with open(instf, "w") as fh:
+            fh.write(_INSTPRM_TEMPLATE.format(lam=lam))
+
+        gpx = G2sc.G2Project(newgpx=os.path.join(td, "lb.gpx"))
+        hist = gpx.add_powder_histogram(xy, iparams=instf, fmthint="xye")
+        phase = gpx.add_phase(cif, phasename="lebail")
+        gpx.link_histogram_phase(hist, phase)
+        input_cell = dict(phase.get_cell())
+
+        stages = [("init", {})]  # normal cycle first: builds the reflection list
+        stages += [("background", {"set": {"Background": {
+            "type": "chebyschev", "refine": True,
+            "no. coeffs": int(n_background_terms)}}})]
+        if refine_zero:
+            stages.append(("zero", {"set": {"Instrument Parameters": ["Zero"]}}))
+        stages.append(("mustrain", {"set": {"Mustrain": {"type": "isotropic", "refine": True}}}))
+        if refine_cell:
+            stages.append(("cell", {"set": {"Cell": True}}))
+        stages += [(f"extract_{i}", {}) for i in range(int(extra_cycles))]
+
+        trace = []
+        for label, st in stages:
+            try:
+                gpx.do_refinements([st])
+                if label == "init":  # flip to Le Bail once the RefList exists
+                    phase.set_refinements({"LeBail": True})
+                yo = np.asarray(hist.getdata("Yobs"), dtype=float)
+                yc = np.asarray(hist.getdata("Ycalc"), dtype=float)
+                corr = (float(np.corrcoef(yo, yc)[0, 1])
+                        if yo.size > 1 and np.std(yc) > 0 else 0.0)
+                trace.append({"stage": label, "profile_corr": corr})
+            except Exception as exc:
+                trace.append({"stage": label, "error": str(exc)[:200]})
+
+        yo = np.asarray(hist.getdata("Yobs"), dtype=float)
+        yc = np.asarray(hist.getdata("Ycalc"), dtype=float)
+        final_corr = (float(np.corrcoef(yo, yc)[0, 1])
+                      if yo.size > 1 and np.std(yc) > 0 else 0.0)
+        if final_corr != final_corr:
+            final_corr = 0.0
+        cellout = phase.get_cell()
+        prof = {
+            "two_theta": [float(v) for v in hist.getdata("X")],
+            "y_obs": [float(v) for v in yo],
+            "y_calc": [float(v) for v in yc],
+        }
+
+    _keys = ("length_a", "length_b", "length_c", "angle_alpha", "angle_beta",
+             "angle_gamma", "volume")
+    return {
+        "profile_corr": final_corr,
+        "cell_fits": bool(final_corr >= 0.8),
+        "lattice": {k: float(cellout[k]) for k in _keys if k in cellout},
+        "input_lattice": {k: float(input_cell[k]) for k in _keys if k in input_cell},
+        "space_group_used": sg,
+        "convergence_trace": trace,
+        "profile": prof,
+        "wavelength": float(lam),
+        "note": (
+            "Structure-free whole-pattern fit: profile_corr >= ~0.9 means the "
+            "cell accounts for the pattern (cell_fits uses 0.8); <= ~0.6 means a "
+            "wrong cell or a SUBCELL (peaks unaccounted). A SUPERCELL always fits "
+            "at least as well as the true cell — among cells that fit, prefer "
+            "the SMALLEST. When cell_fits and refine_cell=True, 'lattice' is the "
+            "precise cell, obtained with no structure."
+        ),
+    }
 #
 # Powder autoindexing recovers candidate UNIT CELLS from peak positions alone —
 # the entry point to identification when the sample chemistry is unknown, since

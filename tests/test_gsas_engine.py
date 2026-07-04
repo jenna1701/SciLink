@@ -371,6 +371,41 @@ def test_index_pattern_staged_defeats_false_monoclinic():
            [c["M20"] for c in r2["candidate_cells"]]
 
 
+def test_validate_cell_lebail_registered_and_knobs():
+    from scilink.skills.structure_matching.xrd.validate_cell import TOOL_SPEC
+    from scilink.skills._shared._registry import get_tools_for
+    names = {t.name for t in get_tools_for("structure_matching", active_skills=["xrd"])}
+    assert "validate_cell_lebail" in names
+    for k in ("cell", "bravais", "refine_cell", "extra_cycles", "n_background_terms"):
+        assert k in TOOL_SPEC.parameters
+    # the supercell caveat is on the LLM-facing surface
+    assert "SUPERCELL" in TOOL_SPEC.description or "supercell" in TOOL_SPEC.returns
+
+
+@pytest.mark.skipif(not ge.gsas_available(), reason="GSAS-II not installed")
+def test_lebail_discriminates_true_vs_wrong_cell(tmp_path):
+    # Structure-free arbiter: simulate a broadened Si pattern, then Le-Bail-fit
+    # (a) Si's true cell -> high corr, cell_fits, lattice refined to precision;
+    # (b) a wrong cell (NaCl's a=5.64 P-lattice... use a genuinely wrong 4.9/5.4
+    #     hexagonal quartz cell) -> low corr, not cell_fits.
+    from scilink.skills.structure_matching.xrd.simulate_xrd import simulate_xrd_pattern
+    cif = tmp_path / "Si.cif"
+    cif.write_text(_SI_CIF)
+    sim = simulate_xrd_pattern(str(cif), "CuKa", (20.0, 80.0), engine="gsas",
+                               crystallite_um=0.1)
+    x, y = sim["profile_two_theta"], sim["profile_intensities"]
+
+    good = ge.lebail_fit(x, y, (5.431, 5.431, 5.431, 90, 90, 90), bravais="Cubic-F")
+    assert good["cell_fits"] is True
+    assert good["profile_corr"] > 0.9
+    assert good["lattice"]["length_a"] == pytest.approx(5.43088, abs=0.02)
+
+    bad = ge.lebail_fit(x, y, (4.913, 4.913, 5.405, 90, 90, 120),
+                        bravais="Trigonal/Hexagonal-P")
+    assert bad["cell_fits"] is False
+    assert bad["profile_corr"] < good["profile_corr"] - 0.2
+
+
 @pytest.mark.skipif(not ge.gsas_available(), reason="GSAS-II not installed")
 def test_index_pattern_recovers_quartz_cell():
     # Non-cubic: alpha-quartz (trigonal a=4.913, c=5.405) from 17 peak positions.

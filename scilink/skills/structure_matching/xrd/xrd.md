@@ -49,6 +49,16 @@ The skill ships five tools the analysis script chains together:
   search databases with the recovered lattice as a filter; also useful to
   corroborate a chemistry-led ID (indexed cell must match the identified
   phase). Needs ≥10 clean peaks; unreliable for triclinic.
+- `validate_cell_lebail` — **cell arbiter** (optional `gsas` extra).
+  Structure-free Le Bail whole-pattern fit of a candidate unit cell (no
+  atoms — reflection intensities are free). Run it on `index_pattern`'s
+  candidates BEFORE any database search: a wrong cell or subcell leaves
+  peaks unaccounted (low `profile_corr`), the true cell fits (≥~0.9) and
+  its lattice refines to precision with no structure. A supercell always
+  fits as well as the true cell — among fitting cells prefer the
+  smallest. Do NOT judge a cell by simulating same-cell structures:
+  intensities belong to the structure, not the cell, and a correct cell
+  with a wrong structure scores badly.
 - `refine_rietveld` — **refinement tier** (optional `gsas` extra). *After*
   the phase is identified, Rietveld-refine that structure against the
   measured pattern to extract accurate lattice parameters (+ esd),
@@ -142,7 +152,12 @@ either-alone:
   is the blind / unknown-sample case, and it is **index-first**: run
   `extract_peaks` (feed the indexer ALL confident peaks — lower
   `prominence_frac` if it returns fewer than ~10), then `index_pattern`
-  to recover candidate unit cells from the peak positions alone. Then
+  to recover candidate unit cells from the peak positions alone.
+  **Arbitrate the cells with `validate_cell_lebail` before searching**:
+  Le-Bail-fit each plausible candidate (cheap, structure-free) and keep
+  the SMALLEST cell that fits the whole profile — this kills wrong cells
+  and subcells immediately and turns alias families into a single
+  answer, instead of burning database searches on a bad cell. Then
   search by the CELL, not by guessed elements: a `search_structures`
   call may omit `chemistry` entirely and pass the indexed cell's
   `lattice_param_ranges` as the query key (served by COD and local-CIF;
