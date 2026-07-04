@@ -153,14 +153,104 @@ def build_fingerprint_library(
             "n_skipped_large": n_large, "n_duplicates": n_dup, "path": out_path}
 
 
+# --- library distribution / loading --------------------------------------------
+#
+# Resolution order: explicit ``library_path`` -> $SCILINK_XRD_FINGERPRINT_DB ->
+# the persistent per-user store (~/.scilink/xrd_fingerprints/, survives pip
+# upgrades — same convention as the persistent skill store). The prebuilt
+# COD-derived artifact is fetched ONCE into that store (a few hundred MB, like
+# pulling model weights); nobody rebuilds 100 GB of CIFs to use this.
+
+DEFAULT_LIBRARY_URL = (
+    "https://github.com/ziatdinovmax/SciLink/releases/download/"
+    "xrd-fplib-v1/cod_fingerprints.parquet"
+)
+DEFAULT_LIBRARY_SHA256: Optional[str] = None  # set when the v1 artifact is published
+
+
+def _default_store_path() -> str:
+    return os.path.join(os.path.expanduser("~"), ".scilink",
+                        "xrd_fingerprints", "cod_fingerprints.parquet")
+
+
+def fetch_fingerprint_library(
+    url: Optional[str] = None,
+    dest: Optional[str] = None,
+    sha256: Optional[str] = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Download a prebuilt fingerprint library into the per-user store.
+
+    One-time, explicit operation (several hundred MB — deliberately NOT run
+    implicitly on first use). Streams to a temp file, verifies the checksum
+    when one is supplied, then atomically renames into place.
+
+    Returns {'path', 'n_entries', 'sha256', 'source_url'}.
+    """
+    import hashlib
+    import tempfile
+    import urllib.request
+
+    url = url or DEFAULT_LIBRARY_URL
+    sha256 = sha256 if sha256 is not None else DEFAULT_LIBRARY_SHA256
+    dest = os.path.abspath(dest or _default_store_path())
+    if os.path.exists(dest) and not overwrite:
+        raise FileExistsError(
+            f"{dest} already exists — pass overwrite=True (or delete it) to "
+            "replace the installed library."
+        )
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+
+    _logger.info("Downloading fingerprint library from %s", url)
+    digest = hashlib.sha256()
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dest), suffix=".part")
+    try:
+        with os.fdopen(fd, "wb") as out, urllib.request.urlopen(url, timeout=60) as resp:
+            total = int(resp.headers.get("Content-Length") or 0)
+            got = 0
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                out.write(chunk)
+                digest.update(chunk)
+                got += len(chunk)
+                if total and got % (50 << 20) < (1 << 20):
+                    _logger.info("  %.0f%% (%d MB)", 100 * got / total, got >> 20)
+        actual = digest.hexdigest()
+        if sha256 and actual.lower() != sha256.lower():
+            raise RuntimeError(
+                f"Checksum mismatch for {url}: expected {sha256}, got {actual} "
+                "— refusing to install a corrupted/tampered library."
+            )
+        os.replace(tmp, dest)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+    import pandas as pd
+    n = len(pd.read_parquet(dest, columns=["source_id"]))
+    _LIB_CACHE.pop(dest, None)
+    return {"path": dest, "n_entries": int(n), "sha256": actual, "source_url": url}
+
+
 def _load_library(library_path: Optional[str]):
     import pandas as pd
     path = library_path or os.environ.get(_ENV_DB)
     if not path:
+        store = _default_store_path()
+        if os.path.exists(store):
+            path = store
+    if not path:
         raise RuntimeError(
-            "No fingerprint library configured. Build one with "
-            "build_fingerprint_library(cif_dir, out_path) and pass library_path "
-            f"(or set {_ENV_DB})."
+            "No fingerprint library found. Three ways to get one:\n"
+            f"  1. Fetch the prebuilt COD library (recommended, ~hundreds of MB, "
+            f"one-time): run `scilink fetch-xrd-library` or call "
+            f"fetch_fingerprint_library() — installs to {_default_store_path()}\n"
+            f"  2. Point {_ENV_DB} at an existing parquet (shared/HPC installs)\n"
+            "  3. Build your own from any CIF collection: "
+            "scripts/build_cod_fingerprints.py (COD mirror) or "
+            "build_fingerprint_library(cif_dir, out_path) (local/private CIFs)"
         )
     path = os.path.abspath(path)
     if path not in _LIB_CACHE:

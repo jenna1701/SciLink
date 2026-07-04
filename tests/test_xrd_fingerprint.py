@@ -82,6 +82,49 @@ def test_search_match_needs_peaks(tiny_library):
         search_match_pattern([28.4], [100.0], library_path=tiny_library)
 
 
+def test_fetch_and_default_store_loading(tiny_library, tmp_path, monkeypatch):
+    # fetch: file:// URL -> dest, checksum verified, atomic install; loader:
+    # with no explicit path and no env var, the per-user store is found.
+    import hashlib
+    from scilink.skills.structure_matching.xrd import fingerprint as fp
+
+    data = open(tiny_library, "rb").read()
+    good_sha = hashlib.sha256(data).hexdigest()
+    url = "file://" + tiny_library
+    dest = tmp_path / "store" / "cod_fingerprints.parquet"
+
+    info = fp.fetch_fingerprint_library(url=url, dest=str(dest), sha256=good_sha)
+    assert info["n_entries"] == 3 and info["sha256"] == good_sha
+    assert dest.exists()
+
+    # refuses to clobber without overwrite=True
+    with pytest.raises(FileExistsError):
+        fp.fetch_fingerprint_library(url=url, dest=str(dest))
+    fp.fetch_fingerprint_library(url=url, dest=str(dest), sha256=good_sha,
+                                 overwrite=True)
+
+    # checksum mismatch -> rejected, nothing installed
+    bad_dest = tmp_path / "store2" / "lib.parquet"
+    with pytest.raises(RuntimeError):
+        fp.fetch_fingerprint_library(url=url, dest=str(bad_dest), sha256="0" * 64)
+    assert not bad_dest.exists()
+
+    # loader resolution: default per-user store found when nothing else is set
+    monkeypatch.delenv(fp._ENV_DB, raising=False)
+    monkeypatch.setattr(fp, "_default_store_path", lambda: str(dest))
+    df = fp._load_library(None)
+    assert len(df) == 3
+
+    # nothing anywhere -> actionable error naming all three routes
+    monkeypatch.setattr(fp, "_default_store_path",
+                        lambda: str(tmp_path / "nowhere.parquet"))
+    fp._LIB_CACHE.clear()
+    with pytest.raises(RuntimeError) as exc:
+        fp._load_library(None)
+    msg = str(exc.value)
+    assert "fetch-xrd-library" in msg and fp._ENV_DB in msg and "build" in msg
+
+
 def test_calibrate_zero_reference_lines():
     # Si @ CuKa: textbook positions
     ref = _reference_two_theta("Si", 1.5406, 95.0)
