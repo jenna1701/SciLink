@@ -305,7 +305,7 @@ def test_index_pattern_registered_and_knobs():
     names = {t.name for t in get_tools_for("structure_matching", active_skills=["xrd"])}
     assert "index_pattern" in names
     for k in ("crystal_systems", "timeout_per_lattice", "m20_min", "max_nc_no",
-              "zero_offset", "start_volume", "top_n"):
+              "zero_offset", "start_volume", "top_n", "stage_stop_m20"):
         assert k in TOOL_SPEC.parameters
     # blind-workflow guidance is on the LLM-facing surface
     assert "chemistry" in TOOL_SPEC.description.lower()
@@ -336,6 +336,39 @@ def test_index_pattern_recovers_si_cell():
     lo, hi = r["lattice_param_ranges"]["a"]
     assert lo < 5.4309 < hi
     assert not r["warnings"]
+
+
+@pytest.mark.skipif(not ge.gsas_available(), reason="GSAS-II not installed")
+def test_index_pattern_staged_defeats_false_monoclinic():
+    # Regression for the live blind-eval failure: on this REAL measured peak
+    # list (RRUFF Cassiterite R040017 via extract_peaks; SnO2, tetragonal
+    # a=4.7374 c=3.1864), a whole-family search returned a spurious monoclinic
+    # V~560 A^3 cell at M20~97 that outranked the true tetragonal cell — the
+    # classic false-low-symmetry pathology (M20 is not comparable across
+    # symmetry levels). The default STAGED symmetry descent must stop at the
+    # tetragonal stage with the true cell on top and never run monoclinic.
+    peaks = [26.633, 33.921, 51.813, 38.007, 54.802, 64.773, 66.012, 61.922,
+             83.759, 89.83, 71.312, 78.758, 78.979, 83.992, 57.86, 39.023,
+             24.036, 87.291, 42.676, 81.18]
+    r = ge.index_pattern(peaks, "CuKa")           # default: staged descent
+    assert r["stopped_at"] == "tetragonal/hexagonal/trigonal"
+    assert "monoclinic" not in r["stages_run"]
+    # The TRUE cell must be among the candidates (near-equal-M20 aliases may
+    # legitimately share the list — the skill directs the agent to try several;
+    # what staging guarantees is that the true-symmetry family is searched and
+    # a spurious monoclinic cell can no longer bury it).
+    def _is_true_cell(c):
+        edges = sorted([c["a"], c["b"], c["c"]])
+        return (abs(edges[0] - 3.1864) < 0.02 and abs(edges[1] - 4.7374) < 0.02
+                and abs(edges[2] - 4.7374) < 0.02)
+    assert any(_is_true_cell(c) for c in r["candidate_cells"])
+    # explicit crystal_systems disables staging
+    r2 = ge.index_pattern(peaks, "CuKa", crystal_systems=["tetragonal"])
+    assert r2["stages_run"] == ["tetragonal"] and r2["stopped_at"] is None
+    # seeded: reproducible run-to-run
+    r3 = ge.index_pattern(peaks, "CuKa", crystal_systems=["tetragonal"])
+    assert [c["M20"] for c in r3["candidate_cells"]] == \
+           [c["M20"] for c in r2["candidate_cells"]]
 
 
 @pytest.mark.skipif(not ge.gsas_available(), reason="GSAS-II not installed")

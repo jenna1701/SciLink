@@ -173,6 +173,17 @@ def test_chemistry_search_honors_lattice_filter(tmp_path):
     assert len(miss["candidates"]) == 0
 
 
+def test_cod_query_volume_center():
+    # Cell-only ranking helper: explicit volume window wins; else the a/b/c
+    # midpoint product; None when edges are incomplete.
+    from scilink.skills.structure_matching._backends.cod import _query_volume_center
+    assert _query_volume_center({"volume": (150.0, 170.0)}) == pytest.approx(160.0)
+    assert _query_volume_center(
+        {"a": (5.3, 5.5), "b": (5.3, 5.5), "c": (5.3, 5.5)}
+    ) == pytest.approx(5.4 ** 3)
+    assert _query_volume_center({"a": (5.3, 5.5)}) is None
+
+
 def test_search_warns_when_no_backends_available(tmp_path):
     with patch.dict("os.environ", {}, clear=False):
         # Unset env vars that might enable a backend

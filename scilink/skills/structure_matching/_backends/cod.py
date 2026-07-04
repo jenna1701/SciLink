@@ -67,6 +67,22 @@ def _formula_elements(formula: Optional[str]) -> set[str]:
     return elements
 
 
+def _query_volume_center(ranges: dict) -> Optional[float]:
+    """Center of a lattice query's volume window (Å³) for cell-agreement ranking.
+    Uses the explicit 'volume' key when given; otherwise approximates from the
+    a/b/c range midpoints (orthogonal-cell estimate — good enough for ranking)."""
+    vr = ranges.get("volume")
+    if vr:
+        return 0.5 * (float(vr[0]) + float(vr[1]))
+    mids = []
+    for k in ("a", "b", "c"):
+        r = ranges.get(k)
+        if not r:
+            return None
+        mids.append(0.5 * (float(r[0]) + float(r[1])))
+    return mids[0] * mids[1] * mids[2]
+
+
 def _formula_natoms(formula: Optional[str]) -> float:
     """Total atom count of a COD (reduced) formula string — a structural-
     simplicity proxy: TiO2 -> 3, Ti9O17 -> 26. Used as a RETRIEVAL tiebreaker so
@@ -122,6 +138,14 @@ class CODBackend:
             rows = self._search_db(wanted, spec)
         else:
             rows = self._search_web(wanted, spec)
+        # Cell-only (blind) queries rank by CELL AGREEMENT, not composition: the
+        # element-count rank below would put elemental phases first (observed
+        # live: a blind agent concluded "Te" because elemental Te topped a
+        # volume-window hit list). Collect a wider pool, then sort by volume
+        # proximity to the query window's center and trim.
+        cell_only = not wanted and bool(spec.lattice_param_ranges)
+        pool_cap = max(3 * int(spec.top_n), 30) if cell_only else int(spec.top_n)
+
         candidates: list[StructureCandidate] = []
         for cid, formula, sg, sg_number in rows:
             struct = self._load_structure(int(cid))
@@ -147,8 +171,17 @@ class CODBackend:
                 # match (fewest elements beyond those requested).
                 rank_score=1.0 / (1.0 + extra),
             ))
-            if len(candidates) >= int(spec.top_n):
+            if len(candidates) >= pool_cap:
                 break
+
+        if cell_only and candidates:
+            v_center = _query_volume_center(spec.lattice_param_ranges)
+            if v_center:
+                candidates.sort(key=lambda c: abs(
+                    c.metadata["_structure"].lattice.volume - v_center))
+                for rank, cand in enumerate(candidates):
+                    cand.rank_score = 1.0 / (1.0 + rank)
+            candidates = candidates[: int(spec.top_n)]
         return candidates
 
     # -- internals ---------------------------------------------------------

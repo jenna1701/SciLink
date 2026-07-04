@@ -547,6 +547,8 @@ def index_pattern(
     timeout_per_lattice: float = 30.0,
     m20_min: float = 2.0,
     top_n: int = 10,
+    stage_stop_m20: float = 10.0,
+    seed: int = 0,
 ) -> dict[str, Any]:
     """Autoindex a powder pattern: peak positions -> ranked candidate unit cells.
 
@@ -563,9 +565,14 @@ def index_pattern(
     crystal_systems : list[str] | None
         Which crystal systems to search: subset of ['cubic','trigonal',
         'hexagonal','tetragonal','orthorhombic','monoclinic','triclinic'].
-        Default: all EXCEPT triclinic (slow, unreliable). Narrow it when the
-        pattern's look suggests high symmetry (few peaks -> try ['cubic',
-        'tetragonal','hexagonal'] first: much faster, fewer false cells).
+        Default None = STAGED SYMMETRY DESCENT: cubic -> tetragonal/hexagonal/
+        trigonal -> orthorhombic -> monoclinic, stopping at the first symmetry
+        level that yields a convincing solution (M20 >= stage_stop_m20 with
+        X20 = 0). This is the standard defense against the false-low-symmetry
+        pathology (a spurious monoclinic cell can index everything with a
+        spectacular M20); M20 is only comparable WITHIN a symmetry level.
+        Passing an explicit list disables staging and searches exactly those
+        systems (triclinic only ever runs when explicitly requested).
     zero_offset : float
         2θ zero correction (degrees) applied by the indexer (default 0).
     max_nc_no : int
@@ -583,6 +590,15 @@ def index_pattern(
         (10-20) to keep only convincing solutions.
     top_n : int
         Max candidate cells returned (default 10).
+    stage_stop_m20 : float
+        Staged mode only: stop descending to lower symmetry once a stage yields
+        M20 >= this with X20 = 0 (default 10). RAISE to keep descending unless
+        the high-symmetry solution is overwhelming; LOWER to stop earlier.
+    seed : int | None
+        The cell search starts from random trial cells; the seed makes the
+        result reproducible (default 0). CHANGE it to re-roll the stochastic
+        search when the candidates look like aliases of each other; None uses
+        fresh randomness each call.
     """
     import contextlib
     import io
@@ -618,25 +634,63 @@ def index_pattern(
         peaks.append([tt, 100.0, True, False, 0, 0, 0, float(d), 0.0])
     peaks.sort(key=lambda p: -p[7])
 
-    if crystal_systems is None:
-        crystal_systems = ["cubic", "trigonal", "hexagonal", "tetragonal",
-                           "orthorhombic", "monoclinic"]
-    bad = [s for s in crystal_systems if s not in _SYSTEM_TO_IBRAV]
+    bad = [s for s in (crystal_systems or []) if s not in _SYSTEM_TO_IBRAV]
     if bad:
         raise ValueError(f"unknown crystal system(s) {bad}; "
                          f"choose from {sorted(_SYSTEM_TO_IBRAV)}")
-    bravais = [False] * len(_BRAVAIS_NAMES)
-    for s in crystal_systems:
-        for i in _SYSTEM_TO_IBRAV[s]:
-            bravais[i] = True
 
     # controls layout (GSAS-II 'Unit Cells List'): [zero-flag, zero, Nc/No max, start V]
     controls = [0, float(zero_offset), int(max_nc_no), float(start_volume)]
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):  # DoIndexPeaks prints its whole search log
-        ok, dmin, cells = G2indx.DoIndexPeaks(
-            peaks, controls, bravais, None,
-            timeout=float(timeout_per_lattice), M20_min=float(m20_min))
+
+    import random as _random
+
+    def _run_index(systems):
+        bravais = [False] * len(_BRAVAIS_NAMES)
+        for s in systems:
+            for i in _SYSTEM_TO_IBRAV[s]:
+                bravais[i] = True
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):  # DoIndexPeaks prints its search log
+            _, _, found = G2indx.DoIndexPeaks(
+                peaks, controls, bravais, None,
+                timeout=float(timeout_per_lattice), M20_min=float(m20_min))
+        return found
+
+    # GSASIIindex draws its trial cells from the stdlib `random` module; seed it
+    # (saving/restoring the global state) so results are reproducible.
+    _rng_state = _random.getstate()
+    if seed is not None:
+        _random.seed(int(seed))
+    try:
+
+        if crystal_systems is not None:
+            # Explicit systems: single search exactly as requested (no staging).
+            cells = _run_index(crystal_systems)
+            stages_run = [list(crystal_systems)]
+            stopped_at = None
+        else:
+            # STAGED SYMMETRY DESCENT (default). A low-symmetry search has
+            # enough free parameters that a large spurious cell can index every
+            # peak with a spectacular M20 — a false monoclinic cell beating the
+            # true tetragonal one is a classic autoindexing pathology (observed
+            # live: a monoclinic V~560 A^3 cell at M20~97 vs the true V~71.5
+            # tetragonal cassiterite). The standard defense (TREOR/DICVOL
+            # practice) is to search HIGH-symmetry lattices first and only
+            # descend while no convincing solution exists. M20 is only
+            # comparable within a symmetry level, never across levels.
+            cells = []
+            stages_run = []
+            stopped_at = None
+            for stage in (["cubic"], ["tetragonal", "hexagonal", "trigonal"],
+                          ["orthorhombic"], ["monoclinic"]):
+                found = _run_index(stage)
+                stages_run.append(stage)
+                cells.extend(found)
+                if any(c[0] >= stage_stop_m20 and int(c[1]) == 0 for c in found):
+                    stopped_at = "/".join(stage)
+                    break
+    finally:
+        _random.setstate(_rng_state)
 
     # Dedupe near-identical cells (same lattice within 0.2%), keeping best M20;
     # then sort by M20 desc with SMALLEST VOLUME first among near-equal M20
@@ -694,6 +748,8 @@ def index_pattern(
             "iterate (more peaks, narrowed crystal_systems, zero_offset) rather "
             "than trust M20 alone."
         ),
+        "stages_run": ["/".join(s) for s in stages_run],
+        "stopped_at": stopped_at,
     }
     if out_cells:
         best = out_cells[0]

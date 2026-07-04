@@ -35,12 +35,15 @@ TOOL_SPEC = ToolSpec(
     signature=(
         "index_pattern(two_theta_peaks, wavelength='CuKa', crystal_systems=None, "
         "zero_offset=0.0, max_nc_no=4, start_volume=25.0, "
-        "timeout_per_lattice=30.0, m20_min=2.0, top_n=10) -> dict"
+        "timeout_per_lattice=30.0, m20_min=2.0, top_n=10, "
+        "stage_stop_m20=10.0) -> dict"
     ),
     parameters={
         "two_theta_peaks": {"type": "list[float]", "description": "Peak positions in 2θ degrees (use extract_peaks' 'positions'). Feed ALL confident peaks — autoindexing fails with few peaks (>=10 needed for reliability; <5 raises)."},
         "wavelength": {"type": "str | float", "description": "Source ('CuKa','MoKa',…) or wavelength in Å. Must match how the pattern was measured — a wrong wavelength scales every d-spacing and yields a wrong (but plausible-looking) cell."},
-        "crystal_systems": {"type": "list[str]", "description": "Crystal systems to search, from ['cubic','trigonal','hexagonal','tetragonal','orthorhombic','monoclinic','triclinic']. Default: all EXCEPT triclinic (slow and unreliable — opt in explicitly). NARROW it when the pattern suggests high symmetry (few, sharp, well-separated peaks → try ['cubic','tetragonal','hexagonal'] first: much faster and fewer false cells)."},
+        "crystal_systems": {"type": "list[str]", "description": "Crystal systems to search, from ['cubic','trigonal','hexagonal','tetragonal','orthorhombic','monoclinic','triclinic']. DEFAULT (omit) = staged symmetry descent: cubic → tetragonal/hexagonal/trigonal → orthorhombic → monoclinic, stopping at the first level with a convincing solution (M20 ≥ stage_stop_m20, X20 = 0) — the standard defense against the false-low-symmetry trap: a spurious monoclinic cell can index every peak with a spectacular M20, and M20 is only comparable WITHIN a symmetry level, never across levels. Pass an explicit list to search exactly those systems (no staging); triclinic only ever runs when explicitly requested."},
+        "stage_stop_m20": {"type": "float", "description": "Staged mode only: stop descending to lower symmetry once a stage yields M20 ≥ this with X20 = 0 (default 10). RAISE to keep descending unless the high-symmetry solution is overwhelming; LOWER to stop earlier."},
+        "seed": {"type": "int", "description": "Random seed for the stochastic cell search (default 0 = reproducible). CHANGE it to re-roll the search when the candidates all look like aliases of each other or nothing convincing was found."},
         "zero_offset": {"type": "float", "description": "2θ zero correction in degrees applied during indexing (default 0). Set if the diffractometer zero error is known; an uncorrected zero shifts all d-spacings and degrades M20."},
         "max_nc_no": {"type": "int", "description": "de Wolff cap on calculated/observed reflection ratio (default 4). RAISE to allow larger unit cells (more calculated lines per observed peak); LOWER to force parsimony on simple patterns."},
         "start_volume": {"type": "float", "description": "Starting cell volume in Å^3 for the search sweep (default 25). The sweep grows volume automatically — RAISE only to skip small cells when the cell is known to be large (speeds the search)."},
@@ -57,7 +60,10 @@ TOOL_SPEC = ToolSpec(
         "lattice filter; for NON-cubic cells pass the 'volume' range only, "
         "since a database entry's axis convention may be a permutation of the "
         "indexed cell's and per-axis ranges would false-reject it), "
-        "'n_peaks_used', "
+        "'n_peaks_used', 'stages_run' + 'stopped_at' (which symmetry levels the "
+        "staged search covered and where it stopped — candidates from symmetry "
+        "levels NOT run may exist; re-run with explicit crystal_systems to "
+        "search them), "
         "'dmin_angstrom', 'wavelength', 'warnings', 'note'. Ranking: M20 "
         "descending with the SMALLEST volume first among near-equal M20 (a "
         "larger equal-M20 cell is usually a superlattice alias). M20 > ~10 with "
@@ -90,6 +96,8 @@ def index_pattern(
     timeout_per_lattice: float = 30.0,
     m20_min: float = 2.0,
     top_n: int = 10,
+    stage_stop_m20: float = 10.0,
+    seed: int = 0,
 ) -> dict[str, Any]:
     """Autoindex a powder pattern into candidate unit cells. See ``TOOL_SPEC``.
 
@@ -100,4 +108,5 @@ def index_pattern(
         two_theta_peaks, wavelength=wavelength, crystal_systems=crystal_systems,
         zero_offset=zero_offset, max_nc_no=max_nc_no, start_volume=start_volume,
         timeout_per_lattice=timeout_per_lattice, m20_min=m20_min, top_n=top_n,
+        stage_stop_m20=stage_stop_m20, seed=seed,
     )
