@@ -36,7 +36,8 @@ TOOL_SPEC = ToolSpec(
     signature=(
         "validate_cell_lebail(two_theta, intensity, cell, bravais='Cubic-P', "
         "wavelength='CuKa', two_theta_range=None, refine_cell=True, "
-        "refine_zero=True, n_background_terms=6, extra_cycles=2) -> dict"
+        "refine_zero=True, n_background_terms=6, extra_cycles=2, "
+        "observed_peaks=None, peak_tol_deg=0.15) -> dict"
     ),
     parameters={
         "two_theta": {"type": "list[float]", "description": "Measured 2θ axis (degrees)."},
@@ -49,16 +50,20 @@ TOOL_SPEC = ToolSpec(
         "refine_zero": {"type": "bool", "description": "Refine the 2θ zero offset (default True)."},
         "n_background_terms": {"type": "int", "description": "Chebyshev background terms (default 6). RAISE (10–14) for strongly curved backgrounds."},
         "extra_cycles": {"type": "int", "description": "Extra intensity-extraction cycles after the staged fit (default 2) — Le Bail intensities converge iteratively; RAISE if profile_corr is still climbing in the convergence_trace."},
+        "observed_peaks": {"type": "list[float]", "description": "Optional measured peak positions (extract_peaks' 'positions'). When given, each is checked against the reflections the fitted cell generates: the returned 'unaccounted_peaks' are direct evidence of an impurity phase (a few, on a good fit) or a wrong/subcell (many)."},
+        "peak_tol_deg": {"type": "float", "description": "Match window for the peak accounting (default 0.15°). RAISE for broad peaks or residual zero error."},
     },
     required=["two_theta", "intensity", "cell"],
     returns=(
         "dict with 'profile_corr' (the verdict metric), 'cell_fits' (corr ≥ 0.8), "
         "'lattice' (refined cell — precise when the cell fits), 'input_lattice', "
         "'space_group_used', 'convergence_trace' (per-stage corr), 'profile' "
-        "(two_theta / y_obs / y_calc for plotting). Verdicts: corr ≥ ~0.9 the "
-        "cell accounts for the pattern; ≤ ~0.6 wrong cell or subcell. A "
-        "supercell fits as well as the true cell — prefer the smallest cell that "
-        "fits."
+        "(two_theta / y_obs / y_calc for plotting), and — when observed_peaks "
+        "was given — 'accounted_peaks' / 'unaccounted_peaks' (orphans: a few on "
+        "a good fit = impurity lines to identify separately; many = wrong cell "
+        "or subcell). Verdicts: corr ≥ ~0.9 the cell accounts for the pattern; "
+        "≤ ~0.6 wrong cell or subcell. A supercell fits as well as the true "
+        "cell — prefer the smallest cell that fits."
     ),
     when_to_use=(
         "Immediately after index_pattern, on each plausible candidate cell — "
@@ -81,6 +86,8 @@ def validate_cell_lebail(
     refine_zero: bool = True,
     n_background_terms: int = 6,
     extra_cycles: int = 2,
+    observed_peaks=None,
+    peak_tol_deg: float = 0.15,
 ) -> dict[str, Any]:
     """Le Bail whole-pattern validation of a candidate cell. See ``TOOL_SPEC``.
 
@@ -91,5 +98,6 @@ def validate_cell_lebail(
         two_theta, intensity, cell, bravais=bravais, wavelength=wavelength,
         two_theta_range=two_theta_range, refine_cell=refine_cell,
         refine_zero=refine_zero, n_background_terms=n_background_terms,
-        extra_cycles=extra_cycles,
+        extra_cycles=extra_cycles, observed_peaks=observed_peaks,
+        peak_tol_deg=peak_tol_deg,
     )

@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -554,6 +554,8 @@ def lebail_fit(
     refine_zero: bool = True,
     n_background_terms: int = 6,
     extra_cycles: int = 2,
+    observed_peaks: Sequence[float] = None,
+    peak_tol_deg: float = 0.15,
 ) -> dict[str, Any]:
     """Le Bail whole-pattern fit of a CANDIDATE CELL (no structure needed).
 
@@ -585,6 +587,15 @@ def lebail_fit(
     extra_cycles : int
         Additional intensity-extraction cycles after the staged refinement
         (default 2) — Le Bail intensities converge iteratively.
+    observed_peaks : sequence of float | None
+        Measured peak positions (2θ°, e.g. ``extract_peaks``' 'positions'). When
+        given, each is checked against the reflections the fitted cell generates
+        and the ORPHANS are returned as ``unaccounted_peaks`` — direct evidence
+        of an impurity phase (a few orphans on a good fit) or a wrong/subcell
+        (many orphans).
+    peak_tol_deg : float
+        Match window for the accounting (default 0.15°). RAISE for broad peaks
+        or a residual zero error.
     """
     import os
     import tempfile
@@ -663,9 +674,31 @@ def lebail_fit(
             "y_calc": [float(v) for v in yc],
         }
 
+        # Peak accounting: which observed peaks does the fitted cell generate a
+        # reflection for? The histogram's post-fit reflection list holds the
+        # generated positions at the refined cell (incl. the fitted zero).
+        unaccounted = accounted = None
+        if observed_peaks is not None:
+            try:
+                reflists = hist.data.get("Reflection Lists", {})
+                refpos = []
+                for _phname, pdata in reflists.items():
+                    refl = pdata.get("RefList") if isinstance(pdata, dict) else pdata
+                    for rowr in refl:
+                        refpos.append(float(rowr[5]))  # col 5 = 2theta position
+                refpos = np.asarray(sorted(refpos), dtype=float)
+                unaccounted, accounted = [], []
+                for p in observed_peaks:
+                    p = float(p)
+                    ok = refpos.size and float(np.min(np.abs(refpos - p))) <= float(peak_tol_deg)
+                    (accounted if ok else unaccounted).append(round(p, 3))
+            except Exception as exc:
+                _log_note = f"peak accounting failed: {exc}"  # noqa: F841
+                unaccounted = accounted = None
+
     _keys = ("length_a", "length_b", "length_c", "angle_alpha", "angle_beta",
              "angle_gamma", "volume")
-    return {
+    out = {
         "profile_corr": final_corr,
         "cell_fits": bool(final_corr >= 0.8),
         "lattice": {k: float(cellout[k]) for k in _keys if k in cellout},
@@ -683,6 +716,15 @@ def lebail_fit(
             "precise cell, obtained with no structure."
         ),
     }
+    if observed_peaks is not None and unaccounted is not None:
+        out["accounted_peaks"] = accounted
+        out["unaccounted_peaks"] = unaccounted
+        out["note"] += (
+            " Peak accounting: a FEW unaccounted_peaks on an otherwise good fit "
+            "= impurity/second-phase lines (identify them separately); MANY = "
+            "wrong cell or subcell."
+        )
+    return out
 #
 # Powder autoindexing recovers candidate UNIT CELLS from peak positions alone —
 # the entry point to identification when the sample chemistry is unknown, since
