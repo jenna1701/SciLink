@@ -101,6 +101,49 @@ def test_search_match_rejects_when_absent(tiny_library):
     assert top_fom < 0.7   # nothing convincing — falls to the indexing route
 
 
+def test_absent_lines_evidence_and_penalty(tiny_library, tmp_path):
+    # Absent-strong-lines negative evidence: build an IMPOSTOR entry = Si's
+    # lines PLUS extra strong lines that the measurement lacks (the
+    # superlattice-impostor signature). Default (penalty=0): evidence reported,
+    # ranking by FOM unchanged. With penalty>0: impostor demoted below Si.
+    import pandas as pd
+    from scilink.skills.structure_matching.xrd import fingerprint as fp
+    df = pd.read_parquet(tiny_library)
+    si = df[df["formula"] == "Si"].iloc[0]
+    imp = dict(si)
+    imp["source_id"] = "impostor"
+    imp["formula"] = "XxSi"
+    # Si's own lines + two strong fake superlattice lines at 24 and 40 deg
+    lam = 1.5406
+    import numpy as np
+    # inside the measured window (28.4-88.0) and >tol from any Si line
+    fake_d = [lam / (2 * np.sin(np.radians(t / 2))) for t in (33.0, 40.0)]
+    imp["ds"] = list(si["ds"]) + fake_d
+    imp["intensities"] = list(si["intensities"]) + [80.0, 60.0]
+    lib2 = tmp_path / "with_impostor.parquet"
+    pd.concat([df, pd.DataFrame([imp])], ignore_index=True).to_parquet(lib2)
+
+    tt = [28.442, 47.303, 56.121, 69.130, 76.377, 88.032]
+    ii = [100.0, 55.0, 30.0, 6.0, 11.0, 12.0]
+
+    r0 = fp.search_match_pattern(tt, ii, wavelength="CuKa", library_path=str(lib2),
+                                 materialize_top=0)
+    by_id = {m["source_id"]: m for m in r0["matches"]}
+    assert "impostor" in by_id
+    assert by_id["impostor"]["frac_strong_lines_absent"] > 0.2   # evidence reported
+    assert 33.0 in by_id["impostor"]["absent_strong_lines"]
+    sim = [m for m in r0["matches"] if m["formula"] == "Si"][0]
+    assert sim["frac_strong_lines_absent"] == 0.0                # truth: none absent
+    # default penalty=0: adjusted == fom (ranking semantics unchanged)
+    assert by_id["impostor"]["adjusted_score"] == pytest.approx(
+        by_id["impostor"]["figure_of_merit"], abs=1e-4)  # tool rounds to 4 dp
+
+    r1 = fp.search_match_pattern(tt, ii, wavelength="CuKa", library_path=str(lib2),
+                                 materialize_top=0, absent_lines_penalty=0.5)
+    forms = [m["formula"] for m in r1["matches"]]
+    assert forms.index("Si") < forms.index("XxSi")               # impostor demoted
+
+
 def test_search_match_needs_peaks(tiny_library):
     with pytest.raises(ValueError):
         search_match_pattern([28.4], [100.0], library_path=tiny_library)

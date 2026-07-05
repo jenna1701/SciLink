@@ -50,6 +50,20 @@ The skill ships five tools the analysis script chains together:
   mirror, via `build_fingerprint_library`). Deterministic, offline, no
   chemistry needed. Only when it returns no convincing match fall back
   to the indexing route below (possible new phase).
+- **Isostructural impostors — read the absent-lines evidence.** A high
+  `figure_of_merit` proves the candidate's lines lie where measured peaks
+  are; it does NOT prove the phase (isostructural and superlattice phases
+  share positions — a ZnS pattern can score 0.97 against a rare-earth
+  bixbyite). Each `search_match_pattern` match reports
+  `frac_strong_lines_absent` / `absent_strong_lines`: among near-tied
+  candidates (within ~0.1 FOM), one with substantially MORE of its strong
+  predicted lines absent from the measurement is the impostor. Caveats
+  the evidence honestly carries: polytype/polymorph library entries can
+  show absent lines for the TRUE phase, and strong texture suppresses
+  real line families — so compare candidates against each other rather
+  than applying an absolute cutoff, and prefer the chemically plausible
+  candidate among ties (a common mineral over an exotic rare-earth
+  compound, unless composition evidence says otherwise).
 - `calibrate_zero` — **2θ calibration from an internal standard** (Si /
   LaB₆ / corundum mixed into the sample). Fits zero error + specimen
   displacement from the standard's exactly-known lines and returns the

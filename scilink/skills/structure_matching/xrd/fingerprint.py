@@ -293,10 +293,17 @@ TOOL_SPEC = ToolSpec(
         "max_shortlist": {"type": "int", "description": "Cap on keyed candidates that get full figure-of-merit scoring (default 500)."},
         "materialize_top": {"type": "int", "description": "How many top matches get their full CIF resolved into 'structure_path' (default 3; 0 = identification only). The library stores peak lists, not structures — this is the bridge to simulation confirmation and Rietveld. Fetched by COD ID (cached) unless the library was built locally."},
         "materialize_dir": {"type": "str", "description": "Directory the fetched CIFs are written to (default './fp_matches')."},
+        "strong_line_frac": {"type": "float", "description": "A candidate line counts as STRONG (and therefore testable for absence) when its relative intensity is ≥ this fraction of the candidate's max (default 0.25). LOWER to test more lines (stricter impostor rejection, but weak lines may be missing from a capped measured peak list); RAISE to test only the dominant lines."},
+        "absent_lines_penalty": {"type": "float", "description": "Ranking penalty weight for a candidate whose strong predicted lines are ABSENT from the measurement: adjusted_score = figure_of_merit × (1 − penalty × frac_absent). DEFAULT 0 (evidence is reported, ranking unchanged): validated on real data the absent-fraction cleanly kills some impostors (FeAgS2 masquerading as fluorite: 0.86 absent vs truth 0.00) but INVERTS for phases with polytypes/polymorphs whose extra weak lines are legitimately missing (ZnS wurtzite-vs-sphalerite entries) — so a blind default is unsafe. Instead READ 'frac_strong_lines_absent' per match: among near-tied FOMs, a candidate with substantially MORE absent strong lines than its rivals is the impostor. RAISE the penalty (e.g. 0.5) only when the sample is untextured and single-polymorph candidates are expected."},
     },
     required=["two_theta", "intensity"],
     returns=(
-        "dict with 'matches' (ranked list of {source_id, formula, space_group, "
+        "dict with 'matches' RANKED BY 'adjusted_score' (= figure_of_merit "
+        "penalized by the fraction of the candidate's strong predicted lines "
+        "absent from the measurement — 'frac_strong_lines_absent' and the "
+        "'absent_strong_lines' positions are reported per match; a high FOM "
+        "with substantial absent strong lines is an isostructural/superlattice "
+        "impostor). Each match: {source_id, formula, space_group, "
         "cell {a..gamma, volume}, figure_of_merit, n_matched/n_query peaks, and "
         "— for the top materialize_top hits — 'structure_path': the full CIF, "
         "resolved locally or fetched by COD ID; None when offline}), "
@@ -329,6 +336,8 @@ def search_match_pattern(
     max_shortlist: int = 500,
     materialize_top: int = 3,
     materialize_dir: str = "./fp_matches",
+    strong_line_frac: float = 0.25,
+    absent_lines_penalty: float = 0.0,
 ) -> dict[str, Any]:
     """Fingerprint search-match of measured peaks against the library.
 
@@ -390,17 +399,45 @@ def search_match_pattern(
         except Exception as exc:
             _logger.debug("scoring failed for %s: %s", row["source_id"], exc)
             continue
+        # ABSENT-STRONG-LINES check (classical Fink-era negative evidence): a
+        # candidate whose STRONG predicted lines have no measured counterpart is
+        # an impostor sharing positions on its other lines — the signature of
+        # isostructural / superlattice degeneracy (observed live: ZnS pattern
+        # confidently matched to bixbyite ErGdO3, whose extra strong superlattice
+        # lines are simply not in the data). Position FOM cannot see this;
+        # absence of predicted-strong lines can, and is robust to preferred
+        # orientation in one direction (texture suppresses SOME lines, not a
+        # whole predicted family). Only candidate lines inside the measured
+        # window and above strong_line_frac are testable — weak lines may
+        # legitimately be missing from a capped measured peak list.
+        cints = np.asarray(row["intensities"], dtype=float)[m]
+        ctt = cand_tt[m]
+        win = (ctt >= tt.min() - float(tol_deg)) & (ctt <= tt.max() + float(tol_deg))
+        strong = win & (cints >= 100.0 * float(strong_line_frac))
+        if strong.any():
+            dmin_ = np.abs(ctt[strong][:, None] - tt[None, :]).min(axis=1)
+            absent_mask = dmin_ > float(tol_deg)
+            frac_absent = float(absent_mask.mean())
+            absent_lines = [round(float(v), 2) for v in ctt[strong][absent_mask]][:10]
+        else:
+            frac_absent, absent_lines = 0.0, []
+        fom = float(sc.get("figure_of_merit", 0.0))
+        adjusted = fom * (1.0 - float(absent_lines_penalty) * frac_absent)
+
         matches.append({
             "source_id": row["source_id"],
             "formula": row["formula"],
             "space_group": row["space_group"],
             "cell": {k: float(row[k]) for k in ("a", "b", "c", "alpha", "beta",
                                                 "gamma", "volume")},
-            "figure_of_merit": float(sc.get("figure_of_merit", 0.0)),
+            "figure_of_merit": fom,
+            "adjusted_score": round(adjusted, 4),
+            "frac_strong_lines_absent": round(frac_absent, 3),
+            "absent_strong_lines": absent_lines,
             "n_matched": int(sc.get("n_matched", 0)) if "n_matched" in sc else None,
             "cif_path": row.get("cif_path"),
         })
-    matches.sort(key=lambda r: -r["figure_of_merit"])
+    matches.sort(key=lambda r: -r["adjusted_score"])
 
     # Resolve full structures for the top hits — identification stores only
     # peak lists, so structure-level follow-up (simulate confirm, Rietveld)
