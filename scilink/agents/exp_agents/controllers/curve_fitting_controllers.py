@@ -4163,7 +4163,19 @@ Return JSON with:
                 "config": (state.get("locked_fitting_config") or {}).copy(),
             })
 
-            if r2 > best_r2:
+            # A successful result must never be discarded by the R² ranking: a
+            # matching-type skill (gate metric figure_of_merit) reports no R²,
+            # and the residual-diagnostics backfill can then attach a deeply
+            # negative recomputed R² (a stick overlay is not a curve fit) that
+            # loses to the -1.0 sentinel — the run's ONLY successful result was
+            # dropped and the pipeline claimed "no successful result" (observed
+            # live: plan-CONFORMANT XRD search-match scripts failed while
+            # nonconformant ones, whose self-reported R² beat the sentinel,
+            # passed). Also fixes the latent curve-fit case of a successful
+            # first fit with R² <= -1, which must enter the verification /
+            # recovery loop per the #245 rationale below instead of being
+            # treated as nonexistent.
+            if best_result is None or r2 > best_r2:
                 best_r2 = r2
                 best_result = result
                 best_config = (state.get("locked_fitting_config") or {}).copy()
