@@ -165,7 +165,9 @@ DEFAULT_LIBRARY_URL = (
     "https://github.com/ziatdinovmax/SciLink/releases/download/"
     "xrd-fplib-v1/cod_fingerprints.parquet"
 )
-DEFAULT_LIBRARY_SHA256: Optional[str] = None  # set when the v1 artifact is published
+DEFAULT_LIBRARY_SHA256: Optional[str] = (
+    "e2d1a8424221daad88d3c99b92fe0584cb93f11ef927ea6bdcf6c1bf31365b48"
+)  # xrd-fplib-v1: 440,378 entries, COD snapshot 2026-02-05
 
 
 def _default_store_path() -> str:
