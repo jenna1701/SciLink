@@ -291,18 +291,22 @@ TOOL_SPEC = ToolSpec(
         "n_key_lines": {"type": "int", "description": "How many of a candidate's strongest lines must be present among the query's strongest lines (default 3, classical Hanawalt). LOWER to 2 for textured/preferred-orientation samples where relative intensities are distorted."},
         "n_query_lines": {"type": "int", "description": "How many of the query's strongest measured lines the key lines are matched against (default 8). RAISE for multi-phase mixtures (each phase's key lines hide among more measured lines)."},
         "max_shortlist": {"type": "int", "description": "Cap on keyed candidates that get full figure-of-merit scoring (default 500)."},
+        "materialize_top": {"type": "int", "description": "How many top matches get their full CIF resolved into 'structure_path' (default 3; 0 = identification only). The library stores peak lists, not structures — this is the bridge to simulation confirmation and Rietveld. Fetched by COD ID (cached) unless the library was built locally."},
+        "materialize_dir": {"type": "str", "description": "Directory the fetched CIFs are written to (default './fp_matches')."},
     },
     required=["two_theta", "intensity"],
     returns=(
         "dict with 'matches' (ranked list of {source_id, formula, space_group, "
-        "cell {a..gamma, volume}, figure_of_merit, n_matched/n_query peaks, "
-        "cif_path when the library was built from local files}), "
+        "cell {a..gamma, volume}, figure_of_merit, n_matched/n_query peaks, and "
+        "— for the top materialize_top hits — 'structure_path': the full CIF, "
+        "resolved locally or fetched by COD ID; None when offline}), "
         "'n_library_entries', 'n_shortlisted', 'note'. figure_of_merit ≥ ~0.7 "
-        "with most strong lines matched is a solid identification — confirm by "
-        "simulating the hit's structure (simulate_xrd_pattern on cif_path) and, "
-        "for lattice precision, refine_rietveld. No convincing match across the "
-        "library suggests a phase not in the library — fall back to the "
-        "indexing route (index_pattern → validate_cell_lebail)."
+        "with most strong lines matched is a solid identification — CONFIRM by "
+        "simulating the hit's structure_path (simulate_xrd_pattern) against the "
+        "measurement and, for lattice precision, refine_rietveld on it. No "
+        "convincing match across the library suggests a phase not in the "
+        "library — fall back to the indexing route (index_pattern → "
+        "validate_cell_lebail)."
     ),
     when_to_use=(
         "FIRST for any unknown pattern, before indexing: blind identification "
@@ -323,6 +327,8 @@ def search_match_pattern(
     n_key_lines: int = 3,
     n_query_lines: int = 8,
     max_shortlist: int = 500,
+    materialize_top: int = 3,
+    materialize_dir: str = "./fp_matches",
 ) -> dict[str, Any]:
     """Fingerprint search-match of measured peaks against the library.
 
@@ -330,7 +336,12 @@ def search_match_pattern(
     strongest lines each match one of the query's ``n_query_lines`` strongest
     measured lines within ``tol_deg`` (compared in 2θ at the query wavelength).
     Shortlist is then scored with the Hanawalt figure of merit (existing
-    ``score_xrd_match_robust``) and ranked."""
+    ``score_xrd_match_robust``) and ranked. The top ``materialize_top`` matches
+    get their full CIF resolved into ``materialize_dir`` (``structure_path``) —
+    the bridge from the peak-list identification to structure-level work
+    (simulate to confirm, then Rietveld): a locally built library's own CIF is
+    used directly; otherwise the entry's COD ID is fetched (cached; graceful
+    None when offline)."""
     from .score_match_robust import score_xrd_match_robust
     from .simulate_xrd import _ENGINES  # noqa: F401  (import guard parity)
 
@@ -390,6 +401,23 @@ def search_match_pattern(
             "cif_path": row.get("cif_path"),
         })
     matches.sort(key=lambda r: -r["figure_of_merit"])
+
+    # Resolve full structures for the top hits — identification stores only
+    # peak lists, so structure-level follow-up (simulate confirm, Rietveld)
+    # needs the actual CIF. A distributed artifact's 'cif_path' points at the
+    # BUILD machine (dangling by construction); the durable key is the COD ID.
+    for m in matches[: max(0, int(materialize_top))]:
+        cif = m.get("cif_path")
+        if cif and os.path.exists(str(cif)):          # locally built library
+            m["structure_path"] = str(cif)
+            continue
+        try:
+            from .._backends.cod import fetch_cod_cif
+            m["structure_path"] = fetch_cod_cif(m["source_id"], materialize_dir)
+        except Exception as exc:                       # offline / non-COD id
+            _logger.debug("materialize failed for %s: %s", m["source_id"], exc)
+            m["structure_path"] = None
+
     return {
         "matches": matches[: int(top_n)],
         "n_library_entries": int(len(df)),

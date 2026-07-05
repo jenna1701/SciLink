@@ -62,10 +62,34 @@ def test_search_match_identifies_si(tiny_library):
     assert r["matches"], "no matches returned"
     assert r["matches"][0]["formula"] == "Si"
     assert r["matches"][0]["figure_of_merit"] > 0.8
-    assert r["matches"][0]["cif_path"]              # local build carries paths
+    # identification -> structure bridge: a locally built library resolves the
+    # top hits' structure_path from its own CIFs (no network)
+    import os
+    sp = r["matches"][0]["structure_path"]
+    assert sp and os.path.exists(sp)
     # the wrong-lattice phases must NOT outrank Si
     forms = [m["formula"] for m in r["matches"]]
     assert forms.index("Si") == 0
+
+
+def test_materialize_dangling_path_falls_back_gracefully(tiny_library, tmp_path,
+                                                         monkeypatch):
+    # Distributed-artifact case: cif_path points at the (deleted) build machine
+    # paths. Non-COD ids + no network must yield structure_path=None, not an
+    # error; matching itself is unaffected.
+    import pandas as pd
+    from scilink.skills.structure_matching.xrd import fingerprint as fp
+    df = pd.read_parquet(tiny_library)
+    df["cif_path"] = "/nonexistent/build/machine/path.cif"   # dangling
+    lib2 = tmp_path / "dangling.parquet"
+    df.to_parquet(lib2, index=False)
+    monkeypatch.setenv("SCILINK_COD_ALLOW_WEB", "0")          # simulate offline
+    tt = [28.442, 47.303, 56.121, 69.130, 76.377, 88.032]
+    ii = [100.0, 55.0, 30.0, 6.0, 11.0, 12.0]
+    r = search_match_pattern(tt, ii, wavelength="CuKa", library_path=str(lib2),
+                             materialize_dir=str(tmp_path / "m"))
+    assert r["matches"][0]["formula"] == "Si"                 # matching unaffected
+    assert r["matches"][0]["structure_path"] is None          # honest None, no crash
 
 
 def test_search_match_rejects_when_absent(tiny_library):

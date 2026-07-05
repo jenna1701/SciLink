@@ -67,6 +67,33 @@ def _formula_elements(formula: Optional[str]) -> set[str]:
     return elements
 
 
+def fetch_cod_cif(cod_id, dest_dir: Optional[str] = None) -> Optional[str]:
+    """Fetch a single COD entry's CIF by its numeric COD ID.
+
+    The public bridge from an IDENTIFICATION hit back to a full structure: the
+    fingerprint library (search_match_pattern) stores only peak lists, so once
+    a match is made the matched entry's actual CIF — needed for simulation
+    confirmation and Rietveld — is retrieved here (local COD archive when
+    configured, COD web otherwise; downloads are cached). Returns the CIF path
+    (copied into ``dest_dir`` when given) or None if unavailable."""
+    import shutil
+
+    sid = str(cod_id).strip()
+    if not sid.isdigit():
+        return None
+    backend = CODBackend()
+    cif = backend._locate_cif(int(sid))
+    if cif is None:
+        return None
+    if dest_dir:
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, f"cod_{sid}.cif")
+        if os.path.abspath(str(cif)) != os.path.abspath(dest):
+            shutil.copyfile(str(cif), dest)
+        return dest
+    return str(cif)
+
+
 def _query_volume_center(ranges: dict) -> Optional[float]:
     """Center of a lattice query's volume window (Å³) for cell-agreement ranking.
     Uses the explicit 'volume' key when given; otherwise approximates from the
