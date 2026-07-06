@@ -7500,6 +7500,20 @@ class UnifiedCurveReportController:
             v = fq.get("r_squared")
         return float(v) if isinstance(v, (int, float)) else -1.0
 
+    # Matching-mode high-confidence threshold (Hanawalt convention): the skill
+    # accepts at figure_of_merit ≥ 0.70 but only calls ≥ this "high-confidence"
+    # — the band in between is "declare with caveats", not a clean success.
+    _MATCH_HIGH_CONFIDENCE = 0.85
+
+    @classmethod
+    def _is_marginal_match(cls, fit_quality: dict) -> bool:
+        """True for an accepted-but-low-confidence matching-mode frame
+        (figure_of_merit in [accept, high_confidence)). Only applies to
+        matching-mode skills — genuine curve fits carry no figure_of_merit
+        and return False, so their success labels are unchanged."""
+        fom = (fit_quality or {}).get("figure_of_merit")
+        return isinstance(fom, (int, float)) and fom < cls._MATCH_HIGH_CONFIDENCE
+
     def _generate_flagged_spectra_section(self, flagged_spectra: List[dict], series_results: List[dict], synthesis: dict) -> str:
         if not flagged_spectra:
             return ""
@@ -7671,6 +7685,14 @@ class UnifiedCurveReportController:
                     status, status_color = "🔄 Re-fitted", "#17a2b8"
                 elif r.get("flagged"):
                     status, status_color = f"⚠ {r.get('flag_reason', 'Flagged')}", "#fd7e14"
+                elif self._is_marginal_match(r.get("fit_quality", {})):
+                    # matching-mode skills accept at a LOW figure_of_merit
+                    # (0.70) but only call ≥0.85 high-confidence; a barely-
+                    # accepted match must not wear the same green ✓ as a
+                    # confident one (its overlay may visibly disagree — that
+                    # is what the marginal band means). Genuine curve fits
+                    # pass a strict acceptance gate, so they are unaffected.
+                    status, status_color = "~ marginal (low confidence)", "#f0ad4e"
                 else:
                     status, status_color = "✓", "#27ae60"
 
