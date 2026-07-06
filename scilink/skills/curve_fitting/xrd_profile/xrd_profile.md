@@ -377,6 +377,17 @@ interpretation, not from frozen centers.** Only pass an explicit `peak_centers`
 for a one-off re-fit of a single known-stable pattern — never as the series
 default.
 
+**Phase identity and fractions across a series are the `xrd` skill's job.**
+This skill answers peak shapes/positions/widths per frame; WHICH phases each
+frame contains and HOW MUCH of each is answered by the structure-matching
+`xrd` skill's series workflow — identify the series endpoints, then
+`track_phase_series` (or the lock-file pattern) scores every frame against
+that fixed endmember set, returning per-frame phase shares, the transition
+window, and residual alerts. The two compose: its transition-window frame
+indices tell this skill's regime segmentation where to expect a model
+change, and its lattice-scale drift corroborates peak-shift trends fitted
+here.
+
 **The detection settings ARE part of the recipe — tune them, then freeze them.**
 `prominence_frac` and `min_distance_deg` are *settings*, not *values*: tune them
 on the establishing frame so every visible reflection is modelled, then carry the

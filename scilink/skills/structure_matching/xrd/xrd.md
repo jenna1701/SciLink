@@ -86,6 +86,20 @@ The skill ships five tools the analysis script chains together:
   confirmation leaves peaks unmatched, re-examine them (chemistry
   plausibility, targeted `score_xrd_match_robust` against a suspected
   phase) before reporting.
+- `track_phase_series` — **in-situ / operando series tracking**. After the
+  series ENDPOINTS are identified, one call runs a joint multi-phase MILP
+  per frame against that fixed endmember set → per-frame phase shares,
+  onset/completion frames, the coexistence (transition) window, per-phase
+  lattice-scale drift (thermal expansion), and residual alerts flagging
+  frames the endmembers cannot explain (transient intermediate → run
+  `identify_mixture` on that frame). Endmembers accept THREE forms: a
+  library `source_id`, a simulated pattern, or an EMPIRICAL reference —
+  the extracted peak list of a pure frame itself, essential when a phase
+  (common for organics) is in no database. Deterministic, ~0.1-0.5 s per
+  frame, no per-frame search or LLM. Limits: shares are screening proxies
+  (Rietveld quantifies); phases separated by line POSITIONS only — an
+  order-disorder transition that redistributes intensity on the same
+  lattice needs profile/intensity analysis (`xrd_profile`), not tracking.
 - `calibrate_zero` — **2θ calibration from an internal standard** (Si /
   LaB₆ / corundum mixed into the sample). Fits zero error + specimen
   displacement from the standard's exactly-known lines and returns the
@@ -483,7 +497,31 @@ tier — it factors out background, scale, and intensity-ratio effects
 that the fast tier folds into the correlation. The fast tier is a
 triage step; the robust tier is the identification.
 
-**In-situ / series — lock the phase set, not the search.** For a
+**In-situ / series — identify at the ENDPOINTS, then track.** A series is
+not N independent identifications. Identify the FIRST and LAST frames
+(usually pure phases — `search_match_pattern`, or `identify_mixture` if an
+endpoint is itself mixed); every intermediate frame is then a mixture of
+those endmembers until residual evidence says otherwise. Do **not**
+re-identify per frame: besides being slow, a mid-transition frame actively
+resists identification — coverage splits between phases and overlapping
+peaks pull the extracted centroids, so the true phase's FOM sinks while
+dense-line degenerates (severe for organics at low angle) float up. When an
+endpoint phase is in NO database (common for organic/molecular phases),
+use the pure frame's own extracted peak list as an EMPIRICAL endmember —
+identification of that phase can wait; tracking cannot. Two practical
+cautions for in-situ lab data: crop the low-angle air-scatter upturn
+(2θ ≲ 5°) before peak extraction, and expect a residual bump on the first
+frames AFTER a transition (a freshly formed phase is cooler/less relaxed
+than the endpoint reference — lattice-scale drift, not a new phase).
+
+**Tracking, two execution shapes.** When the whole series is available to
+one script, call `track_phase_series` — the deterministic driver (shares,
+transition window, alerts in one call). When the agent's per-frame series
+loop runs each frame in its own working directory, use the lock-file
+pattern below — the anchor frame locks the phase set, later frames score
+against it.
+
+**Lock the phase set, not the search.** For a
 time/temperature series (operando, a ramp), identify ONCE on the establishing
 (anchor) frame, then score every later frame against that LOCKED phase set — do
 **not** re-search the database per frame (slow, and the candidate ranking can
