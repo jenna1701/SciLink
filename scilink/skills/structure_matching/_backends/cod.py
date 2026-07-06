@@ -110,6 +110,14 @@ def _query_volume_center(ranges: dict) -> Optional[float]:
     return mids[0] * mids[1] * mids[2]
 
 
+def _safe_int(v) -> int:
+    """COD id as int for the newest-first tiebreak; unparsable ids sort last."""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return -1
+
+
 def _formula_natoms(formula: Optional[str]) -> float:
     """Total atom count of a COD (reduced) formula string — a structural-
     simplicity proxy: TiO2 -> 3, Ti9O17 -> 26. Used as a RETRIEVAL tiebreaker so
@@ -240,8 +248,14 @@ class CODBackend:
             scored.append((extra, _formula_natoms(formula), cid, formula, sg, sg_number))
         # Tightest composition first (exact match before supersets), then
         # simplest stoichiometry (common phase before complex same-composition),
-        # then id for stability.
-        scored.sort(key=lambda t: (t[0], t[1], t[2]))
+        # then NEWEST deposition first (id descending). COD ids are roughly
+        # chronological, and early-1900s entries carry idealized coordinates
+        # and no displacement parameters — kinematically fine for
+        # identification but catastrophically wrong as Rietveld starting
+        # models (observed: a 1911 zincite entry collapsed its phase to
+        # 0 wt% in a certified mixture where a modern entry refined to
+        # within 2 wt% of the weighed truth).
+        scored.sort(key=lambda t: (t[0], t[1], -_safe_int(t[2])))
         return [(cid, formula, sg, sg_number) for _, _, cid, formula, sg, sg_number in scored]
 
     def _search_web(self, wanted: set[str], spec: QuerySpec) -> list[tuple]:
@@ -296,8 +310,9 @@ class CODBackend:
             scored.append((len(els - wanted), _formula_natoms(formula), cid, formula, row.get("sg"), sg_number))
             if len(scored) >= 2000:
                 break
-        # Tightest composition, then simplest stoichiometry, then id.
-        scored.sort(key=lambda t: (t[0], t[1], t[2]))
+        # Tightest composition, then simplest stoichiometry, then newest
+        # deposition first (see _search_db for the Rietveld rationale).
+        scored.sort(key=lambda t: (t[0], t[1], -_safe_int(t[2])))
         return [(cid, formula, sg, sg_number) for _, _, cid, formula, sg, sg_number in scored]
 
     def _load_structure(self, cid: int):
