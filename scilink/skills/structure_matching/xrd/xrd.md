@@ -420,8 +420,14 @@ must follow this exact sequence:
   simulated sticks to the DATA's observed peak width (estimate the
   narrowest resolved experimental peak; `fwhm='auto'` does this) — an
   over-broadened overlay smears a positionally good match into an
-  apparent mismatch. When several phases are overlaid,
-  ALWAYS also draw their sum. Pick the y-scale by dynamic range — log
+  apparent mismatch. Draw a combined SUM curve ONLY when TWO OR MORE
+  phases are overlaid — with a single phase the overlay already IS the
+  sum, so a separate "Sum overlay" just draws an identical line on top of
+  the component, hiding it and leaving a legend entry for an invisible
+  curve; draw ONE line. Likewise never plot "Raw" as its own curve when
+  it coincides with "Data" — every legend entry must correspond to a
+  curve that is actually visible and distinguishable in the plot. Pick
+  the y-scale by dynamic range — log
   when peaks span more than ~1.5 decades, otherwise linear — and keep it
   consistent across all frames of one series (a minority phase that is
   invisible on a linear axis is a plotting failure, not evidence of
