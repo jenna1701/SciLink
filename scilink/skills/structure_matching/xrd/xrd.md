@@ -403,6 +403,18 @@ must follow this exact sequence:
   For the visualization, overlay the best-match **simulated** pattern (broadened
   sticks) on the experimental data — do not `curve_fit` a profile for the plot
   or compute an R² for it.
+- **Plot legends must name what is actually drawn.** An identification
+  overlay is NOT a fit — label it `"Simulated <formula> (match overlay)"`,
+  and label its difference trace `"Data − overlay"`, never `"Fit"` /
+  `"Residuals"`. Reserve the word *fit* for genuine refinement output
+  (Rietveld/Le Bail `y_calc`, labeled e.g. `"Rietveld fit (Rwp=…)"`).
+  Never emit legend entries for curves that are not drawn (no template
+  `"Component 1"` / `"Background"` leftovers). This is a scientific-honesty
+  rule, not cosmetics: a mismatched overlay labeled "Fit" reads as a failed
+  refinement — observed live on an in-situ series, where the expected
+  overlay mismatch at a phase transition looked like a broken analysis.
+  In series mode this applies per frame: each frame's legend carries the
+  phase(s) actually overlaid on THAT frame.
 
 **Complete two-tier template** — adapt for the active wavelength and
 chemistry hypothesis:
