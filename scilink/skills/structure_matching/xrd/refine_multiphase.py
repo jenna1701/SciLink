@@ -50,8 +50,11 @@ _SPEC_MULTI = ToolSpec(
     },
     required=["structure_paths", "two_theta", "intensity"],
     returns=(
-        "dict: 'weight_fractions' {phase: w} and per-phase details in 'phases' "
-        "(lattice + esd + input_lattice + microstrain), 'converged', "
+        "dict. EXACT SHAPES: 'weight_fractions' is a FLAT DICT "
+        "{phase_name(str): fraction(float)} — read fractions from here; "
+        "'phases' is a LIST of per-phase dicts (keys: phase_name, "
+        "weight_fraction, lattice, input_lattice, lattice_esd, microstrain, "
+        "cell_runaway) — do NOT call .items() on it. Also: 'converged', "
         "'profile_corr' (READ THIS as fit quality for arbitrary-unit data; "
         "'Rwp' is inflated by nominal weights), 'gof', 'convergence_trace', "
         "'profile' (obs/calc/background/residual). QUANTITATIVE CAVEATS: "
