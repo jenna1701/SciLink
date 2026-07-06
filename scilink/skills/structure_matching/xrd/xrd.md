@@ -290,12 +290,19 @@ scorer coverages and RIR-style proxies are screening estimates, not
 quantification.** Choose each phase's structure by scoring candidate
 simulations against THAT phase's own matched peaks (within-phase relative
 intensities are fraction-independent) — never against the whole mixture,
-where a weak-scattering phase's candidates all look bad. And treat
-Rietveld red flags as a bad STARTING STRUCTURE, not a dead end: if
-`converged` is False or a phase the scorer confirmed refines to ~0/100%
-weight, swap in the next-best database entry for that phase and re-run
-(observed live: a 1911-era entry collapsed its phase to 0% while a modern
-entry of the same phase refined to within 2 wt% of certified truth). When in doubt, run `score_xrd_match_multiphase` with a
+where a weak-scattering phase's candidates all look bad — and REQUIRE the
+entry's space group to match the named phase: a named mineral means its
+standard polymorph (corundum = R-3c α-Al2O3, zincite = P6_3mc, fluorite =
+Fm-3m), and a right-composition wrong-polymorph entry (θ- vs α-Al2O3) is
+the dense-line impostor in miniature — its line forest covers the phase's
+few peaks while its own strong lines are absent from the data. And treat
+Rietveld red flags as a bad STARTING STRUCTURE, not a dead end: put a
+bounded swap-retry loop INSIDE the script — if `converged` is False, a
+refined cell departs from the named phase's known lattice, or a phase the
+scorer confirmed refines to ~0/100% weight, substitute the next-best
+entry for the offending phase and call the refinement again (observed
+live: a 1911-era entry collapsed its phase to 0% while a modern entry of
+the same phase refined to within 2 wt% of certified truth). When in doubt, run `score_xrd_match_multiphase` with a
 single-candidate list — it gracefully reduces to the single-phase MIP
 under that input (with one phase always active) and the joint solver's
 output format is the same.
