@@ -383,7 +383,34 @@ def search_match_pattern(
     shortlist = df[keep]
     n_short = len(shortlist)
     if n_short > int(max_shortlist):
-        shortlist = shortlist.head(int(max_shortlist))
+        # Keep the most PROMISING keyed candidates, not the first N in library
+        # file order. Crowded fingerprint regimes (organics / low-angle
+        # windows) can key tens of thousands of candidates — an arbitrary
+        # head() there silently drops the true phase before scoring (observed:
+        # sodium ibuprofen dihydrate keyed but truncated on a real in-situ
+        # frame that keyed 3159 entries). Pre-rank by a cheap vectorized
+        # candidate-side coverage: the intensity fraction of each candidate's
+        # stored lines that lands within tol of ANY measured line — the
+        # complement of the absent-strong-lines evidence, applied to the
+        # whole stored pattern.
+        L = max(len(v) for v in shortlist["ds"])
+        ds_pad = np.zeros((n_short, L))
+        ii_pad = np.zeros((n_short, L))
+        for k, (dv, iv) in enumerate(zip(shortlist["ds"], shortlist["intensities"])):
+            ds_pad[k, :len(dv)] = dv
+            ii_pad[k, :len(iv)] = iv
+        with np.errstate(divide="ignore", invalid="ignore"):
+            tt_pad = _d_to_tt(ds_pad)
+        valid = (ds_pad > 0) & np.isfinite(tt_pad)
+        # min distance to any measured line, accumulated per measured peak so
+        # the working set stays (n_short x L) even for huge shortlists
+        dmin = np.full(tt_pad.shape, np.inf)
+        for q in tt:
+            np.minimum(dmin, np.abs(tt_pad - float(q)), out=dmin)
+        hit = dmin <= float(tol_deg)
+        w = np.where(valid, ii_pad, 0.0)
+        pre = (w * hit).sum(axis=1) / np.maximum(w.sum(axis=1), 1e-9)
+        shortlist = shortlist.iloc[np.argsort(-pre)[: int(max_shortlist)]]
 
     matches = []
     for _, row in shortlist.iterrows():
