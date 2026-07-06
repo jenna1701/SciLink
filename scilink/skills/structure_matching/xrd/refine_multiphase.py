@@ -34,7 +34,8 @@ _SPEC_MULTI = ToolSpec(
     signature=(
         "refine_rietveld_multiphase(structure_paths, two_theta, intensity, "
         "wavelength='CuKa', two_theta_range=None, refine_cell=True, "
-        "refine_profile=True, n_background_terms=6) -> dict"
+        "refine_profile=True, n_background_terms=6, "
+        "initial_fractions=None) -> dict"
     ),
     parameters={
         "structure_paths": {"type": "list[str]", "description": "CIFs of ALL phases in the mixture (≥2) — identify_mixture's structure_paths, or CIFs from search/simulate. Missing a real phase biases every fraction; include even minor confirmed phases."},
@@ -45,6 +46,7 @@ _SPEC_MULTI = ToolSpec(
         "refine_cell": {"type": "bool", "description": "Refine each phase's unit cell (default True). Turn OFF to hold trusted reference cells fixed (sparse data, heavily overlapped patterns)."},
         "refine_profile": {"type": "bool", "description": "Refine per-phase isotropic microstrain (default True) — matches peak widths. Turn OFF only when the instrument profile already matches."},
         "n_background_terms": {"type": "int", "description": "Chebyshev background terms (default 6). RAISE (10-14) for strongly curved/humped backgrounds; LOWER for flat ones."},
+        "initial_fractions": {"type": "list[float]", "description": "Starting phase fractions aligned with structure_paths (default: all equal). SET THESE when abundances are very lopsided — a ~95% dominant phase with trace minors can diverge from an all-equal start (observed on certified round-robin data: 94% corundum + two traces refined to 100/0/0 with profile_corr dropping to ~0.82). Seed from identify_mixture's intensity_share, or e.g. [1.0, 0.05, 0.05] for dominant-plus-traces, and RETRY with a corrected start when profile_corr is well below the ~0.97 a good fit reaches."},
     },
     required=["structure_paths", "two_theta", "intensity"],
     returns=(
@@ -129,6 +131,7 @@ def refine_rietveld_multiphase(
     refine_cell: bool = True,
     refine_profile: bool = True,
     n_background_terms: int = 6,
+    initial_fractions: Optional[Sequence[float]] = None,
 ) -> dict[str, Any]:
     """Multi-phase Rietveld → weight fractions. See ``_SPEC_MULTI``."""
     from ._gsas_engine import rietveld_refine_multiphase
@@ -136,7 +139,8 @@ def refine_rietveld_multiphase(
         structure_paths, two_theta, intensity, wavelength=wavelength,
         two_theta_range=tuple(two_theta_range) if two_theta_range else None,
         refine_cell=refine_cell, refine_profile=refine_profile,
-        n_background_terms=n_background_terms)
+        n_background_terms=n_background_terms,
+        initial_fractions=list(initial_fractions) if initial_fractions else None)
 
 
 def refine_rietveld_series(
