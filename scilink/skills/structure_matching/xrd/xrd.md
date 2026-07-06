@@ -302,7 +302,11 @@ refined cell departs from the named phase's known lattice, or a phase the
 scorer confirmed refines to ~0/100% weight, substitute the next-best
 entry for the offending phase and call the refinement again (observed
 live: a 1911-era entry collapsed its phase to 0% while a modern entry of
-the same phase refined to within 2 wt% of certified truth). When in doubt, run `score_xrd_match_multiphase` with a
+the same phase refined to within 2 wt% of certified truth). A retry loop
+needs a POOL: keep several space-group-consistent entries per phase
+(tolerate space-group setting variants when filtering), and when a
+phase's pool shrinks to one entry, WIDEN the search (raise top_n, relax
+filters) before refining — a pool of one cannot be swapped. When in doubt, run `score_xrd_match_multiphase` with a
 single-candidate list — it gracefully reduces to the single-phase MIP
 under that input (with one phase always active) and the joint solver's
 output format is the same.
