@@ -133,6 +133,23 @@ def test_transient_intermediate_alert(tiny_library):
     assert max(clean) < 0.25
 
 
+def test_alert_loop_converges_after_adding_intermediate(tiny_library):
+    # The documented two-pass workflow: alerts flag the transient intermediate,
+    # the discovered phase is ADDED to the endmember set, and re-tracking
+    # clears the alerts while giving the intermediate its own share trace.
+    frames = _crossfade_series(tiny_library, intruder_frames=(5, 6))
+    ru_tt, ru_ii, _ = _entry_lines(tiny_library, "TiO2")
+    endmembers = [dict(frames[0], label="A"), dict(frames[-1], label="B"),
+                  {"sim_two_theta": ru_tt, "sim_intensity": ru_ii, "label": "I"}]
+    r = track_phase_series(frames, endmembers)
+    assert r["residual_alert_frames"] == []
+    shares_i = [sh["I"] for sh in r["shares"]]
+    assert shares_i[5] > 0.1 and shares_i[6] > 0.1     # intermediate traced
+    assert max(shares_i[:5] + shares_i[7:]) < 0.05     # and only where present
+    assert r["phase_events"]["I"]["onset_frame"] == 5
+    assert r["phase_events"]["I"]["final_frame"] == 6
+
+
 def test_stride_and_events(tiny_library):
     frames = _crossfade_series(tiny_library)
     endmembers = [dict(frames[0], label="A"), dict(frames[-1], label="B")]

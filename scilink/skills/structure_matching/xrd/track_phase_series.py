@@ -1,9 +1,12 @@
 """``track_phase_series`` tool — phase evolution across an in-situ series.
 
-Identification of a series is NOT N independent identifications: identify at
-the series ENDPOINTS (start/end frames are usually pure phases), then track —
-each intermediate frame is a mixture of already-identified endmembers until
-residual evidence says otherwise. This driver executes the tracking half
+Identification of a series is NOT N independent identifications: identify
+each phase at its ESTABLISHING frame (where it is purest — the first/last
+frames for a simple transformation ramp; the first crystalline frame for a
+crystallization; a mid-series frame for a multi-step path), then track —
+every frame is a mixture of the established endmembers until residual
+evidence says otherwise, and an alerted residual is identified, added to
+the set, and re-tracked. This driver executes the tracking half
 deterministically: one joint multi-phase MILP per frame against a FIXED
 endmember set, no database search and no LLM in the per-frame loop.
 
@@ -45,10 +48,13 @@ TOOL_SPEC = ToolSpec(
         "drift (thermal expansion), onset/completion frames, coexistence "
         "window, and residual alerts flagging frames that the endmembers "
         "cannot explain (transient intermediate phase → run identify_mixture "
-        "on THAT frame). Endmembers come from identifying the series "
-        "ENDPOINTS first; a phase missing from every database is passed as "
-        "an EMPIRICAL reference (the pure frame's own peak list). "
-        "Deterministic, no per-frame search or LLM."
+        "on THAT frame, add the discovered phase, re-track). Endmembers come "
+        "from identifying each phase at its ESTABLISHING frame — first/last "
+        "frames for a simple transformation ramp, the first crystalline "
+        "frame for a crystallization, a mid-series frame for a multi-step "
+        "path; a phase missing from every database is passed as an EMPIRICAL "
+        "reference (its establishing frame's own peak list). Deterministic, "
+        "no per-frame search or LLM."
     ),
     import_line=("from scilink.skills.structure_matching.xrd.track_phase_series "
                  "import track_phase_series"),
@@ -85,9 +91,11 @@ TOOL_SPEC = ToolSpec(
         "original series; use frame_labels for T/time."
     ),
     when_to_use=(
-        "Any in-situ / operando series AFTER the endpoint frames are "
-        "identified (search_match_pattern / identify_mixture on first and "
-        "last frames): dehydration/decomposition ramps, phase-transition "
+        "Any in-situ / operando series AFTER its establishing frames are "
+        "identified (search_match_pattern / identify_mixture — first/last "
+        "frames for a simple ramp; adapt for amorphous starts, multi-step "
+        "paths, or ever-present spectator phases): "
+        "dehydration/decomposition ramps, phase-transition "
         "scans, operando cycling. Complements the per-frame profile-fitting "
         "series loop (xrd_profile skill): this tool answers WHICH phases and "
         "HOW MUCH per frame; profile fitting answers peak shapes/positions."

@@ -87,7 +87,7 @@ The skill ships five tools the analysis script chains together:
   plausibility, targeted `score_xrd_match_robust` against a suspected
   phase) before reporting.
 - `track_phase_series` — **in-situ / operando series tracking**. After the
-  series ENDPOINTS are identified, one call runs a joint multi-phase MILP
+  series' establishing frames are identified, one call runs a joint multi-phase MILP
   per frame against that fixed endmember set → per-frame phase shares,
   onset/completion frames, the coexistence (transition) window, per-phase
   lattice-scale drift (thermal expansion), and residual alerts flagging
@@ -497,22 +497,34 @@ tier — it factors out background, scale, and intensity-ratio effects
 that the fast tier folds into the correlation. The fast tier is a
 triage step; the robust tier is the identification.
 
-**In-situ / series — identify at the ENDPOINTS, then track.** A series is
-not N independent identifications. Identify the FIRST and LAST frames
-(usually pure phases — `search_match_pattern`, or `identify_mixture` if an
-endpoint is itself mixed); every intermediate frame is then a mixture of
-those endmembers until residual evidence says otherwise. Do **not**
-re-identify per frame: besides being slow, a mid-transition frame actively
-resists identification — coverage splits between phases and overlapping
-peaks pull the extracted centroids, so the true phase's FOM sinks while
-dense-line degenerates (severe for organics at low angle) float up. When an
-endpoint phase is in NO database (common for organic/molecular phases),
-use the pure frame's own extracted peak list as an EMPIRICAL endmember —
-identification of that phase can wait; tracking cannot. Two practical
-cautions for in-situ lab data: crop the low-angle air-scatter upturn
-(2θ ≲ 5°) before peak extraction, and expect a residual bump on the first
-frames AFTER a transition (a freshly formed phase is cooler/less relaxed
-than the endpoint reference — lattice-scale drift, not a new phase).
+**In-situ / series — identify at ESTABLISHING frames, then track.** A
+series is not N independent identifications. Identify each phase where it
+is PUREST, then score every frame against that fixed endmember set. For a
+simple transformation ramp (dehydration, calcination, a polymorphic
+transition — the common shape) the establishing frames are simply the
+first and last frames; when the shape differs, choose accordingly:
+a crystallization series establishes on the first frame with Bragg peaks
+(the amorphous start has nothing to identify); an incomplete or multi-step
+run (A → B → C) may need a mid-series frame — start with the frames you
+CAN identify, track, and let the residual alerts point at what is missing;
+spectator phases present in every frame (holder, crucible, additives,
+internal standard) mean even the "pure" frames are mixtures — establish
+with `identify_mixture` and include the spectators as endmembers. When an
+alert fires (unexplained intensity concentrated in some frames), identify
+THAT frame (`identify_mixture` on its residual-heavy peak list), ADD the
+discovered phase to the endmember set, and re-run the tracking — the
+endmember set converges in one or two passes. Do **not** re-identify per
+frame: besides being slow, a mid-transition frame actively resists
+identification — coverage splits between phases and overlapping peaks pull
+the extracted centroids, so the true phase's FOM sinks while dense-line
+degenerates (severe for organics at low angle) float up. When a phase is
+in NO database (common for organic/molecular phases), use its establishing
+frame's extracted peak list as an EMPIRICAL endmember — identification of
+that phase can wait; tracking cannot. Two practical cautions for in-situ
+lab data: crop the low-angle air-scatter upturn (2θ ≲ 5°) before peak
+extraction, and expect a residual bump on the first frames AFTER a
+transition (a freshly formed phase is cooler/less relaxed than the
+endpoint reference — lattice-scale drift, not a new phase).
 
 **Tracking, two execution shapes.** When the whole series is available to
 one script, call `track_phase_series` — the deterministic driver (shares,
