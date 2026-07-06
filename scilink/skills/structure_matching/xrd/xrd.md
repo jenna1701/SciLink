@@ -283,7 +283,11 @@ containing two elements with NO compound name (e.g. `["Si", "Ge"]`
 with note "suspected mixture" — the elements are distinct phases, not
 a compound). Blind (no chemistry): `identify_mixture` does the whole
 loop — candidate discovery, subtraction, joint confirmation — in one
-call. When in doubt, run `score_xrd_match_multiphase` with a
+call. **When the objective asks for QUANTITATIVE weight fractions, the
+scorer is not the deliverable: once the phase set is confirmed (or given
+up front), run `refine_rietveld_multiphase` on the phases' structures —
+scorer coverages and RIR-style proxies are screening estimates, not
+quantification.** When in doubt, run `score_xrd_match_multiphase` with a
 single-candidate list — it gracefully reduces to the single-phase MIP
 under that input (with one phase always active) and the joint solver's
 output format is the same.
