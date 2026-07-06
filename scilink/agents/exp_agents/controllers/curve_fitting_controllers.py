@@ -7472,6 +7472,34 @@ class UnifiedCurveReportController:
     def _image_to_base64(self, image_bytes: bytes) -> str:
         return base64.b64encode(image_bytes).decode('utf-8')
 
+    @staticmethod
+    def _display_metric(fit_quality: dict) -> tuple:
+        """Return ``(label, formatted)`` for a per-frame quality metric,
+        metric-aware. Genuine curve fits report ``r_squared``; matching-mode
+        skills (XRD identification, …) report ``figure_of_merit`` and no
+        r_squared — so hard-coding ``R² = {r_squared or 0}`` prints a
+        meaningless ``R² = 0.0000`` on every matching-mode frame. Prefer the
+        figure of merit when present (it is the acceptance metric for those
+        skills), else r_squared."""
+        fq = fit_quality or {}
+        fom = fq.get("figure_of_merit")
+        if isinstance(fom, (int, float)):
+            return ("figure of merit", f"FoM = {float(fom):.3f}")
+        r2 = fq.get("r_squared")
+        if isinstance(r2, (int, float)):
+            return ("R²", f"R² = {float(r2):.4f}")
+        return ("", "")
+
+    @staticmethod
+    def _metric_value(r: dict) -> float:
+        """Sortable acceptance-metric value for a frame (FoM or R²); -1 if
+        absent, so frames without a metric sort last when picking the best."""
+        fq = r.get("fit_quality") or {}
+        v = fq.get("figure_of_merit")
+        if not isinstance(v, (int, float)):
+            v = fq.get("r_squared")
+        return float(v) if isinstance(v, (int, float)) else -1.0
+
     def _generate_flagged_spectra_section(self, flagged_spectra: List[dict], series_results: List[dict], synthesis: dict) -> str:
         if not flagged_spectra:
             return ""
@@ -7509,20 +7537,24 @@ class UnifiedCurveReportController:
         badge_colors = {
             "fit_failed": ("#dc3545", "Failed"),
             "statistical_outlier": ("#fd7e14", "Outlier"),
-            "below_threshold": ("#ffc107", "Low R²"),
+            "below_threshold": ("#ffc107", "Low score"),
             "outlier_and_below_threshold": ("#dc3545", "Critical"),
         }
-        
+
         for f in flagged_spectra:
             result = next((r for r in series_results if r["index"] == f["index"]), None)
             color, label = badge_colors.get(f["reason"], ("#6c757d", "Flagged"))
-            
+            # metric-aware: the flag record stores the acceptance-metric value
+            # under 'r_squared' regardless of skill, so for matching-mode
+            # skills it is actually the figure of merit — label it correctly.
+            mlabel = self._display_metric((result or {}).get("fit_quality", {}))[0] or "R²"
+
             html += f'<div class="flagged-card" style="border-color: {color};">'
             html += f'<div class="flagged-card-header"><strong>{f["name"]}</strong>'
             html += f'<span class="flagged-badge" style="background-color: {color};">{label}</span></div>'
-            
+
             if f.get("r_squared") is not None:
-                html += f'<p><strong>R²:</strong> {f["r_squared"]:.4f} (series median: {f["series_mean"]:.4f})</p>'
+                html += f'<p><strong>{mlabel}:</strong> {f["r_squared"]:.4f} (series median: {f["series_mean"]:.4f})</p>'
                 if f.get("deviation_sigma") is not None:
                     html += f'<p><strong>Deviation:</strong> {f["deviation_sigma"]:.1f}σ below median</p>'
             
@@ -7590,7 +7622,14 @@ class UnifiedCurveReportController:
         failed_indices = {i for i, r in enumerate(series_results) if not r["success"]}
         flagged_indices = {i for i, r in enumerate(series_results) if r.get("flagged")}
         priority_indices = failed_indices | flagged_indices
-        
+        # Best-scoring frames (highest FoM/R²) — always surface a few so a
+        # SUCCESSFUL series shows its confident results, not only the flagged
+        # ones. Without this the report can look like all-failure even when
+        # most frames succeeded (the flagged section already covers the rest).
+        best_indices = [i for i in sorted(range(num_spectra),
+                                          key=lambda j: -self._metric_value(series_results[j]))
+                        if self._metric_value(series_results[i]) >= 0][:3]
+
         if num_spectra <= 10:
             indices_to_show = set(range(num_spectra))
             section_note = ""
@@ -7601,13 +7640,15 @@ class UnifiedCurveReportController:
                 for i in range(3, num_spectra - 3, max(1, step)):
                     if len(indices_to_show) < 10:
                         indices_to_show.add(i)
+            indices_to_show.update(best_indices)
             indices_to_show.update(priority_indices)
             not_shown = num_spectra - len(indices_to_show)
-            section_note = f"<p><em>Showing {len(indices_to_show)} of {num_spectra} fits. {not_shown} fits not displayed.</em></p>"
+            section_note = f"<p><em>Showing {len(indices_to_show)} of {num_spectra} fits (boundary, best-scoring, and flagged). {not_shown} fits not displayed.</em></p>"
         else:
             indices_to_show = {0, 1, num_spectra - 2, num_spectra - 1}
+            indices_to_show.update(best_indices)
             indices_to_show.update(list(priority_indices)[:10])
-            section_note = f"<p><em>Large series ({num_spectra} spectra): Showing boundary fits and flagged/failed spectra.</em></p>"
+            section_note = f"<p><em>Large series ({num_spectra} spectra): Showing boundary fits, best-scoring fits, and flagged/failed spectra.</em></p>"
         
         indices_to_show = sorted(indices_to_show)
         
@@ -7633,8 +7674,7 @@ class UnifiedCurveReportController:
                 else:
                     status, status_color = "✓", "#27ae60"
 
-                r_squared = r.get("fit_quality", {}).get("r_squared") or 0
-                r2_str = f"R² = {r_squared:.4f}" if isinstance(r_squared, float) else ""
+                _mlabel, r2_str = self._display_metric(r.get("fit_quality", {}))
                 refit_note = ""
                 if r.get("adaptively_refitted") and r.get("original_r2") is not None:
                     refit_note = f"<br><small>Original R²: {r['original_r2']:.4f}</small>"
