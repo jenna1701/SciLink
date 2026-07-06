@@ -409,12 +409,39 @@ must follow this exact sequence:
   `"Residuals"`. Reserve the word *fit* for genuine refinement output
   (Rietveld/Le Bail `y_calc`, labeled e.g. `"Rietveld fit (Rwp=…)"`).
   Never emit legend entries for curves that are not drawn (no template
-  `"Component 1"` / `"Background"` leftovers). This is a scientific-honesty
-  rule, not cosmetics: a mismatched overlay labeled "Fit" reads as a failed
-  refinement — observed live on an in-situ series, where the expected
-  overlay mismatch at a phase transition looked like a broken analysis.
-  In series mode this applies per frame: each frame's legend carries the
-  phase(s) actually overlaid on THAT frame.
+  `"Component 1"` / `"Background"` leftovers), and title the figure by
+  what it shows (`"Data and match overlay"`, not `"Data and Fit"`).
+  This is a scientific-honesty rule, not cosmetics: a mismatched overlay
+  labeled "Fit" reads as a failed refinement — observed live on an
+  in-situ series, where the expected overlay mismatch at a phase
+  transition looked like a broken analysis. In series mode this applies
+  per frame: each frame's legend carries the phase(s) actually overlaid
+  on THAT frame.
+- **Overlay rendering must not misrepresent match quality.** Broaden the
+  simulated sticks to the DATA's observed peak width (estimate the
+  narrowest resolved experimental peak; `fwhm='auto'` does this) — an
+  over-broadened overlay smears a positionally good match into an
+  apparent mismatch (observed live: FOM ~0.8 rendered as a ~1°-wide
+  envelope over needle-sharp peaks). When several phases are overlaid,
+  ALWAYS also draw their sum. Pick the y-scale by dynamic range — log
+  when peaks span more than ~1.5 decades, otherwise linear — and keep it
+  consistent across all frames of one series (a minority phase that is
+  invisible on a linear axis is a plotting failure, not evidence of
+  absence).
+- **Plot only metrics this skill defines.** Trend panels and dashboards
+  carry `figure_of_merit`, per-phase `coverage` (a fraction — CAP at 1;
+  if a computed value exceeds 1, the aggregation is wrong: never sum
+  coverages of duplicate entries of the same phase), shares,
+  `lattice_scale`, zero-shift. NEVER resurrect a forbidden metric in a
+  dashboard (an R² panel on a matching-mode series plots noise and
+  invites misreading).
+- **Mark saturation and quantization — do not plot them as physics.** A
+  fitted value pinned at its search bound (e.g. zero-shift at ±0.4°, the
+  scorer's default window) is a SATURATED estimate: draw the bound as a
+  dashed line and flag pinned points instead of connecting them as data.
+  Grid-quantized knobs (lattice_scale steps of 0.002) produce staircase
+  trends — say so in the caption/text before fitting a slope through the
+  steps.
 
 **Complete two-tier template** — adapt for the active wavelength and
 chemistry hypothesis:
