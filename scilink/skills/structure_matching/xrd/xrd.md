@@ -64,6 +64,28 @@ The skill ships five tools the analysis script chains together:
   than applying an absolute cutoff, and prefer the chemically plausible
   candidate among ties (a common mineral over an exotic rare-earth
   compound, unless composition evidence says otherwise).
+- `identify_mixture` — **blind MULTI-phase identification** (sequential
+  subtraction over the fingerprint library). Search-match the peak list,
+  accept the dominant phase, subtract its scaled predicted intensities
+  (shared lines keep their unexplained remainder — no over-removal),
+  re-search the residual, repeat; the accepted ensemble is then confirmed
+  by ONE joint multi-phase MILP. Use it instead of a single
+  `search_match_pattern` call whenever a mixture is suspected — including
+  any in-situ / operando frame taken mid-transformation — or when a
+  single-phase match leaves many strong measured peaks unmatched. Trust
+  the `multiphase_confirmation` verdict over the per-iteration FOMs
+  (those are computed against a residual that still contains other
+  phases); each phase carries a `confirmed` flag from the joint solver —
+  report `confirmed=False` phases as subtraction artifacts, not
+  components. `intensity_share` is a screening abundance proxy only —
+  quantify with Rietveld on the returned `structure_path`s. Strong peaks
+  left in `residual_peaks` mean a phase missing from the library: run the
+  indexing route on that residual list. Known limit: a sparse-line
+  minority phase (e.g. a cubic fluorite-type with 3-4 strong lines) can
+  be shadowed by a dense-line position-degenerate entry — when
+  confirmation leaves peaks unmatched, re-examine them (chemistry
+  plausibility, targeted `score_xrd_match_robust` against a suspected
+  phase) before reporting.
 - `calibrate_zero` — **2θ calibration from an internal standard** (Si /
   LaB₆ / corundum mixed into the sample). Fits zero error + specimen
   displacement from the standard's exactly-known lines and returns the
@@ -170,7 +192,10 @@ either-alone:
 
 - **Multi-phase mixture** — when the metadata / notes suggest a mixture
   ("Si + Ge mixture", "suspected multi-phase", `chemistry_hint=["Si","C"]`
-  for two distinct elemental phases, etc.). Use the **list-of-lists**
+  for two distinct elemental phases, etc.). With NO chemistry hypothesis
+  (blind mixture, in-situ frame), run `identify_mixture` — it discovers
+  the phase candidates itself and ends with the same joint MILP. With a
+  chemistry hypothesis, use the **list-of-lists**
   chemistry form to get separate candidate lists per phase:
   `chemistry=[["Si"], ["Ge"]]` — NOT `chemistry=["Si", "Ge"]` which would
   ask the DB for Si-Ge *binary compounds* instead of Si and Ge
@@ -229,7 +254,9 @@ either-alone:
 "binary compound"), "co-existing phases", or `chemistry_hint`
 containing two elements with NO compound name (e.g. `["Si", "Ge"]`
 with note "suspected mixture" — the elements are distinct phases, not
-a compound). When in doubt, run `score_xrd_match_multiphase` with a
+a compound). Blind (no chemistry): `identify_mixture` does the whole
+loop — candidate discovery, subtraction, joint confirmation — in one
+call. When in doubt, run `score_xrd_match_multiphase` with a
 single-candidate list — it gracefully reduces to the single-phase MIP
 under that input (with one phase always active) and the joint solver's
 output format is the same.
