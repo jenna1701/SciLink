@@ -456,6 +456,16 @@ print("MATCH_RESULTS_JSON: " + json.dumps(final))
 print("FIT_RESULTS_JSON: " + json.dumps({
     "best_match": best,
     "candidates_considered": len(final),
+    # The interpretation stage reads ONLY 'parameters' and 'fit_quality'
+    # from this payload — the phase identity MUST be inside 'parameters'
+    # or the final report cannot name the phase it identified.
+    "parameters": {
+        "identified_phase": best["formula"] if best else None,
+        "space_group": best["space_group"] if best else None,
+        "database_id": best["id"] if best else None,
+        "runner_up": final[1]["formula"] if len(final) > 1 else None,
+        "runner_up_fom": final[1]["figure_of_merit"] if len(final) > 1 else None,
+    },
     "fit_quality": {
         "figure_of_merit": best["figure_of_merit"] if best else None,
         "verdict": best["verdict"] if best else "no_candidates",
@@ -463,12 +473,15 @@ print("FIT_RESULTS_JSON: " + json.dumps({
 }))
 ```
 
-**The identification IS the deliverable — always emit the phase identity.**
-`best_match` must carry the matched phase's `formula`, database `id`, and
-`space_group` (copy them from the match dict), and the analysis text must
-NAME the identified phase. A run that reports only a figure of merit has
-discarded its own answer — observed live: high-confidence matches (FOM
-0.93+) whose reports could not say what the phase was.
+**The identification IS the deliverable — emit the identity into
+`parameters`.** Downstream interpretation reads `parameters` and
+`fit_quality` from `FIT_RESULTS_JSON`; content anywhere else (including
+`best_match`, which feeds the report tables) is invisible to it. So
+`parameters.identified_phase` (+ `space_group`, `database_id`) is
+MANDATORY in every identification emit, and the analysis text must NAME
+the phase. A run that reports only a figure of merit has discarded its
+own answer — observed live: high-confidence matches (FOM 0.93+) whose
+reports could not say what the phase was.
 
 **Multi-phase emit (REQUIRED when using `score_xrd_match_multiphase`).** The
 multi-phase scorer returns ONE result with `active_phases` (not a ranked
@@ -483,6 +496,11 @@ print("FIT_RESULTS_JSON: " + json.dumps({
     "active_phases": mp["active_phases"],          # each: id, formula, coverage,
                                                    # matched_peaks, lattice_scale
     "unmatched_exp": mp["unmatched_exp"],          # peaks no phase explains
+    "parameters": {                                # interpretation reads THIS
+        "identified_phases": [p["formula"] for p in mp["active_phases"]],
+        "phase_coverages": {p["formula"]: p["coverage"]
+                            for p in mp["active_phases"]},
+    },
     "fit_quality": {
         "figure_of_merit": mp["figure_of_merit"],  # gate reads THIS
         "verdict": mp["verdict"],
