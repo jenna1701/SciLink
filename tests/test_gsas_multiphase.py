@@ -41,6 +41,24 @@ def test_tools_registered_with_knobs():
     assert "warm_start" in series.parameters
 
 
+def test_canonicalize_strips_oxidation_states(tmp_path):
+    # A CIF declaring ionic species (Ca2+/F-, ubiquitous in COD) sends GSAS-II
+    # down a charged-scattering-factor path with a catastrophically wrong
+    # intensity model (pure-fluorite Rietveld corr 0.73 vs 0.97; mixture
+    # fractions collapse to 0). The canonicalizer must emit neutral species.
+    pytest.importorskip("pymatgen.core")
+    from pymatgen.core import Lattice, Structure
+    s = Structure.from_spacegroup("Fm-3m", Lattice.cubic(5.4631),
+                                  ["Ca2+", "F-"], [[0, 0, 0], [0.25, 0.25, 0.25]])
+    src = tmp_path / "charged.cif"
+    src.write_text(s.to(fmt="cif"))
+    assert "Ca2+" in src.read_text()               # fixture really is charged
+    out = ge._canonicalize_cif(str(src), str(tmp_path), symprec=0.1)
+    txt = open(out).read()
+    assert "oxidation_number" not in txt
+    assert "Ca2+" not in txt and "F-" not in txt
+
+
 def test_input_guards():
     with pytest.raises((ValueError, RuntimeError)):
         ge.rietveld_refine_multiphase(["one.cif"], [10, 11], [1, 2])   # <2 phases

@@ -128,6 +128,15 @@ def _canonicalize_cif(structure_path: str, workdir: str, symprec: float = None) 
         return structure_path
     try:
         structure = Structure.from_file(structure_path)
+        # Strip oxidation states: a CIF declaring ionic species (Ca2+/F-,
+        # ubiquitous in COD entries) sends GSAS-II down a charged-scattering-
+        # factor path that produces a catastrophically wrong intensity model
+        # (verified: pure-fluorite Rietveld corr 0.73/Rwp 81 with the
+        # oxidation loop present vs 0.97/Rwp 34 with it removed — same
+        # structure otherwise; in a certified three-phase mixture the charged
+        # entries collapsed their phases' weight fractions to ~0). Neutral
+        # scattering factors are the standard for routine Rietveld.
+        structure.remove_oxidation_states()
         out = os.path.join(workdir, "canonical.cif")
         CifWriter(structure, symprec=symprec).write_file(out)
         return out
