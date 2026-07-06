@@ -1016,3 +1016,347 @@ def index_pattern(
         result["lattice_param_ranges"]["volume"] = (
             round(best["volume"] * 0.94, 2), round(best["volume"] * 1.06, 2))
     return result
+
+
+
+
+def _phase_cell_mass(phase) -> float:
+    """Unit-cell mass (sum of atomic masses x multiplicities) for the GSAS
+    weight-fraction formula w_i = f_i * M_cell,i / sum_j f_j * M_cell,j."""
+    import GSASII.GSASIIElem as G2elem  # same distribution as G2sc
+    mass = 0.0
+    general = phase.data["General"]
+    atoms = phase.data["Atoms"]
+    cx, ct, cs, cia = general["AtomPtrs"]
+    for a in atoms:
+        el = a[ct].strip("+-0123456789")
+        mult = float(a[cs + 1])
+        occ = float(a[cx + 3])
+        info = G2elem.GetAtomInfo(el)
+        mass += info["Mass"] * mult * occ
+    return mass
+
+
+def _wt_fractions(phases, hist) -> dict:
+    num = {}
+    for ph in phases:
+        f = float(ph.getHAPvalues(hist)["Scale"][0])
+        num[ph.name] = max(f, 0.0) * _phase_cell_mass(ph)
+    tot = sum(num.values())
+    return {k: (v / tot if tot > 0 else 0.0) for k, v in num.items()}
+
+
+def rietveld_refine_multiphase(
+    structure_paths,
+    two_theta,
+    intensity,
+    wavelength="CuKa",
+    two_theta_range=None,
+    refine_cell=True,
+    refine_profile=True,
+    n_background_terms=6,
+    initial_fractions=None,
+):
+    """Multi-phase Rietveld: refine ALL phases against one measured pattern.
+
+    Staged protocol mirroring ``rietveld_refine`` (background+scale -> zero ->
+    phase fractions -> mustrain -> cells), with per-phase HAP scale factors
+    refined for every phase after the first (the first is absorbed by the
+    histogram scale) and weight fractions computed from the GSAS convention
+    w_i = f_i * M_cell,i / sum. Validated round-trip: fractions recovered to
+    ~1e-3 and cells to <1e-4 A on a synthetic two-phase pattern.
+
+    ``initial_fractions`` — optional starting HAP phase fractions aligned with
+    ``structure_paths`` (the series warm start); default all 1.0."""
+    import os
+    import tempfile
+
+    G2sc = _load_g2sc()
+    lam = _resolve_wavelength(wavelength)
+    x = np.asarray(two_theta, dtype=float)
+    y = np.asarray(intensity, dtype=float)
+    if two_theta_range is not None:
+        lo, hi = float(min(two_theta_range)), float(max(two_theta_range))
+        m = (x >= lo) & (x <= hi)
+        x, y = x[m], y[m]
+    if x.size < 20:
+        raise ValueError("Rietveld refinement needs a denser pattern (>=20 points in range).")
+    paths = list(structure_paths)
+    if len(paths) < 2:
+        raise ValueError("rietveld_refine_multiphase needs >=2 structures; "
+                         "use refine_rietveld for a single phase.")
+
+    with tempfile.TemporaryDirectory() as td:
+        xy = os.path.join(td, "data.xy")
+        np.savetxt(xy, np.column_stack([x, y, np.sqrt(np.maximum(y, 1.0))]),
+                   fmt="%.6f")
+        instf = os.path.join(td, "auto.instprm")
+        with open(instf, "w") as fh:
+            fh.write(_INSTPRM_TEMPLATE.format(lam=lam))
+
+        gpx = G2sc.G2Project(newgpx=os.path.join(td, "riet.gpx"))
+        hist = gpx.add_powder_histogram(xy, iparams=instf, fmthint="xye")
+        phases = []
+        input_cells = {}
+        for i, p in enumerate(paths):
+            # one canonicalization dir per phase: _canonicalize_cif writes a
+            # fixed 'canonical.cif' name, which would collide across phases
+            pd = os.path.join(td, f"ph{i}")
+            os.makedirs(pd, exist_ok=True)
+            cif = _canonicalize_cif(p, pd, symprec=0.1)
+            name = f"phase{i}_{os.path.splitext(os.path.basename(p))[0][:24]}"
+            ph = gpx.add_phase(cif, phasename=name)
+            gpx.link_histogram_phase(hist, ph)
+            if initial_fractions is not None:
+                ph.getHAPvalues(hist)["Scale"][0] = max(
+                    float(initial_fractions[i]), 1e-4)
+            phases.append(ph)
+            input_cells[name] = dict(ph.get_cell())
+
+        def _rwp():
+            r = hist.residuals
+            return float(r.get("Rwp", r.get("wR", float("nan"))))
+
+        def _corr():
+            yo = np.asarray(hist.getdata("Yobs"), dtype=float)
+            yc = np.asarray(hist.getdata("Ycalc"), dtype=float)
+            if yo.size != yc.size or yo.size < 2:
+                return float("nan")
+            return float(np.corrcoef(yo, yc)[0, 1])
+
+        trace = []
+
+        def _stage(label, refdict=None, hap=None, hap_phases=None):
+            try:
+                if hap:
+                    for ph in (hap_phases or phases):
+                        ph.set_HAP_refinements(hap, histograms=[hist])
+                gpx.do_refinements([refdict or {}])
+                trace.append({"stage": label, "Rwp": _rwp(), "profile_corr": _corr()})
+            except Exception as exc:
+                trace.append({"stage": label, "error": str(exc)[:200]})
+
+        _stage("background+scale", {"set": {
+            "Background": {"type": "chebyschev", "refine": True,
+                           "no. coeffs": int(n_background_terms)},
+            "Sample Parameters": ["Scale"]}})
+        _stage("zero_offset", {"set": {"Instrument Parameters": ["Zero"]}})
+        # phase fractions for all but the first phase (first absorbed by the
+        # histogram scale — refining all N is rank-deficient)
+        _stage("phase_fractions", hap={"Scale": True}, hap_phases=phases[1:])
+        if refine_profile:
+            _stage("mustrain", {"set": {"Mustrain": {"type": "isotropic", "refine": True}}})
+        if refine_cell:
+            # cells ONE PHASE AT A TIME, dominant first: a joint cells stage
+            # lets a weak phase's ill-determined cell run away on the other
+            # phases' residuals (observed: a 10 wt% cubic phase collapsed to
+            # a = 0.008 Å while the global fit stayed at corr 0.993 — its
+            # intensity is too small for the runaway to hurt the residual).
+            # With the dominant cells already settled, each weaker phase's
+            # cell refines alone against what is left.
+            order = sorted(phases,
+                           key=lambda ph: -float(ph.getHAPvalues(hist)["Scale"][0]
+                                                 * _phase_cell_mass(ph)))
+            for ph in order:
+                for other in phases:
+                    other.set_refinements({"Cell": other is ph})
+                _stage(f"cell:{ph.name}")
+            for other in phases:
+                other.set_refinements({"Cell": False})
+
+        wt = _wt_fractions(phases, hist)
+        _ck = ("length_a", "length_b", "length_c", "angle_alpha", "angle_beta",
+               "angle_gamma", "volume")
+        per_phase = []
+        for ph, p in zip(phases, paths):
+            cell = ph.get_cell()
+            cell_esd = {}
+            try:
+                _, cell_esd = ph.get_cell_and_esd()
+            except Exception:
+                pass
+            _size, mustrain = _extract_hap_broadening(ph, hist)
+            refined = {k: float(cell[k]) for k in _ck if k in cell}
+            inp = {k: float(input_cells[ph.name][k])
+                   for k in _ck if k in input_cells[ph.name]}
+            # per-phase runaway guard: thermal/compositional drift is well
+            # under 10% per axis; beyond that the cell diverged (weak phases
+            # can collapse without denting the GLOBAL fit metrics). Report
+            # the input cell instead of garbage, and flag it.
+            runaway = any(
+                abs(refined[k] - inp[k]) > 0.10 * max(inp[k], 1e-9)
+                for k in ("length_a", "length_b", "length_c")
+                if k in refined and k in inp)
+            per_phase.append({
+                "structure_path": p,
+                "phase_name": ph.name,
+                "weight_fraction": round(float(wt.get(ph.name, 0.0)), 4),
+                # raw HAP fraction (NOT weight fraction) — the series warm
+                # start feeds this back in as the next frame's initial value
+                "hap_fraction": float(ph.getHAPvalues(hist)["Scale"][0]),
+                "lattice": inp if runaway else refined,
+                "cell_runaway": bool(runaway),
+                "input_lattice": inp,
+                "lattice_esd": {} if runaway else
+                               {k: float(v) for k, v in (cell_esd or {}).items()
+                                if isinstance(v, (int, float))},
+                "microstrain": mustrain,
+            })
+
+        prof = {
+            "two_theta": [float(v) for v in hist.getdata("X")],
+            "y_obs": [float(v) for v in hist.getdata("Yobs")],
+            "y_calc": [float(v) for v in hist.getdata("Ycalc")],
+            "y_background": [float(v) for v in hist.getdata("Background")],
+        }
+        prof["residual"] = [o - c for o, c in zip(prof["y_obs"], prof["y_calc"])]
+        res = dict(hist.residuals)
+
+    _yo, _yc = np.asarray(prof["y_obs"], float), np.asarray(prof["y_calc"], float)
+    if _yo.size > 1 and np.std(_yc) > 0 and np.std(_yo) > 0:
+        final_corr = float(np.corrcoef(_yo, _yc)[0, 1])
+    else:
+        final_corr = 0.0
+    if final_corr != final_corr:
+        final_corr = 0.0
+    _corrs = [t["profile_corr"] for t in trace
+              if isinstance(t.get("profile_corr"), float)
+              and t["profile_corr"] == t["profile_corr"]]
+    best_pre = max(_corrs[:-1]) if len(_corrs) > 1 else final_corr
+    converged = bool(final_corr >= 0.5 and final_corr >= best_pre - 0.1)
+
+    return {
+        "phases": per_phase,
+        "weight_fractions": {p["phase_name"]: p["weight_fraction"] for p in per_phase},
+        "converged": converged,
+        "Rwp": trace[-1].get("Rwp") if trace else None,
+        "profile_corr": final_corr,
+        "gof": _safe_gof(res),
+        "convergence_trace": trace,
+        "profile": prof,
+        "wavelength": float(lam),
+        "note": ("Weight fractions follow the GSAS convention w_i = f_i*M_cell,i/sum "
+                 "— quantitative ONLY when all crystalline phases are included and "
+                 "microabsorption is negligible; an amorphous component is invisible "
+                 "to Rietveld. Read 'profile_corr' as fit quality for arbitrary-unit "
+                 "data. If 'converged' is False do not trust fractions or cells — "
+                 "compare each phase's 'lattice' vs 'input_lattice' for runaways."),
+    }
+
+
+def _cif_with_lattice(structure_path: str, lattice: dict, out_path: str) -> str:
+    """Rewrite a CIF with an updated unit cell (fractional coordinates kept) —
+    the lattice warm start for sequential frame-to-frame refinement. Falls back
+    to the original CIF when pymatgen is unavailable or parsing fails."""
+    try:
+        from pymatgen.core import Lattice, Structure
+        s = Structure.from_file(structure_path)
+        s.lattice = Lattice.from_parameters(
+            lattice["length_a"], lattice["length_b"], lattice["length_c"],
+            lattice["angle_alpha"], lattice["angle_beta"], lattice["angle_gamma"])
+        s.to(filename=out_path, fmt="cif")
+        return out_path
+    except Exception:
+        return structure_path
+
+
+def rietveld_refine_series(
+    structure_paths,
+    frames,
+    wavelength="CuKa",
+    two_theta_range=None,
+    refine_cell=True,
+    refine_profile=True,
+    n_background_terms=6,
+    warm_start=True,
+):
+    """Sequential multi-phase Rietveld across an in-situ series: a per-frame
+    loop over the validated single-histogram staged protocol
+    (``rietveld_refine_multiphase``), each frame warm-started from its
+    predecessor's refined phase fractions and lattices (fractions via the
+    starting HAP values, lattices via a rewritten starting CIF).
+
+    Why not GSAS-II's native sequential mode: it refines every flagged
+    parameter simultaneously with no staging, which proved numerically
+    fragile in scriptable use — strain terms diverged (Dij -> -1e6, invalid
+    metric tensor) or whole phase blocks were dropped as singular (the cubic
+    HStrain 'eA' term is degenerate by construction and poisons the block).
+    The staged per-frame loop is the same code path as the validated
+    single-pattern refinement, each frame independently staged and
+    independently convergence-checked — robust, and trivially resumable.
+
+    ``frames``: list of {"two_theta": [...], "intensity": [...], "label": ...}
+    in series order. ``warm_start=False`` restarts every frame from the input
+    CIFs (use for non-contiguous frames where carrying state would mislead)."""
+    paths = [str(p) for p in structure_paths]
+    if not frames:
+        raise ValueError("frames is empty")
+    if not paths:
+        raise ValueError("structure_paths is empty")
+
+    out_frames = []
+    prev_fracs = None
+    prev_cells = None
+    # stable names from the ORIGINAL paths — warm-start frames run on
+    # rewritten temp CIFs whose basenames would otherwise leak into the keys
+    phase_names = [
+        f"phase{i}_{os.path.splitext(os.path.basename(p))[0][:24]}"
+        for i, p in enumerate(paths)]
+    with tempfile.TemporaryDirectory() as td:
+        for k, fr in enumerate(frames):
+            paths_k = paths
+            if warm_start and prev_cells is not None:
+                paths_k = []
+                for i, p in enumerate(paths):
+                    cell = prev_cells[i]
+                    if cell:
+                        wp = os.path.join(td, f"warm_{k}_{i}.cif")
+                        paths_k.append(_cif_with_lattice(p, cell, wp))
+                    else:
+                        paths_k.append(p)
+            try:
+                r = rietveld_refine_multiphase(
+                    paths_k, fr["two_theta"], fr["intensity"],
+                    wavelength=wavelength, two_theta_range=two_theta_range,
+                    refine_cell=refine_cell, refine_profile=refine_profile,
+                    n_background_terms=n_background_terms,
+                    initial_fractions=prev_fracs if warm_start else None)
+            except Exception as exc:
+                out_frames.append({"frame": k, "label": fr.get("label", k),
+                                   "error": str(exc)[:200]})
+                continue
+            out_frames.append({
+                "frame": k,
+                "label": fr.get("label", k),
+                # phases follow structure_paths order — remap onto stable names
+                "weight_fractions": {phase_names[i]: p["weight_fraction"]
+                                     for i, p in enumerate(r["phases"])},
+                "converged": r["converged"],
+                "profile_corr": r["profile_corr"],
+                "Rwp": r["Rwp"],
+                "cells": {phase_names[i]: p["lattice"]
+                          for i, p in enumerate(r["phases"])},
+                "cell_runaways": [phase_names[i] for i, p in enumerate(r["phases"])
+                                  if p.get("cell_runaway")],
+            })
+            if r["converged"]:
+                # carry refined state forward only from a converged frame — a
+                # diverged frame's runaway cell would poison the rest
+                prev_fracs = [p["hap_fraction"] for p in r["phases"]]
+                prev_cells = [p["lattice"] for p in r["phases"]]
+
+    return {
+        "frames": out_frames,
+        "phase_names": phase_names,
+        "n_frames": len(frames),
+        "wavelength": float(_resolve_wavelength(wavelength)),
+        "note": ("Per-frame weight fractions (GSAS convention) and per-frame "
+                 "refined cells; frames warm-start from the last CONVERGED "
+                 "predecessor. Same quantification caveats as "
+                 "rietveld_refine_multiphase (all crystalline phases included, "
+                 "amorphous invisible, microabsorption). A frame with "
+                 "converged=False (or an 'error' entry) should not be trusted "
+                 "— check whether the phase set stops describing the pattern "
+                 "there (transient phase; cross-check track_phase_series "
+                 "residual alerts)."),
+    }

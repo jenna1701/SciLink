@@ -133,6 +133,19 @@ The skill ships five tools the analysis script chains together:
   are indistinguishable) — treat the output as evidence, corroborate the
   final choice with a Le Bail fit under that group. New-phase workflow
   only; a database-identified phase already has its group.
+- `refine_rietveld_multiphase` — **quantitative phase fractions** (optional
+  `gsas` extra). After `identify_mixture` confirmed a phase set, refine ALL
+  phases jointly against the whole profile → per-phase WEIGHT fractions
+  (the quantitative upgrade of the screening `intensity_share`), per-phase
+  lattice + microstrain. Fractions are meaningful only when every
+  crystalline phase is included; amorphous content is invisible.
+- `refine_rietveld_series` — **in-situ quantification** (optional `gsas`
+  extra). Sequential multi-phase Rietveld over a frame series: per-frame
+  weight fractions w(T)/w(t) — the standard in-situ deliverable — and
+  per-frame effective cells (thermal expansion). Choose
+  `establishing_frame` where ALL phases are clearly present. Run AFTER
+  `track_phase_series` established the phase set; it quantifies, it does
+  not screen.
 - `refine_rietveld` — **refinement tier** (optional `gsas` extra). *After*
   the phase is identified, Rietveld-refine that structure against the
   measured pattern to extract accurate lattice parameters (+ esd),
@@ -449,6 +462,13 @@ print("FIT_RESULTS_JSON: " + json.dumps({
     },
 }))
 ```
+
+**The identification IS the deliverable — always emit the phase identity.**
+`best_match` must carry the matched phase's `formula`, database `id`, and
+`space_group` (copy them from the match dict), and the analysis text must
+NAME the identified phase. A run that reports only a figure of merit has
+discarded its own answer — observed live: high-confidence matches (FOM
+0.93+) whose reports could not say what the phase was.
 
 **Multi-phase emit (REQUIRED when using `score_xrd_match_multiphase`).** The
 multi-phase scorer returns ONE result with `active_phases` (not a ranked
