@@ -7514,16 +7514,38 @@ class UnifiedCurveReportController:
         fom = (fit_quality or {}).get("figure_of_merit")
         return isinstance(fom, (int, float)) and fom < cls._MATCH_HIGH_CONFIDENCE
 
+    # Cap on individually-plotted flagged frames. The flagged gallery is built
+    # for the minority-exception case (a few anomalies worth examining one by
+    # one). When most of a series is flagged, an exhaustive gallery is
+    # redundant noise that buries the finding — cap it to a representative
+    # sample and say so.
+    _FLAGGED_GALLERY_CAP = 8
+
     def _generate_flagged_spectra_section(self, flagged_spectra: List[dict], series_results: List[dict], synthesis: dict) -> str:
         if not flagged_spectra:
             return ""
-        
+
         flagged_analysis = synthesis.get("flagged_spectra_analysis", {})
-        
+        n_flagged = len(flagged_spectra)
+        n_total = len(series_results) or n_flagged
+        majority = n_flagged >= max(2, 0.5 * n_total)
+        # When flagged frames are the MAJORITY, they are not isolated
+        # anomalies — the model/reference set does not describe the series.
+        # Reframe the section so the report conveys that, not "N problems".
+        if majority:
+            heading = "⚠️ Series-Wide Mismatch"
+            summary_line = (f"<strong>{n_flagged} of {n_total} frames are below the "
+                            f"acceptance threshold.</strong> This indicates the model / "
+                            f"reference set does not describe the series as a whole, "
+                            f"rather than isolated anomalous frames.")
+        else:
+            heading = "⚠️ Flagged Spectra"
+            summary_line = f"<strong>{n_flagged} spectra flagged for review</strong>"
+
         html = f"""
-        <h2>⚠️ Flagged Spectra</h2>
+        <h2>{heading}</h2>
         <div class="flagged-summary">
-            <p><strong>{len(flagged_spectra)} spectra flagged for review</strong></p>
+            <p>{summary_line}</p>
             <p>{flagged_analysis.get("summary", "Some spectra showed anomalous fitting behavior.")}</p>
         </div>
 """
@@ -7546,8 +7568,22 @@ class UnifiedCurveReportController:
         if significance:
             html += f"<h3>Scientific Significance</h3><p>{significance}</p>"
         
-        html += '<h3>Flagged Spectra Details</h3><div class="flagged-grid">'
-        
+        # Show at most _FLAGGED_GALLERY_CAP individual frames — the worst
+        # first (lowest metric), so the sample is representative rather than
+        # positional. Beyond the cap, an exhaustive gallery is redundant.
+        def _flag_metric(f):
+            r = next((x for x in series_results if x["index"] == f["index"]), None)
+            return self._metric_value(r) if r else (f.get("r_squared") or 1.0)
+        gallery = sorted(flagged_spectra, key=_flag_metric)[: self._FLAGGED_GALLERY_CAP]
+        n_hidden = len(flagged_spectra) - len(gallery)
+
+        details_note = ""
+        if n_hidden > 0:
+            details_note = (f"<p><em>Showing the {len(gallery)} lowest-scoring of "
+                            f"{len(flagged_spectra)} flagged frames; {n_hidden} similar "
+                            f"frames not individually displayed.</em></p>")
+        html += f'<h3>Flagged Spectra Details</h3>{details_note}<div class="flagged-grid">'
+
         badge_colors = {
             "fit_failed": ("#dc3545", "Failed"),
             "statistical_outlier": ("#fd7e14", "Outlier"),
@@ -7555,7 +7591,7 @@ class UnifiedCurveReportController:
             "outlier_and_below_threshold": ("#dc3545", "Critical"),
         }
 
-        for f in flagged_spectra:
+        for f in gallery:
             result = next((r for r in series_results if r["index"] == f["index"]), None)
             color, label = badge_colors.get(f["reason"], ("#6c757d", "Flagged"))
             # metric-aware: the flag record stores the acceptance-metric value
