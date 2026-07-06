@@ -300,9 +300,9 @@ Rietveld red flags as a bad STARTING STRUCTURE, not a dead end: put a
 bounded swap-retry loop INSIDE the script — if `converged` is False, a
 refined cell departs from the named phase's known lattice, or a phase the
 scorer confirmed refines to ~0/100% weight, substitute the next-best
-entry for the offending phase and call the refinement again (observed
-live: a 1911-era entry collapsed its phase to 0% while a modern entry of
-the same phase refined to within 2 wt% of certified truth). A retry loop
+entry for the offending phase and call the refinement again (very old
+database entries with idealized coordinates and no displacement
+parameters make bad starting models). A retry loop
 needs a POOL: keep several space-group-consistent entries per phase
 (tolerate space-group setting variants when filtering), and when a
 phase's pool shrinks to one entry, WIDEN the search (raise top_n, relax
@@ -411,18 +411,16 @@ must follow this exact sequence:
   Never emit legend entries for curves that are not drawn (no template
   `"Component 1"` / `"Background"` leftovers), and title the figure by
   what it shows (`"Data and match overlay"`, not `"Data and Fit"`).
-  This is a scientific-honesty rule, not cosmetics: a mismatched overlay
-  labeled "Fit" reads as a failed refinement — observed live on an
-  in-situ series, where the expected overlay mismatch at a phase
-  transition looked like a broken analysis. In series mode this applies
+  This is a scientific-honesty rule, not cosmetics: a mismatched
+  overlay labeled "Fit" reads as a failed refinement — and at a phase
+  transition the overlay SHOULD mismatch. In series mode this applies
   per frame: each frame's legend carries the phase(s) actually overlaid
   on THAT frame.
 - **Overlay rendering must not misrepresent match quality.** Broaden the
   simulated sticks to the DATA's observed peak width (estimate the
   narrowest resolved experimental peak; `fwhm='auto'` does this) — an
   over-broadened overlay smears a positionally good match into an
-  apparent mismatch (observed live: FOM ~0.8 rendered as a ~1°-wide
-  envelope over needle-sharp peaks). When several phases are overlaid,
+  apparent mismatch. When several phases are overlaid,
   ALWAYS also draw their sum. Pick the y-scale by dynamic range — log
   when peaks span more than ~1.5 decades, otherwise linear — and keep it
   consistent across all frames of one series (a minority phase that is
@@ -542,8 +540,7 @@ print("FIT_RESULTS_JSON: " + json.dumps({
 `parameters.identified_phase` (+ `space_group`, `database_id`) is
 MANDATORY in every identification emit, and the analysis text must NAME
 the phase. A run that reports only a figure of merit has discarded its
-own answer — observed live: high-confidence matches (FOM 0.93+) whose
-reports could not say what the phase was.
+own answer.
 
 **Multi-phase emit (REQUIRED when using `score_xrd_match_multiphase`).** The
 multi-phase scorer returns ONE result with `active_phases` (not a ranked

@@ -46,7 +46,7 @@ _SPEC_MULTI = ToolSpec(
         "refine_cell": {"type": "bool", "description": "Refine each phase's unit cell (default True). Turn OFF to hold trusted reference cells fixed (sparse data, heavily overlapped patterns)."},
         "refine_profile": {"type": "bool", "description": "Refine per-phase isotropic microstrain (default True) — matches peak widths. Turn OFF only when the instrument profile already matches."},
         "n_background_terms": {"type": "int", "description": "Chebyshev background terms (default 6). RAISE (10-14) for strongly curved/humped backgrounds; LOWER for flat ones."},
-        "initial_fractions": {"type": "list[float]", "description": "Starting phase fractions aligned with structure_paths (default: all equal). SET THESE when abundances are very lopsided — a ~95% dominant phase with trace minors can diverge from an all-equal start (observed on certified round-robin data: 94% corundum + two traces refined to 100/0/0 with profile_corr dropping to ~0.82). Seed from identify_mixture's intensity_share, or e.g. [1.0, 0.05, 0.05] for dominant-plus-traces, and RETRY with a corrected start when profile_corr is well below the ~0.97 a good fit reaches."},
+        "initial_fractions": {"type": "list[float]", "description": "Starting phase fractions aligned with structure_paths (default: all equal). SET THESE when abundances are very lopsided — a ~95% dominant phase with trace minors can diverge from an all-equal start (fractions pinned at 0/100, profile_corr well below a good fit's ~0.97). Seed from identify_mixture's intensity_share, or e.g. [1.0, 0.05, 0.05] for dominant-plus-traces, and RETRY with a corrected start on that signature."},
     },
     required=["structure_paths", "two_theta", "intensity"],
     returns=(
