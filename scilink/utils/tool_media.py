@@ -58,6 +58,25 @@ def _mime_of(b64: str) -> str:
     return "image/jpeg" if b64.startswith("/9j/") else "image/png"
 
 
+def _cap_b64(b64: str) -> str:
+    """Downscale an over-large image before it is embedded, reusing the same cap
+    the agent-level vision path applies (``_MAX_IMAGE_DIM`` px, downscaled to
+    PNG). A super-high-res image would otherwise blow past provider limits
+    (Anthropic rejects very large / >5 MB images) or waste tokens. Best-effort:
+    any failure (no PIL, undecodable, already small) returns the input
+    unchanged, so capping never breaks a tool result."""
+    try:
+        import base64
+        from ..wrappers.litellm_wrapper import _cap_image_bytes
+        raw = base64.b64decode(b64)
+        capped = _cap_image_bytes(raw)
+        if capped is raw or capped == raw:
+            return b64                       # common case: unchanged
+        return base64.b64encode(capped).decode()
+    except Exception:
+        return b64
+
+
 def _extract_images(result_str: str):
     """Pull base64 images out of a JSON tool-result string.
 
@@ -88,6 +107,9 @@ def _extract_images(result_str: str):
     data["_images_attached"] = (
         f"{len(b64s)} image(s) delivered to you as image content in this "
         "message — view them directly.")
+    # Cap over-large images so a super-high-res result can't exceed provider
+    # limits; recompute the mime AFTER capping (a downscale re-encodes to PNG).
+    b64s = [_cap_b64(b) for b in b64s]
     images = [(_mime_of(b), b) for b in b64s]
     return images, json.dumps(data)
 

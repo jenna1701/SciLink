@@ -68,6 +68,44 @@ def test_list_of_images():
     assert sum(1 for p in m["content"] if p["type"] == "image_url") == 2
 
 
+def _png_b64(w, h):
+    import base64
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), "white").save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _dims(data_url):
+    import base64
+    import io
+    from PIL import Image
+    b64 = data_url.split(",", 1)[1]
+    return Image.open(io.BytesIO(base64.b64decode(b64))).size
+
+
+def test_oversized_image_is_downscaled():
+    # a super-high-res image must be capped before embedding so it cannot blow
+    # past provider size limits; the long side lands at the shared cap.
+    big = _png_b64(12000, 9000)
+    m = build_tool_message("c1", json.dumps({"image_base64": big}), allow_image=True)
+    w, h = _dims(m["content"][1]["image_url"]["url"])
+    assert max(w, h) <= 8000
+    assert (w, h) != (12000, 9000)
+
+
+def test_normal_image_passes_through_byte_identical():
+    from scilink.utils.tool_media import _cap_b64
+    ok = _png_b64(1650, 1350)          # ~reconcile-figure size
+    assert _cap_b64(ok) == ok
+
+
+def test_cap_never_breaks_on_garbage():
+    from scilink.utils.tool_media import _cap_b64
+    assert _cap_b64("not-valid-base64-image!!") == "not-valid-base64-image!!"
+
+
 def test_sanitize_collapses_multimodal_and_strips_base64():
     msgs = [{"role": "system", "content": "sys"},
             {"role": "user", "content": "hi"},
