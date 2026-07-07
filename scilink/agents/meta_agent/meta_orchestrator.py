@@ -24,6 +24,8 @@ from datetime import datetime
 from enum import Enum
 
 from ...auth import get_internal_proxy_key
+from ...utils.tool_media import (build_tool_message, provider_supports_tool_image,
+                                 sanitize_history_images)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .meta_orchestrator_tools import MetaOrchestratorTools
@@ -1223,10 +1225,20 @@ class MetaOrchestratorAgent:
             logging.warning(f"Failed to load history: {e}")
             return []
 
+    def _tool_message(self, tool_call_id: str, result: str) -> dict:
+        """Build the tool-result message, upgrading an image-bearing result to a
+        multimodal message on providers that render tool-result images (Claude/
+        Bedrock, Gemini — not the OpenAI-compatible path). Every non-image
+        result stays the exact plain-string message. Inert today (meta tools
+        return text), kept in sync with the mode orchestrators."""
+        allow = (not self.use_openai) and provider_supports_tool_image(self.model.model)
+        return build_tool_message(tool_call_id, result, allow_image=allow)
+
     def _save_history(self):
         """Save conversation history to disk."""
         try:
             history_data = [m for m in self.messages if m["role"] != "system"]
+            history_data = sanitize_history_images(history_data)
             with open(self.history_path, 'w') as f:
                 json.dump(history_data, f, indent=2)
         except Exception as e:
@@ -1363,11 +1375,7 @@ class MetaOrchestratorAgent:
                 print(f"  🔧 Calling tool: {func_name}")
                 result = self.tools.execute_tool(func_name, **args)
 
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                })
+                self.messages.append(self._tool_message(tool_call.id, result))
 
         self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
@@ -1478,11 +1486,7 @@ class MetaOrchestratorAgent:
                 print(f"  🔧 Calling tool: {func_name}")
                 result = self.tools.execute_tool(func_name, **args)
 
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                })
+                self.messages.append(self._tool_message(tool_call.id, result))
 
         self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."

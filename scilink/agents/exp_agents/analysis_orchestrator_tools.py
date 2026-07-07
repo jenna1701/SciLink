@@ -3399,6 +3399,189 @@ class AnalysisOrchestratorTools:
         )
 
         # =====================================================================
+        # 10a2. RECONCILE SERIES — couple a profile-fitting pass with an ID pass
+        # =====================================================================
+        def reconcile_series(profile_analysis: int = None,
+                             identification_analysis: int = None,
+                             profile_id: str = None,
+                             identification_id: str = None,
+                             tol: float = None,
+                             regime_window_frac: float = 0.33,
+                             crossover_threshold: float = 0.5) -> str:
+            """Reconcile two PRIOR series analyses of the same frames: a
+            profile-fitting pass (peak/line fitting — HOW the structure
+            evolves; fits a lineshape model but is database-independent, it
+            needs no reference) and an identification pass (WHICH phases, by
+            reference matching). Attributes the fitted feature-evolution
+            trends to the identified labels and cross-checks the transition
+            the two find independently. Technique-agnostic — works for any
+            series where one pass fits peaks and the other identifies.
+            Reference each prior analysis by index (position in history) or
+            analysis_id."""
+            print("  ⚡ Tool: Reconciling profile-fit + identification series...")
+            from scilink.skills._shared._reconcile import reconcile_analysis_dirs
+
+            def _find(idx, aid, role):
+                if aid:
+                    rec = next((r for r in self.orch.analysis_results
+                                if r.get("analysis_id") == aid), None)
+                    if rec is None:
+                        raise ValueError(f"{role} analysis id not found: {aid}")
+                    return rec
+                if idx is None:
+                    raise ValueError(f"provide {role} analysis by index or id")
+                return self.orch.analysis_results[idx]
+
+            if not self.orch.analysis_results:
+                return json.dumps({"status": "error",
+                                   "message": "No analyses yet. Run the "
+                                   "profile-fitting and identification passes "
+                                   "first, then reconcile."})
+            try:
+                prof = _find(profile_analysis, profile_id, "profile")
+                idr = _find(identification_analysis, identification_id, "identification")
+                fig = str(self.orch.results_dir / "reconciled_series.png")
+                report = str(self.orch.results_dir / "reconciled_series_report.html")
+                svar = ((getattr(self.orch, "current_metadata", None) or {}).get("series_variable")
+                        or (getattr(self.orch, "current_metadata", None) or {}).get("variable")
+                        or "series variable")
+                r = reconcile_analysis_dirs(
+                    prof.get("output_directory"), idr.get("output_directory"),
+                    output_figure=fig, output_report=report,
+                    series_variable=str(svar),
+                    tol=(float(tol) if tol is not None else None),
+                    regime_window_frac=float(regime_window_frac),
+                    crossover_threshold=float(crossover_threshold))
+                r["status"] = "success"
+                # Persist the result so finalize_reconcile_report can re-render
+                # the report with the LLM's interpretation WITHOUT recomputing.
+                # (Persist BEFORE attaching the figure bytes so the cache stays
+                # lean — finalize does not need the base64.)
+                r["series_variable"] = str(svar)
+                try:
+                    (self.orch.results_dir / "reconciled_series_result.json").write_text(
+                        json.dumps(r, default=str))
+                except Exception:
+                    pass
+                # Attach the reconciled figure so the orchestrator LLM sees the
+                # plot (providers that render tool-result images) before it
+                # writes the interpretation — figure-grounded, not number-only.
+                try:
+                    figpath = r.get("figure") or fig
+                    if figpath and Path(figpath).is_file():
+                        import base64 as _b64
+                        r["image_base64"] = _b64.b64encode(
+                            Path(figpath).read_bytes()).decode()
+                except Exception:
+                    pass
+                # The report currently carries only the computed numbers + the
+                # deterministic note — no synthesis, unlike the component
+                # profile-fitting and identification reports. Ask the LLM to
+                # supply one and finalize, so the coupled report is not the only
+                # one missing an interpretation.
+                r["next_step"] = (
+                    "Write a 2-4 sentence scientific interpretation of this "
+                    "reconciliation — what transforms into what, whether the two "
+                    "independent transition estimates corroborate each other "
+                    "(agreement verdict above), and any caveat the numbers imply "
+                    "(a divergent verdict, an unidentified regime, a possible "
+                    "multi-step process) — then call finalize_reconcile_report("
+                    "interpretation=...) to embed it as the report's Interpretation "
+                    "section. That report is the coupled deliverable to surface.")
+                return json.dumps(r, default=str)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=reconcile_series,
+            name="reconcile_series",
+            description=(
+                "Couple two PRIOR series analyses of the same frames — a "
+                "profile-fitting pass (peak/line fitting) and an identification "
+                "pass — into the combined view: phase/species-labeled "
+                "feature-evolution trends with a cross-validated transition. "
+                "Run BOTH passes first (run_analysis with the profile-fitting "
+                "skill, then with the identification skill), then call this. "
+                "The fitted trends are database-independent (they work even "
+                "where identification cannot name a phase — organics, novel "
+                "products); a regime the ID pass could not name stays honestly "
+                "'unidentified'. Agreement of the two transitions is "
+                "corroboration; divergence is a flag. Reference each analysis "
+                "by index or analysis_id. Produces a self-contained HTML "
+                "report (transition summary, phase labels, embedded figure, "
+                "tracked-feature table) and a figure; their paths are in the "
+                "returned 'report' / 'figure' fields. The report carries the "
+                "computed numbers but no synthesis yet — after this returns, "
+                "write a short interpretation and call finalize_reconcile_report "
+                "to embed it, then surface that report as the coupled deliverable."
+            ),
+            parameters={
+                "profile_analysis": {"type": "integer", "description": "History index of the profile-fitting (peak/line-fit) pass."},
+                "identification_analysis": {"type": "integer", "description": "History index of the identification pass."},
+                "profile_id": {"type": "string", "description": "analysis_id of the profile-fitting pass (alternative to index)."},
+                "identification_id": {"type": "string", "description": "analysis_id of the identification pass (alternative to index)."},
+                "tol": {"type": "number", "description": "Feature-tracking position tolerance in the data's x-units (2θ° / ppm / eV). Omit to auto-scale from the peak spacing (recommended — no technique-specific default). Set explicitly to RAISE for features that drift a lot across the series, or LOWER to keep close features apart."},
+                "regime_window_frac": {"type": "number", "description": "Fraction of frames at each end used to classify start- vs end-phase features (default 0.33). LOWER when endpoint frames are pure; RAISE toward 0.5 for a gradual transformation."},
+                "crossover_threshold": {"type": "number", "description": "End-phase weight-share level defining the transition (default 0.5 ≈ 50% conversion). Change only to mark a different conversion fraction."},
+            },
+            required=[]
+        )
+
+        # =====================================================================
+        # 10a3. FINALIZE RECONCILE REPORT — embed the LLM synthesis
+        # =====================================================================
+        def finalize_reconcile_report(interpretation: str) -> str:
+            """Embed a scientific interpretation into the most recent reconcile
+            report. Call this AFTER reconcile_series, passing your own synthesis
+            of the coupled result (what transforms into what, whether the two
+            transition estimates corroborate, any caveat). Re-renders the report
+            in place with an Interpretation section — no recomputation — so the
+            coupled deliverable reads like the component reports, which carry a
+            narrative rather than only numbers."""
+            print("  ⚡ Tool: Finalizing reconcile report with interpretation...")
+            from scilink.skills._shared._reconcile import render_reconcile_report
+            try:
+                cache = self.orch.results_dir / "reconciled_series_result.json"
+                if not cache.is_file():
+                    return json.dumps({"status": "error", "message":
+                                       "No reconcile result to finalize. Run "
+                                       "reconcile_series first."})
+                result = json.loads(cache.read_text())
+                report_path = result.get("report") or str(
+                    self.orch.results_dir / "reconciled_series_report.html")
+                render_reconcile_report(
+                    result, report_path,
+                    series_variable=result.get("series_variable", "series variable"),
+                    interpretation=interpretation)
+                return json.dumps({"status": "success", "report": report_path,
+                                   "message": "Interpretation embedded; this "
+                                   "report is the coupled deliverable to surface "
+                                   "to the user."})
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=finalize_reconcile_report,
+            name="finalize_reconcile_report",
+            description=(
+                "Embed your scientific interpretation into the reconcile report "
+                "produced by reconcile_series. Call this immediately after "
+                "reconcile_series with a 2-4 sentence synthesis of the coupled "
+                "result — what transforms into what, whether the two independent "
+                "transition estimates corroborate (the agreement verdict), and "
+                "any caveat (divergence, an unidentified regime, a possible "
+                "multi-step process). Re-renders the report in place with an "
+                "Interpretation section so the coupled deliverable carries a "
+                "narrative like the component reports do. The transition numbers "
+                "stay computed — this narrates them, it does not change them."
+            ),
+            parameters={
+                "interpretation": {"type": "string", "description": "Your 2-4 sentence scientific synthesis of the reconciled result. Narrate the computed transition/agreement; do not invent numbers."},
+            },
+            required=["interpretation"]
+        )
+
+        # =====================================================================
         # 10b. SEARCH LITERATURE (preparatory — call BEFORE run_analysis)
         # =====================================================================
         def search_literature(query: str) -> str:
