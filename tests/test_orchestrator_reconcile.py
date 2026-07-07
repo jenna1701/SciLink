@@ -86,6 +86,32 @@ def test_reconcile_by_id(two_runs, tmp_path):
     assert out["low_regime_label"] == "PhaseA"
 
 
+def test_finalize_embeds_interpretation(two_runs, tmp_path):
+    mf, idr = two_runs
+    tools = _make_tools(tmp_path, mf, idr)
+    # reconcile first (writes the cached result + skeleton report)
+    tools.functions_map["reconcile_series"](profile_analysis=0, identification_analysis=1)
+    assert (tmp_path / "reconciled_series_result.json").exists()
+    # then finalize with the orchestrator LLM's synthesis
+    out = json.loads(tools.functions_map["finalize_reconcile_report"](
+        interpretation="PhaseA converts to PhaseB near the mid-series; "
+                       "both estimates corroborate the transition."))
+    assert out["status"] == "success"
+    html = Path(out["report"]).read_text()
+    assert "Interpretation" in html
+    assert "PhaseA converts to PhaseB" in html                 # narrative embedded
+    assert "PhaseA" in html and "PhaseB" in html               # computed labels stay
+
+
+def test_finalize_without_reconcile_errors(two_runs, tmp_path):
+    mf, idr = two_runs
+    tools = _make_tools(tmp_path, mf, idr)
+    out = json.loads(tools.functions_map["finalize_reconcile_report"](
+        interpretation="nothing to finalize"))
+    assert out["status"] == "error"
+    assert "reconcile" in out["message"].lower()
+
+
 def test_reconcile_errors_gracefully(two_runs, tmp_path):
     mf, idr = two_runs
     tools = _make_tools(tmp_path, mf, idr)

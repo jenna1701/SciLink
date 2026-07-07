@@ -3453,6 +3453,28 @@ class AnalysisOrchestratorTools:
                     regime_window_frac=float(regime_window_frac),
                     crossover_threshold=float(crossover_threshold))
                 r["status"] = "success"
+                # Persist the result so finalize_reconcile_report can re-render
+                # the report with the LLM's interpretation WITHOUT recomputing.
+                r["series_variable"] = str(svar)
+                try:
+                    (self.orch.results_dir / "reconciled_series_result.json").write_text(
+                        json.dumps(r, default=str))
+                except Exception:
+                    pass
+                # The report currently carries only the computed numbers + the
+                # deterministic note — no synthesis, unlike the component
+                # profile-fitting and identification reports. Ask the LLM to
+                # supply one and finalize, so the coupled report is not the only
+                # one missing an interpretation.
+                r["next_step"] = (
+                    "Write a 2-4 sentence scientific interpretation of this "
+                    "reconciliation — what transforms into what, whether the two "
+                    "independent transition estimates corroborate each other "
+                    "(agreement verdict above), and any caveat the numbers imply "
+                    "(a divergent verdict, an unidentified regime, a possible "
+                    "multi-step process) — then call finalize_reconcile_report("
+                    "interpretation=...) to embed it as the report's Interpretation "
+                    "section. That report is the coupled deliverable to surface.")
                 return json.dumps(r, default=str)
             except Exception as e:
                 return json.dumps({"status": "error", "message": str(e)})
@@ -3475,8 +3497,10 @@ class AnalysisOrchestratorTools:
                 "by index or analysis_id. Produces a self-contained HTML "
                 "report (transition summary, phase labels, embedded figure, "
                 "tracked-feature table) and a figure; their paths are in the "
-                "returned 'report' / 'figure' fields — surface the report to "
-                "the user as the coupled deliverable."
+                "returned 'report' / 'figure' fields. The report carries the "
+                "computed numbers but no synthesis yet — after this returns, "
+                "write a short interpretation and call finalize_reconcile_report "
+                "to embed it, then surface that report as the coupled deliverable."
             ),
             parameters={
                 "profile_analysis": {"type": "integer", "description": "History index of the profile-fitting (peak/line-fit) pass."},
@@ -3488,6 +3512,60 @@ class AnalysisOrchestratorTools:
                 "crossover_threshold": {"type": "number", "description": "End-phase weight-share level defining the transition (default 0.5 ≈ 50% conversion). Change only to mark a different conversion fraction."},
             },
             required=[]
+        )
+
+        # =====================================================================
+        # 10a3. FINALIZE RECONCILE REPORT — embed the LLM synthesis
+        # =====================================================================
+        def finalize_reconcile_report(interpretation: str) -> str:
+            """Embed a scientific interpretation into the most recent reconcile
+            report. Call this AFTER reconcile_series, passing your own synthesis
+            of the coupled result (what transforms into what, whether the two
+            transition estimates corroborate, any caveat). Re-renders the report
+            in place with an Interpretation section — no recomputation — so the
+            coupled deliverable reads like the component reports, which carry a
+            narrative rather than only numbers."""
+            print("  ⚡ Tool: Finalizing reconcile report with interpretation...")
+            from scilink.skills._shared._reconcile import render_reconcile_report
+            try:
+                cache = self.orch.results_dir / "reconciled_series_result.json"
+                if not cache.is_file():
+                    return json.dumps({"status": "error", "message":
+                                       "No reconcile result to finalize. Run "
+                                       "reconcile_series first."})
+                result = json.loads(cache.read_text())
+                report_path = result.get("report") or str(
+                    self.orch.results_dir / "reconciled_series_report.html")
+                render_reconcile_report(
+                    result, report_path,
+                    series_variable=result.get("series_variable", "series variable"),
+                    interpretation=interpretation)
+                return json.dumps({"status": "success", "report": report_path,
+                                   "message": "Interpretation embedded; this "
+                                   "report is the coupled deliverable to surface "
+                                   "to the user."})
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=finalize_reconcile_report,
+            name="finalize_reconcile_report",
+            description=(
+                "Embed your scientific interpretation into the reconcile report "
+                "produced by reconcile_series. Call this immediately after "
+                "reconcile_series with a 2-4 sentence synthesis of the coupled "
+                "result — what transforms into what, whether the two independent "
+                "transition estimates corroborate (the agreement verdict), and "
+                "any caveat (divergence, an unidentified regime, a possible "
+                "multi-step process). Re-renders the report in place with an "
+                "Interpretation section so the coupled deliverable carries a "
+                "narrative like the component reports do. The transition numbers "
+                "stay computed — this narrates them, it does not change them."
+            ),
+            parameters={
+                "interpretation": {"type": "string", "description": "Your 2-4 sentence scientific synthesis of the reconciled result. Narrate the computed transition/agreement; do not invent numbers."},
+            },
+            required=["interpretation"]
         )
 
         # =====================================================================

@@ -312,13 +312,18 @@ def reconcile_analysis_dirs(profile_dir: str, identification_dir: str,
                             min_presence_frac: float = 0.2,
                             agreement_units: float = 15.0,
                             regime_window_frac: float = 0.33,
-                            crossover_threshold: float = 0.5) -> dict[str, Any]:
+                            crossover_threshold: float = 0.5,
+                            interpretation: Optional[str] = None) -> dict[str, Any]:
     """Reconcile two PRIOR analyses given their output directories: extract
     features from the profile-fitting pass and labels from the identification
     pass, call :func:`reconcile_series`, plot a generic figure, and (if
     ``output_report``) render a self-contained HTML report. Technique-agnostic
     — the orchestrator's coupled-series step calls this. Knobs pass straight
-    through to :func:`reconcile_series` (see there)."""
+    through to :func:`reconcile_series` (see there). ``interpretation`` is
+    forwarded to the report renderer (the orchestrator's synthesis prose); on
+    the first pass it is usually ``None`` (the numbers are not known until this
+    call returns), and the orchestrator re-renders with it via a finalize
+    step."""
     ff = _extract_features(profile_dir)
     lf = _extract_labels(identification_dir)
     if not any(f.get("features") for f in ff):
@@ -339,7 +344,8 @@ def reconcile_analysis_dirs(profile_dir: str, identification_dir: str,
             r["figure"] = None
     if output_report:
         try:
-            render_reconcile_report(r, output_report, series_variable=series_variable)
+            render_reconcile_report(r, output_report, series_variable=series_variable,
+                                    interpretation=interpretation)
             r["report"] = output_report
         except Exception:
             r["report"] = None
@@ -348,12 +354,24 @@ def reconcile_analysis_dirs(profile_dir: str, identification_dir: str,
 
 def render_reconcile_report(result: dict, out_html: str,
                             series_variable: str = "series variable",
-                            title: str = "Profile fitting + Identification, reconciled") -> str:
+                            title: str = "Profile fitting + Identification, reconciled",
+                            interpretation: Optional[str] = None) -> str:
     """Render a self-contained HTML report for a reconcile result: the
     transition summary (both estimates + agreement), the phase/species labels
-    (with honest 'unidentified' callouts), the embedded figure, a
-    tracked-feature table, and interpretation guidance. Technique-agnostic —
-    reads only the generic reconcile-result keys. Returns the path written."""
+    (with honest 'unidentified' callouts), an optional scientific
+    interpretation, the embedded figure, a tracked-feature table, and
+    methodological guidance. Technique-agnostic — reads only the generic
+    reconcile-result keys. Returns the path written.
+
+    ``interpretation`` (optional): a free-prose scientific synthesis of the
+    reconciliation, authored by the caller (the analysis orchestrator LLM,
+    which holds both prior reports + session context). Rendered as the primary
+    Interpretation section so the reconcile report carries a narrative like the
+    component profile-fitting and identification reports do, rather than only
+    computed numbers. When absent, the report still renders — the deterministic
+    methodological note at the foot is always present as the fallback guidance.
+    Split on blank lines into paragraphs. The transition numbers and agreement
+    verdict stay computed (this prose narrates them; it does not replace them)."""
     import base64
     import html as _html
     from pathlib import Path
@@ -399,6 +417,17 @@ def render_reconcile_report(result: dict, out_html: str,
     t_p_s = f"{t_p:.3g} {esc(series_variable)}" if t_p is not None else "not detected"
     t_i_s = f"{t_i:.3g} {esc(series_variable)}" if t_i is not None else "not detected"
 
+    interp_html = ""
+    if interpretation and str(interpretation).strip():
+        paras = "".join(f"<p>{esc(p.strip())}</p>"
+                        for p in str(interpretation).split("\n\n") if p.strip())
+        interp_html = (
+            '<h2>Interpretation</h2>'
+            f'<div class="box interp">{paras}'
+            '<p class="attr">— scientific synthesis by the analysis orchestrator, '
+            'grounded in the reconciled result above (the transition values and '
+            'agreement verdict are computed; this narrates them).</p></div>')
+
     doc = f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <title>{esc(title)}</title><style>
 body{{font-family:'Segoe UI',Tahoma,sans-serif;line-height:1.6;color:#333;max-width:1200px;margin:0 auto;padding:20px;background:#f4f4f9;}}
@@ -407,6 +436,9 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:8px;}}
 h2{{color:#2980b9;margin-top:26px;}}
 .box{{background:#ecf0f1;padding:14px 18px;border-radius:5px;border-left:5px solid #3498db;margin:14px 0;}}
 .badge{{display:inline-block;padding:5px 12px;border-radius:14px;font-weight:bold;color:{badge[0]};background:{badge[1]};}}
+.interp{{background:#eef7ff;border-left:5px solid #2980b9;}}
+.interp p{{margin:8px 0;}}
+.attr{{color:#666;font-size:.85em;font-style:italic;margin-top:12px;}}
 .fig img{{max-width:100%;height:auto;border:1px solid #ddd;border-radius:4px;margin-top:12px;}}
 table{{width:100%;border-collapse:collapse;margin-top:10px;}}
 th,td{{border:1px solid #dee2e6;padding:7px 11px;text-align:left;}}
@@ -432,13 +464,15 @@ tr:nth-child(even){{background:#f8f9fa;}}
 <p><strong>End-phase (high regime):</strong> {label_html(hi, 'end')}</p>
 </div>
 
+{interp_html}
+
 {img}
 
 <h2>Tracked features</h2>
 <table><thead><tr><th>position</th><th>regime</th><th>phase / species</th></tr></thead>
 <tbody>{rows}</tbody></table>
 
-<div class="note">{esc(result.get('note', ''))}
+<div class="note"><strong>How to read this.</strong> {esc(result.get('note', ''))}
 Agreement of the two transitions is corroboration; a <em>divergent</em> verdict
 flags mis-tracked features, a mid-series false ID, or a multi-step process the
 single-crossover model does not capture. Transition detection uses the

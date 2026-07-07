@@ -118,6 +118,38 @@ def test_report_renders_with_honest_unidentified(tmp_path):
     assert "Tracked features" in html
 
 
+def test_report_renders_interpretation_section(tmp_path):
+    # The reconcile report must be able to carry an LLM-authored synthesis, so
+    # it is not the only one of the three reports without a narrative. When an
+    # interpretation is supplied it appears as its own section, attributed; the
+    # computed numbers stay present alongside it.
+    ffr, lfr = _nmr_titration()
+    r = reconcile_series(ffr, lfr)
+    out = tmp_path / "report.html"
+    synthesis = ("The reactant converts cleanly to the product near pH 7.\n\n"
+                 "Both passes place the crossover within one unit, corroborating it.")
+    render_reconcile_report(r, str(out), series_variable="pH",
+                            interpretation=synthesis)
+    html = out.read_text()
+    assert "Interpretation" in html
+    assert "converts cleanly to the product" in html          # narrative rendered
+    assert "corroborating it" in html                          # second paragraph too
+    assert "scientific synthesis by the analysis orchestrator" in html  # attributed
+    assert "reactant" in html and "product" in html            # computed labels stay
+
+
+def test_report_interpretation_optional(tmp_path):
+    # Absent interpretation, the report still renders (the deterministic note is
+    # the always-present fallback) and shows no Interpretation section.
+    ffr, lfr = _nmr_titration()
+    r = reconcile_series(ffr, lfr)
+    out = tmp_path / "report.html"
+    render_reconcile_report(r, str(out), series_variable="pH")
+    html = out.read_text()
+    assert "How to read this" in html                          # methodological note present
+    assert "scientific synthesis by the analysis orchestrator" not in html
+
+
 def test_report_embeds_figure(tmp_path):
     ffr, lfr = _nmr_titration()
     fig = tmp_path / "f.png"
