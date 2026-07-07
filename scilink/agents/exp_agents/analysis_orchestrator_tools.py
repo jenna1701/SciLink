@@ -3399,6 +3399,80 @@ class AnalysisOrchestratorTools:
         )
 
         # =====================================================================
+        # 10a2. RECONCILE SERIES — couple a model-free pass with an ID pass
+        # =====================================================================
+        def reconcile_series(model_free_analysis: int = None,
+                             identification_analysis: int = None,
+                             model_free_id: str = None,
+                             identification_id: str = None,
+                             tol: float = 0.25) -> str:
+            """Reconcile two PRIOR series analyses of the same frames: a
+            model-free pass (profile/peak fitting — HOW the structure evolves,
+            database-independent) and an identification pass (WHICH phases).
+            Attributes the model-free feature-evolution trends to the
+            identified labels and cross-checks the transition the two find
+            independently. Technique-agnostic — works for any series where one
+            pass fits peaks and the other identifies. Reference each prior
+            analysis by index (position in history) or analysis_id."""
+            print("  ⚡ Tool: Reconciling model-free + identification series...")
+            from scilink.skills._shared._reconcile import reconcile_analysis_dirs
+
+            def _find(idx, aid, role):
+                if aid:
+                    rec = next((r for r in self.orch.analysis_results
+                                if r.get("analysis_id") == aid), None)
+                    if rec is None:
+                        raise ValueError(f"{role} analysis id not found: {aid}")
+                    return rec
+                if idx is None:
+                    raise ValueError(f"provide {role} analysis by index or id")
+                return self.orch.analysis_results[idx]
+
+            if not self.orch.analysis_results:
+                return json.dumps({"status": "error",
+                                   "message": "No analyses yet. Run the "
+                                   "model-free (profile) and identification "
+                                   "passes first, then reconcile."})
+            try:
+                mf = _find(model_free_analysis, model_free_id, "model_free")
+                idr = _find(identification_analysis, identification_id, "identification")
+                fig = str(self.orch.results_dir / "reconciled_series.png")
+                r = reconcile_analysis_dirs(
+                    mf.get("output_directory"), idr.get("output_directory"),
+                    output_figure=fig, tol=float(tol))
+                r["status"] = "success"
+                return json.dumps(r, default=str)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=reconcile_series,
+            name="reconcile_series",
+            description=(
+                "Couple two PRIOR series analyses of the same frames — a "
+                "model-free pass (profile/peak fitting) and an identification "
+                "pass — into the combined view: phase/species-labeled "
+                "feature-evolution trends with a cross-validated transition. "
+                "Run BOTH passes first (run_analysis with the model-free skill, "
+                "then with the identification skill), then call this. The "
+                "model-free trends are database-independent (they work even "
+                "where identification cannot name a phase — organics, novel "
+                "products); a regime the ID pass could not name stays honestly "
+                "'unidentified'. Agreement of the two transitions is "
+                "corroboration; divergence is a flag. Reference each analysis "
+                "by index or analysis_id."
+            ),
+            parameters={
+                "model_free_analysis": {"type": "integer", "description": "History index of the model-free (profile/peak-fit) pass."},
+                "identification_analysis": {"type": "integer", "description": "History index of the identification pass."},
+                "model_free_id": {"type": "string", "description": "analysis_id of the model-free pass (alternative to index)."},
+                "identification_id": {"type": "string", "description": "analysis_id of the identification pass (alternative to index)."},
+                "tol": {"type": "number", "description": "Feature-tracking position tolerance in the data's x-units (default 0.25). RAISE for features that drift a lot across the series."},
+            },
+            required=[]
+        )
+
+        # =====================================================================
         # 10b. SEARCH LITERATURE (preparatory — call BEFORE run_analysis)
         # =====================================================================
         def search_literature(query: str) -> str:

@@ -170,3 +170,127 @@ def reconcile_series(
         "_weight": weight.tolist(), "_low_share": low_share.tolist(),
         "_high_share": high_share.tolist(), "_refs": [float(r) for r in refs],
     }
+
+
+# --- generic extraction from stored analysis results (orchestrator seam) -------
+#
+# The orchestrator reconciles two PRIOR analyses (a model-free pass and an
+# identification pass) it already ran and stored. Both write an
+# ``analysis_results.json`` (per-frame ``individual_results``) and a
+# ``series_fit_results.json`` (series values) in their output dir. Extraction
+# is technique-agnostic: features are any per-frame fitted peaks (center/area),
+# labels are the per-frame identity under one of the common label keys. So a
+# single orchestrator step serves XRD today and NMR/Raman/XPS as their
+# identification skills mature — no per-technique orchestration.
+
+_LABEL_KEYS = ("identified_phase", "identified_species", "identified_compound",
+               "identity", "phase", "species", "compound", "label")
+
+
+def _read_json(path):
+    import json
+    from pathlib import Path
+    p = Path(path)
+    return __import__("json").loads(p.read_text()) if p.is_file() else None
+
+
+def _series_values(output_dir, n):
+    from pathlib import Path
+    sfr = _read_json(Path(output_dir) / "series_fit_results.json") or {}
+    vals = ((sfr.get("series_metadata") or {}).get("values")
+            or sfr.get("values"))
+    if vals and len(vals) >= n:
+        return [float(v) for v in vals[:n]]
+    return [float(i) for i in range(n)]
+
+
+def _extract_features(analysis_dir) -> list[dict]:
+    """Per-frame (position, weight) peaks from a model-free pass's stored
+    result — any ``parameters`` entry that is a dict with a center/position."""
+    from pathlib import Path
+    d = _read_json(Path(analysis_dir) / "analysis_results.json") or {}
+    res = d.get("individual_results") or []
+    vals = _series_values(analysis_dir, len(res))
+    frames = []
+    for i, r in enumerate(res):
+        feats = []
+        for _, v in (r.get("parameters") or {}).items():
+            if isinstance(v, dict) and ("center" in v or "position" in v):
+                pos = v.get("position", v.get("center"))
+                w = v.get("weight", v.get("area", v.get("amplitude", 0.0)))
+                feats.append({"position": pos, "weight": w})
+        frames.append({"value": vals[i], "features": feats})
+    return frames
+
+
+def _extract_labels(analysis_dir) -> list[dict]:
+    """Per-frame identity label from an identification pass's stored result."""
+    from pathlib import Path
+    d = _read_json(Path(analysis_dir) / "analysis_results.json") or {}
+    res = d.get("individual_results") or []
+    vals = _series_values(analysis_dir, len(res))
+    frames = []
+    for i, r in enumerate(res):
+        params = r.get("parameters") or {}
+        label = next((params[k] for k in _LABEL_KEYS if params.get(k)), None)
+        frames.append({"value": vals[i], "label": label})
+    return frames
+
+
+def reconcile_analysis_dirs(model_free_dir: str, identification_dir: str,
+                            output_figure: Optional[str] = None,
+                            tol: float = 0.25, min_presence_frac: float = 0.2,
+                            agreement_units: float = 15.0) -> dict[str, Any]:
+    """Reconcile two PRIOR analyses given their output directories: extract
+    features from the model-free pass and labels from the identification pass,
+    call :func:`reconcile_series`, and (optionally) plot a generic figure.
+    Technique-agnostic — the orchestrator's coupled-series step calls this."""
+    ff = _extract_features(model_free_dir)
+    lf = _extract_labels(identification_dir)
+    if not any(f.get("features") for f in ff):
+        raise ValueError(
+            f"no per-frame fitted peaks found in {model_free_dir} — the "
+            "model-free pass must be a profile/peak-fitting run (its "
+            "'parameters' carry peak center/area per frame). Check the "
+            "model_free / identification arguments are not swapped.")
+    r = reconcile_series(ff, lf, tol=tol, min_presence_frac=min_presence_frac,
+                         agreement_units=agreement_units)
+    if output_figure:
+        try:
+            _plot_generic(r, output_figure)
+            r["figure"] = output_figure
+        except Exception:
+            r["figure"] = None
+    return {k: v for k, v in r.items() if not k.startswith("_") or k == "figure"}
+
+
+def _plot_generic(r, path):
+    import numpy as _np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    V = _np.array(r["values"]); w = _np.array(r["_weight"])
+    low, high = r["_low_idx"], r["_high_idx"]
+    fig, ax = plt.subplots(2, 1, figsize=(11, 9), sharex=True,
+                           gridspec_kw={"height_ratios": [3, 2]})
+    for j in low:
+        ax[0].plot(V, w[:, j], "-", color="tab:blue", alpha=0.6, lw=1)
+    for j in high:
+        ax[0].plot(V, w[:, j], "-", color="tab:red", alpha=0.6, lw=1)
+    ax[0].plot([], [], color="tab:blue", label=f"low regime: {r['low_regime_label'] or 'unidentified'}")
+    ax[0].plot([], [], color="tab:red", label=f"high regime: {r['high_regime_label'] or 'unidentified'}")
+    ax[0].set_ylabel("feature weight (area)")
+    ax[0].set_title("Model-free + Identification, reconciled\n"
+                    "feature evolution (model-free), labels (identification)")
+    ax[0].legend(fontsize=9, loc="upper right")
+    ax[1].plot(V, r["_low_share"], "o-", color="tab:blue", label="low-regime weight share")
+    ax[1].plot(V, r["_high_share"], "s-", color="tab:red", label="high-regime weight share")
+    if r["transition_model_free"] is not None:
+        ax[1].axvline(r["transition_model_free"], color="k", ls="--",
+                      label=f"model-free transition ≈ {r['transition_model_free']:.1f}")
+    if r["transition_identification"] is not None:
+        ax[1].axvline(r["transition_identification"], color="tab:green", ls=":",
+                      label=f"identification transition ≈ {r['transition_identification']:.1f}")
+    ax[1].set_xlabel("series variable"); ax[1].set_ylabel("weight share")
+    ax[1].legend(fontsize=9)
+    fig.tight_layout(); fig.savefig(path, dpi=150); plt.close(fig)
