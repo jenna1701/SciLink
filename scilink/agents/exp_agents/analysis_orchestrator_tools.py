@@ -3441,9 +3441,14 @@ class AnalysisOrchestratorTools:
                 prof = _find(profile_analysis, profile_id, "profile")
                 idr = _find(identification_analysis, identification_id, "identification")
                 fig = str(self.orch.results_dir / "reconciled_series.png")
+                report = str(self.orch.results_dir / "reconciled_series_report.html")
+                svar = ((getattr(self.orch, "current_metadata", None) or {}).get("series_variable")
+                        or (getattr(self.orch, "current_metadata", None) or {}).get("variable")
+                        or "series variable")
                 r = reconcile_analysis_dirs(
                     prof.get("output_directory"), idr.get("output_directory"),
-                    output_figure=fig,
+                    output_figure=fig, output_report=report,
+                    series_variable=str(svar),
                     tol=(float(tol) if tol is not None else None),
                     regime_window_frac=float(regime_window_frac),
                     crossover_threshold=float(crossover_threshold))
@@ -3467,7 +3472,11 @@ class AnalysisOrchestratorTools:
                 "products); a regime the ID pass could not name stays honestly "
                 "'unidentified'. Agreement of the two transitions is "
                 "corroboration; divergence is a flag. Reference each analysis "
-                "by index or analysis_id."
+                "by index or analysis_id. Produces a self-contained HTML "
+                "report (transition summary, phase labels, embedded figure, "
+                "tracked-feature table) and a figure; their paths are in the "
+                "returned 'report' / 'figure' fields — surface the report to "
+                "the user as the coupled deliverable."
             ),
             parameters={
                 "profile_analysis": {"type": "integer", "description": "History index of the profile-fitting (peak/line-fit) pass."},

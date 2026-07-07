@@ -306,6 +306,8 @@ def _extract_labels(analysis_dir) -> list[dict]:
 
 def reconcile_analysis_dirs(profile_dir: str, identification_dir: str,
                             output_figure: Optional[str] = None,
+                            output_report: Optional[str] = None,
+                            series_variable: str = "series variable",
                             tol: Optional[float] = None,
                             min_presence_frac: float = 0.2,
                             agreement_units: float = 15.0,
@@ -313,9 +315,10 @@ def reconcile_analysis_dirs(profile_dir: str, identification_dir: str,
                             crossover_threshold: float = 0.5) -> dict[str, Any]:
     """Reconcile two PRIOR analyses given their output directories: extract
     features from the profile-fitting pass and labels from the identification
-    pass, call :func:`reconcile_series`, and (optionally) plot a generic
-    figure. Technique-agnostic — the orchestrator's coupled-series step calls
-    this. Knobs pass straight through to :func:`reconcile_series` (see there)."""
+    pass, call :func:`reconcile_series`, plot a generic figure, and (if
+    ``output_report``) render a self-contained HTML report. Technique-agnostic
+    — the orchestrator's coupled-series step calls this. Knobs pass straight
+    through to :func:`reconcile_series` (see there)."""
     ff = _extract_features(profile_dir)
     lf = _extract_labels(identification_dir)
     if not any(f.get("features") for f in ff):
@@ -334,7 +337,116 @@ def reconcile_analysis_dirs(profile_dir: str, identification_dir: str,
             r["figure"] = output_figure
         except Exception:
             r["figure"] = None
-    return {k: v for k, v in r.items() if not k.startswith("_") or k == "figure"}
+    if output_report:
+        try:
+            render_reconcile_report(r, output_report, series_variable=series_variable)
+            r["report"] = output_report
+        except Exception:
+            r["report"] = None
+    return {k: v for k, v in r.items() if not k.startswith("_") or k in ("figure", "report")}
+
+
+def render_reconcile_report(result: dict, out_html: str,
+                            series_variable: str = "series variable",
+                            title: str = "Profile fitting + Identification, reconciled") -> str:
+    """Render a self-contained HTML report for a reconcile result: the
+    transition summary (both estimates + agreement), the phase/species labels
+    (with honest 'unidentified' callouts), the embedded figure, a
+    tracked-feature table, and interpretation guidance. Technique-agnostic —
+    reads only the generic reconcile-result keys. Returns the path written."""
+    import base64
+    import html as _html
+    from pathlib import Path
+
+    lo, hi = result.get("low_regime_label"), result.get("high_regime_label")
+    t_p, t_i = result.get("transition_profile"), result.get("transition_identification")
+    agree = result.get("agreement") or {}
+    verdict = agree.get("verdict")
+    tracked = result.get("tracked_features") or []
+    fig = result.get("figure")
+
+    def esc(x):
+        return _html.escape(str(x)) if x is not None else ""
+
+    # agreement badge
+    badge = {"consistent": ("#155724", "#d4edda", "✓ consistent"),
+             "divergent": ("#721c24", "#f8d7da", "⚠ divergent — investigate"),
+             "one_sided": ("#856404", "#fff3cd", "one-sided (only one method timed it)")
+             }.get(verdict, ("#383d41", "#e2e3e5", esc(verdict)))
+    ap = agree.get("units_apart")
+    agree_line = (f"{badge[2]}" + (f" ({ap} {esc(series_variable)} apart)" if ap is not None else ""))
+
+    def label_html(lab, which):
+        if lab:
+            return f"<strong>{esc(lab)}</strong>"
+        return (f'<strong style="color:#856404;">UNIDENTIFIED</strong> '
+                f'<span style="color:#666;">— the {which}-regime phase is not in the '
+                f'searched database (organic / novel product). Its trends are real but '
+                f'unnamed; use an empirical reference or the indexing route.</span>')
+
+    rows = "".join(
+        f"<tr><td>{t['position']}</td>"
+        f"<td>{esc(t['regime'])}</td>"
+        f"<td>{esc(t['label']) if t.get('label') else '<em>unidentified</em>'}</td></tr>"
+        for t in tracked)
+
+    img = ""
+    if fig and Path(fig).is_file():
+        b64 = base64.b64encode(Path(fig).read_bytes()).decode()
+        img = (f'<div class="fig"><img src="data:image/png;base64,{b64}" '
+               f'alt="reconciled figure"></div>')
+
+    t_p_s = f"{t_p:.3g} {esc(series_variable)}" if t_p is not None else "not detected"
+    t_i_s = f"{t_i:.3g} {esc(series_variable)}" if t_i is not None else "not detected"
+
+    doc = f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<title>{esc(title)}</title><style>
+body{{font-family:'Segoe UI',Tahoma,sans-serif;line-height:1.6;color:#333;max-width:1200px;margin:0 auto;padding:20px;background:#f4f4f9;}}
+.container{{background:#fff;padding:36px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.1);}}
+h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:8px;}}
+h2{{color:#2980b9;margin-top:26px;}}
+.box{{background:#ecf0f1;padding:14px 18px;border-radius:5px;border-left:5px solid #3498db;margin:14px 0;}}
+.badge{{display:inline-block;padding:5px 12px;border-radius:14px;font-weight:bold;color:{badge[0]};background:{badge[1]};}}
+.fig img{{max-width:100%;height:auto;border:1px solid #ddd;border-radius:4px;margin-top:12px;}}
+table{{width:100%;border-collapse:collapse;margin-top:10px;}}
+th,td{{border:1px solid #dee2e6;padding:7px 11px;text-align:left;}}
+th{{background:#e9ecef;}}
+tr:nth-child(even){{background:#f8f9fa;}}
+.note{{background:#fff8e6;border-left:5px solid #f0ad4e;padding:12px 16px;border-radius:0 5px 5px 0;margin-top:16px;font-size:.95em;}}
+</style></head><body><div class="container">
+<h1>📊 {esc(title)}</h1>
+<p>Two complementary passes over the same series, joined: <em>profile fitting</em>
+(how the structure evolves — database-independent) and <em>identification</em>
+(which phases — database-dependent).</p>
+
+<h2>Transition</h2>
+<div class="box">
+<p><strong>Profile-fit transition:</strong> {t_p_s} &nbsp;·&nbsp;
+   <strong>Identification transition:</strong> {t_i_s}</p>
+<p><span class="badge">{agree_line}</span></p>
+</div>
+
+<h2>Phases</h2>
+<div class="box">
+<p><strong>Start-phase (low regime):</strong> {label_html(lo, 'start')}</p>
+<p><strong>End-phase (high regime):</strong> {label_html(hi, 'end')}</p>
+</div>
+
+{img}
+
+<h2>Tracked features</h2>
+<table><thead><tr><th>position</th><th>regime</th><th>phase / species</th></tr></thead>
+<tbody>{rows}</tbody></table>
+
+<div class="note">{esc(result.get('note', ''))}
+Agreement of the two transitions is corroboration; a <em>divergent</em> verdict
+flags mis-tracked features, a mid-series false ID, or a multi-step process the
+single-crossover model does not capture. Transition detection uses the
+{esc(result.get('transition_model', 'single_crossover'))} model.</div>
+</div></body></html>"""
+
+    Path(out_html).write_text(doc, encoding="utf-8")
+    return out_html
 
 
 def _plot_generic(r, path):

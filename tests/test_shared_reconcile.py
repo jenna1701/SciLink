@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from scilink.skills._shared._reconcile import reconcile_series
+from scilink.skills._shared._reconcile import (
+    reconcile_series, render_reconcile_report)
 
 
 def _nmr_titration(n=21):
@@ -99,6 +100,34 @@ def test_multiregime_model_is_a_named_seam():
     ffr, lfr = _nmr_titration()
     with pytest.raises(ValueError, match="single_crossover"):
         reconcile_series(ffr, lfr, transition_model="multi_regime")
+
+
+def test_report_renders_with_honest_unidentified(tmp_path):
+    ffr, lfr = _nmr_titration()
+    # end-phase never named -> report must render and flag it honestly
+    for i in range(10, len(lfr)):
+        lfr[i]["label"] = None
+    r = reconcile_series(ffr, lfr)
+    out = tmp_path / "report.html"
+    render_reconcile_report(r, str(out), series_variable="pH")
+    html = out.read_text()
+    assert "reactant" in html                       # named start phase
+    assert "UNIDENTIFIED" in html                   # honest end-phase flag
+    assert "one-sided" in html                       # agreement verdict surfaced
+    assert "pH" in html                              # series-variable label used
+    assert "Tracked features" in html
+
+
+def test_report_embeds_figure(tmp_path):
+    ffr, lfr = _nmr_titration()
+    fig = tmp_path / "f.png"
+    from scilink.skills._shared._reconcile import _plot_generic
+    r = reconcile_series(ffr, lfr)
+    _plot_generic(r, str(fig))
+    r["figure"] = str(fig)
+    out = tmp_path / "report.html"
+    render_reconcile_report(r, str(out))
+    assert "data:image/png;base64" in out.read_text()   # figure embedded, self-contained
 
 
 def test_guards():
