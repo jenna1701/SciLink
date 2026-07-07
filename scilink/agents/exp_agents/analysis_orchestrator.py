@@ -19,6 +19,8 @@ from datetime import datetime
 from enum import Enum
 
 from ...auth import get_internal_proxy_key
+from ...utils.tool_media import (build_tool_message, provider_supports_tool_image,
+                                 sanitize_history_images)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .analysis_orchestrator_tools import AnalysisOrchestratorTools
@@ -1530,6 +1532,15 @@ class AnalysisOrchestratorAgent:
         except Exception as e:
             logging.warning(f"Auto-checkpoint failed: {e}")
 
+    def _tool_message(self, tool_call_id: str, result: str) -> dict:
+        """Build the tool-result message. When the active provider renders
+        images in tool results (Claude/Bedrock, Gemini — not the OpenAI-
+        compatible path), an image-bearing result becomes a multimodal message
+        so the model can actually see it; every other result stays the exact
+        plain-string message as before."""
+        allow = (not self.use_openai) and provider_supports_tool_image(self.model.model)
+        return build_tool_message(tool_call_id, result, allow_image=allow)
+
     def _handle_openai_chat(self, user_input: str) -> str:
         """Handle chat with OpenAI-compatible models with manual function calling loop."""
         from openai import OpenAI
@@ -1614,11 +1625,7 @@ class AnalysisOrchestratorAgent:
                 
                 result = self.tools.execute_tool(func_name, **args)
                 
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result
-                })
+                self.messages.append(self._tool_message(tool_call.id, result))
         
         self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
@@ -1768,11 +1775,7 @@ class AnalysisOrchestratorAgent:
                 
                 result = self.tools.execute_tool(func_name, **args)
                 
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result
-                })
+                self.messages.append(self._tool_message(tool_call.id, result))
         
         self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
@@ -1794,6 +1797,9 @@ class AnalysisOrchestratorAgent:
         """Save conversation history to disk."""
         try:
             history_data = [m for m in self.messages if m["role"] != "system"]
+            # Collapse any multimodal (image-bearing) tool messages back to plain
+            # strings so chat_history.json keeps its shape and carries no base64.
+            history_data = sanitize_history_images(history_data)
             with open(self.history_path, 'w') as f:
                 json.dump(history_data, f, indent=2)
         except Exception as e:

@@ -3455,10 +3455,23 @@ class AnalysisOrchestratorTools:
                 r["status"] = "success"
                 # Persist the result so finalize_reconcile_report can re-render
                 # the report with the LLM's interpretation WITHOUT recomputing.
+                # (Persist BEFORE attaching the figure bytes so the cache stays
+                # lean — finalize does not need the base64.)
                 r["series_variable"] = str(svar)
                 try:
                     (self.orch.results_dir / "reconciled_series_result.json").write_text(
                         json.dumps(r, default=str))
+                except Exception:
+                    pass
+                # Attach the reconciled figure so the orchestrator LLM sees the
+                # plot (providers that render tool-result images) before it
+                # writes the interpretation — figure-grounded, not number-only.
+                try:
+                    figpath = r.get("figure") or fig
+                    if figpath and Path(figpath).is_file():
+                        import base64 as _b64
+                        r["image_base64"] = _b64.b64encode(
+                            Path(figpath).read_bytes()).decode()
                 except Exception:
                     pass
                 # The report currently carries only the computed numbers + the

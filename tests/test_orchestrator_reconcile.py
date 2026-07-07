@@ -86,6 +86,19 @@ def test_reconcile_by_id(two_runs, tmp_path):
     assert out["low_regime_label"] == "PhaseA"
 
 
+def test_reconcile_feeds_figure_but_cache_stays_lean(two_runs, tmp_path):
+    # The returned result carries the figure as image_base64 (so the loop can
+    # feed it to the LLM), but the persisted cache must NOT — finalize does not
+    # need the bytes, and the cache would bloat.
+    mf, idr = two_runs
+    tools = _make_tools(tmp_path, mf, idr)
+    out = json.loads(tools.functions_map["reconcile_series"](
+        profile_analysis=0, identification_analysis=1))
+    assert out.get("image_base64")                         # figure fed to the LLM
+    cache = json.loads((tmp_path / "reconciled_series_result.json").read_text())
+    assert "image_base64" not in cache                     # cache stays lean
+
+
 def test_finalize_embeds_interpretation(two_runs, tmp_path):
     mf, idr = two_runs
     tools = _make_tools(tmp_path, mf, idr)
