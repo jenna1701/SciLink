@@ -386,7 +386,14 @@ that fixed endmember set, returning per-frame phase shares, the transition
 window, and residual alerts. The two compose: its transition-window frame
 indices tell this skill's regime segmentation where to expect a model
 change, and its lattice-scale drift corroborates peak-shift trends fitted
-here.
+here. To COUPLE the two over a series — attribute the peak-evolution trends
+fitted here to the phases identified there, and cross-check the transition —
+run both passes and join them with the `xrd` skill's
+`reconcile_series_phases`. That is the recommended in-situ deliverable when
+the phases might not all be in a database: profile fitting (here) keeps
+producing trends where identification hits the "not in any database" wall, so
+the reconciliation labels what it can and reports the rest as honestly
+unidentified.
 
 **The detection settings ARE part of the recipe — tune them, then freeze them.**
 `prominence_frac` and `min_distance_deg` are *settings*, not *values*: tune them

@@ -100,6 +100,18 @@ The skill ships five tools the analysis script chains together:
   (Rietveld quantifies); phases separated by line POSITIONS only — an
   order-disorder transition that redistributes intensity on the same
   lattice needs profile/intensity analysis (`xrd_profile`), not tracking.
+- `reconcile_series_phases` — **couple profile fitting with identification**
+  over an in-situ series. Profile fitting (the `xrd_profile` skill) gives
+  model-free, database-INDEPENDENT peak-evolution trends (positions/widths/
+  areas, the transition); identification gives phase names where a database
+  allows. This tool JOINS them: it attributes the peak-evolution trends to
+  the identified phases and cross-checks the transition temperature the two
+  methods find independently. Run it after both passes over the same frames.
+  A regime whose phase is `null` is honestly UNIDENTIFIED (not in the
+  database — organics/novel products): its trends are real but unnamed. When
+  the two transitions AGREE it is strong corroboration; when they DIVERGE,
+  investigate (mis-tracked peaks, a mid-series false ID, or a two-step
+  process). See the in-situ two-pass workflow in `interpretation`.
 - `calibrate_zero` — **2θ calibration from an internal standard** (Si /
   LaB₆ / corundum mixed into the sample). Fits zero error + specimen
   displacement from the standard's exactly-known lines and returns the
@@ -599,6 +611,25 @@ tier matches on peak *positions* within `tol_deg` (default 0.3°); widen
 tier — it factors out background, scale, and intensity-ratio effects
 that the fast tier folds into the correlation. The fast tier is a
 triage step; the robust tier is the identification.
+
+**In-situ / series — profile fitting and identification are two passes,
+reconciled.** The richest in-situ analysis runs BOTH: profile fitting (the
+`xrd_profile` skill — `fit_pattern` per frame) for the model-free
+structural evolution (peak positions → thermal expansion, widths →
+crystallite size/strain, areas → phase-fraction proxy, and the transition
+from peak appearance/shift), and identification (this skill) for the phase
+names. They answer different questions and are gated differently, so they
+are two separate `analyze` passes over the same frames, joined afterward by
+`reconcile_series_phases` — which labels the peak-evolution trends with the
+identified phases and cross-checks the transition the two methods find.
+Prefer this coupled workflow whenever the phases might not all be in a
+database: profile fitting keeps working where identification hits the "not
+in any database" wall (organics, novel synthesis products), so the trends
+stay complete and the reconciliation reports honestly which regimes it
+could and could not name. Agreement between the two transitions is strong
+corroboration; divergence is a flag to investigate. Identification alone
+(the establishing-frames workflow below) is the right lighter pass when you
+only need "which phases, how much" and the phases are known.
 
 **In-situ / series — identify at ESTABLISHING frames, then track.** A
 series is not N independent identifications. Identify each phase where it
