@@ -109,100 +109,47 @@ def reconcile_series_phases(
     agreement_deg: float = 15.0,
     output_figure: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Join a profile-fit series with an identification series. See ``TOOL_SPEC``."""
-    n = min(len(frames), len(phase_ids))
-    if n < 3:
-        raise ValueError("reconcile_series_phases needs at least 3 aligned frames.")
-    frames = list(frames)[:n]
-    phase_ids = list(phase_ids)[:n]
-    T = np.array([float(f.get("value", i)) for i, f in enumerate(frames)])
+    """Join a profile-fit series with an identification series. See ``TOOL_SPEC``.
 
-    # --- cluster peaks across frames into tracked reflections ---
-    allc = sorted(c for f in frames for c, _ in _frame_peaks(f))
-    refs: list[float] = []
-    for c in allc:
-        if not refs or abs(c - refs[-1]) > tol_deg:
-            refs.append(c)
-        else:
-            refs[-1] = 0.5 * (refs[-1] + c)
+    Thin XRD wrapper over the technique-agnostic core in
+    ``scilink.skills._shared._reconcile``: maps 2θ peaks → features and
+    phases → labels, adds the XRD figure and vocabulary. The tracking /
+    regime-split / attribution / transition-cross-check math is the shared
+    core, reused by any spectroscopy that has a model-free and an
+    identification pass over a series."""
+    from ..._shared._reconcile import reconcile_series as _core
 
-    def _seen_frac(rp):
-        return float(np.mean([any(abs(c - rp) <= tol_deg for c, _ in _frame_peaks(f))
-                              for f in frames]))
-    refs = [rp for rp in refs if _seen_frac(rp) >= float(min_presence_frac)]
-    if not refs:
-        raise ValueError("no reflection persisted across the series — raise "
-                         "tol_deg or lower min_presence_frac.")
+    # XRD vocabulary -> generic core vocabulary
+    feature_frames = [{"value": f.get("value", i),
+                       "features": [{"position": c, "weight": a}
+                                    for c, a in _frame_peaks(f)]}
+                      for i, f in enumerate(frames)]
+    label_frames = [{"value": p.get("value"), "label": p.get("phase")}
+                    for p in phase_ids]
+    r = _core(feature_frames, label_frames, tol=tol_deg,
+              min_presence_frac=min_presence_frac, agreement_units=agreement_deg)
 
-    area = np.zeros((n, len(refs)))
-    for i, f in enumerate(frames):
-        pk = _frame_peaks(f)
-        for j, rp in enumerate(refs):
-            near = [(abs(c - rp), a) for c, a in pk if abs(c - rp) <= tol_deg]
-            if near:
-                area[i, j] = min(near)[1]
-
-    # --- split reflections into low-T / high-T families ---
-    third = max(1, n // 3)
-    early = area[:third].mean(axis=0)
-    late = area[-third:].mean(axis=0)
-    low_t = np.where(early > late)[0]
-    high_t = np.where(late >= early)[0]
-    frac = area / np.maximum(area.sum(axis=1, keepdims=True), 1e-9)
-    low_share = frac[:, low_t].sum(axis=1) if len(low_t) else np.zeros(n)
-    high_share = frac[:, high_t].sum(axis=1) if len(high_t) else np.zeros(n)
-
-    # --- profile transition: high-share crosses 0.5 ---
-    t_profile = None
-    for i in range(1, n):
-        if high_share[i - 1] < 0.5 <= high_share[i]:
-            g = (0.5 - high_share[i - 1]) / (high_share[i] - high_share[i - 1] + 1e-9)
-            t_profile = float(T[i - 1] + g * (T[i] - T[i - 1]))
-            break
-
-    # --- identification: dominant phase per regime + transition ---
-    def _phase(i):
-        p = phase_ids[i].get("phase")
-        return p if p else None
-    lo_idx = [i for i in range(n) if low_share[i] >= high_share[i]]
-    hi_idx = [i for i in range(n) if high_share[i] > low_share[i]]
-
-    def _dominant(idxs):
-        names = [_phase(i) for i in idxs if _phase(i)]
-        return max(set(names), key=names.count) if names else None
-    lo_phase, hi_phase = _dominant(lo_idx), _dominant(hi_idx)
-
-    t_id = None
-    if lo_phase and hi_phase and lo_phase != hi_phase:
-        last_lo = max([i for i in range(n) if _phase(i) == lo_phase], default=None)
-        first_hi = min([i for i in range(n) if _phase(i) == hi_phase], default=None)
-        if last_lo is not None and first_hi is not None and first_hi >= last_lo:
-            t_id = float(0.5 * (T[last_lo] + T[first_hi]))
-
-    if t_profile is not None and t_id is not None:
-        gap = abs(t_profile - t_id)
-        agree = {"deg_apart": round(gap, 1),
-                 "verdict": "consistent" if gap <= float(agreement_deg) else "divergent"}
-    else:
-        agree = {"deg_apart": None, "verdict": "one_sided"}
-
-    tracked = []
-    for j, rp in enumerate(refs):
-        regime = "low" if j in low_t else "high"
-        tracked.append({
-            "position_deg": round(float(rp), 3),
-            "regime": regime,
-            "phase": (lo_phase if regime == "low" else hi_phase),
-            "area_series": [round(float(v), 1) for v in area[:, j]],
-        })
+    T = np.array(r["values"])
+    weight = np.array(r["_weight"])
+    low_t, high_t = np.array(r["_low_idx"], int), np.array(r["_high_idx"], int)
+    lo_phase, hi_phase = r["low_regime_label"], r["high_regime_label"]
+    t_profile, t_id = r["transition_model_free"], r["transition_identification"]
 
     fig_path = None
     if output_figure:
         try:
-            fig_path = _plot(T, area, low_t, high_t, low_share, high_share,
-                             refs, lo_phase, hi_phase, t_profile, t_id, output_figure)
+            fig_path = _plot(T, weight, low_t, high_t,
+                             np.array(r["_low_share"]), np.array(r["_high_share"]),
+                             r["_refs"], lo_phase, hi_phase, t_profile, t_id,
+                             output_figure)
         except Exception as exc:
             _logger.warning("reconcile figure failed: %s", exc)
+
+    tracked = [{"position_deg": tf["position"], "regime": tf["regime"],
+                "phase": tf["label"], "area_series": tf["weight_series"]}
+               for tf in r["tracked_features"]]
+    agree = {"deg_apart": r["agreement"]["units_apart"],
+             "verdict": r["agreement"]["verdict"]}
 
     return {
         "series_variable_values": [float(v) for v in T],
