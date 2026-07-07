@@ -3,7 +3,7 @@
 Uses NON-XRD vocabulary (NMR chemical shifts as feature positions, species as
 labels) to prove the core is not XRD-bound — it operates on generic
 (position, weight) features and (value, label) identifications, so any
-spectroscopy with a model-free and an identification pass reuses it.
+spectroscopy with a profile-fitting and an identification pass reuses it.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def test_generic_reconcile_labels_and_transitions():
     assert r["low_regime_label"] == "reactant"
     assert r["high_regime_label"] == "product"
     # both transitions near the reaction midpoint (pH 7)
-    assert abs(r["transition_model_free"] - 7.0) < 1.5
+    assert abs(r["transition_profile"] - 7.0) < 1.5
     assert abs(r["transition_identification"] - 7.0) < 2.0
     assert r["agreement"]["verdict"] == "consistent"
     by_pos = {t["position"]: t for t in r["tracked_features"]}
@@ -64,8 +64,35 @@ def test_unidentified_regime_stays_none():
     r = reconcile_series(ffr, lfr)
     assert r["low_regime_label"] == "reactant"
     assert r["high_regime_label"] is None
-    assert r["transition_model_free"] is not None
+    assert r["transition_profile"] is not None
     assert r["agreement"]["verdict"] == "one_sided"
+
+
+def test_auto_tol_is_not_technique_bound():
+    # The default tolerance must NOT be a fixed technique-specific value (0.25
+    # is fine for 2θ° but would merge NMR peaks ~0.15 ppm apart). Auto-scaling
+    # from the peak spacing keeps close features separate regardless of x-units.
+    n = 15
+    ff = [{"value": i, "features": [
+        {"position": 1.00, "weight": 100 * (1 - i / (n - 1))},
+        {"position": 1.15, "weight": 80 * (1 - i / (n - 1))},   # 0.15 apart
+        {"position": 2.00, "weight": 100 * i / (n - 1)}]} for i in range(n)]
+    lf = [{"value": i, "label": "A" if i < 8 else "B"} for i in range(n)]
+    r = reconcile_series(ff, lf)                     # tol=None -> auto
+    pos = sorted(round(t["position"], 2) for t in r["tracked_features"])
+    assert 1.0 in pos and 1.15 in pos               # kept separate
+    assert r["tolerance_used"] < 0.15               # auto-scaled below the gap
+    # the old fixed default WOULD have merged them
+    r_fixed = reconcile_series(ff, lf, tol=0.25)
+    assert len({round(t["position"], 2) for t in r_fixed["tracked_features"]}) < 3
+
+
+def test_regime_and_crossover_knobs_exposed():
+    ffr, lfr = _nmr_titration()
+    # knobs must be accepted and affect the split/threshold without error
+    r = reconcile_series(ffr, lfr, regime_window_frac=0.15, crossover_threshold=0.4)
+    assert r["low_regime_label"] == "reactant"
+    assert r["transition_profile"] is not None
 
 
 def test_multiregime_model_is_a_named_seam():

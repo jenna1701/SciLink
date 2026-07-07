@@ -102,7 +102,7 @@ The skill ships five tools the analysis script chains together:
   lattice needs profile/intensity analysis (`xrd_profile`), not tracking.
 - `reconcile_series_phases` — **couple profile fitting with identification**
   over an in-situ series. Profile fitting (the `xrd_profile` skill) gives
-  model-free, database-INDEPENDENT peak-evolution trends (positions/widths/
+  database-INDEPENDENT peak-evolution trends (positions/widths/
   areas, the transition); identification gives phase names where a database
   allows. This tool JOINS them: it attributes the peak-evolution trends to
   the identified phases and cross-checks the transition temperature the two
@@ -614,7 +614,7 @@ triage step; the robust tier is the identification.
 
 **In-situ / series — profile fitting and identification are two passes,
 reconciled.** The richest in-situ analysis runs BOTH: profile fitting (the
-`xrd_profile` skill — `fit_pattern` per frame) for the model-free
+`xrd_profile` skill — `fit_pattern` per frame) for the database-independent
 structural evolution (peak positions → thermal expansion, widths →
 crystallite size/strain, areas → phase-fraction proxy, and the transition
 from peak appearance/shift), and identification (this skill) for the phase

@@ -6,8 +6,9 @@ questions and depend on different things:
 
 * **Profile fitting** (the ``xrd_profile`` skill) answers HOW the structure
   evolves — per-frame peak positions, widths, and areas, and the transition
-  read from peak appearance/disappearance/shift. Model-free and
-  database-INDEPENDENT: it works even when the phase is in no database.
+  read from peak appearance/disappearance/shift. It fits a lineshape model
+  but is database-INDEPENDENT: it needs no reference and works even when the
+  phase is in no database.
 * **Identification** (this ``xrd`` skill) answers WHICH phases — but only
   where a reference exists in a database.
 
@@ -43,7 +44,7 @@ TOOL_SPEC = ToolSpec(
         "Couple an in-situ PROFILE-FIT series (per-frame peak positions/areas, "
         "from xrd_profile fit_pattern) with an IDENTIFICATION series (per-frame "
         "phase, from search_match_pattern / identify_mixture) over the SAME "
-        "frames: attribute the model-free peak-evolution trends to the "
+        "frames: attribute the profile-fit peak-evolution trends to the "
         "identified phases and CROSS-CHECK the transition temperature the two "
         "methods find independently. The pragmatic 'profile + identification "
         "together' for a series — profile answers HOW the structure evolves "
@@ -56,14 +57,17 @@ TOOL_SPEC = ToolSpec(
                  "import reconcile_series_phases"),
     signature=(
         "reconcile_series_phases(frames, phase_ids, tol_deg=0.25, "
-        "min_presence_frac=0.2, agreement_deg=15.0, output_figure=None) -> dict"
+        "min_presence_frac=0.2, agreement_deg=15.0, regime_window_frac=0.33, "
+        "crossover_threshold=0.5, output_figure=None) -> dict"
     ),
     parameters={
         "frames": {"type": "list[dict]", "description": "Per-frame profile-fit output in series order: [{'value': <T or time>, 'peaks': [{'center': deg, 'area': float}, ...]}]. 'peaks' is each frame's fitted peak list (fit_pattern / fit_profile parameters). 'value' is the series variable (temperature/time)."},
         "phase_ids": {"type": "list[dict]", "description": "Per-frame identification output, aligned with frames (same order/length): [{'value': <T>, 'phase': <formula or name, or null if not identified>, 'figure_of_merit': <float, optional>}]. Frames where identification declined carry phase=null (they stay 'unidentified' in the labeling)."},
         "tol_deg": {"type": "float", "description": "Position tolerance (2θ°) for tracking a peak across frames and for clustering peaks into reflections (default 0.25). RAISE for peaks that shift a lot with T (thermal expansion) or noisier centers; LOWER for sharp well-calibrated data."},
         "min_presence_frac": {"type": "float", "description": "A tracked reflection is kept only if it appears in at least this fraction of frames (default 0.2) — filters transient noise peaks. RAISE to keep only persistent reflections; LOWER to retain short-lived ones (a transient intermediate's peaks)."},
-        "agreement_deg": {"type": "float", "description": "Profile and identification transition estimates within this many series-units are called 'consistent' (default 15). A larger gap is flagged DIVERGENT (investigate: mis-tracked peaks, a mid-series false ID, or a genuine two-step process the single-crossover model misses)."},
+        "agreement_deg": {"type": "float", "description": "Profile and identification transition estimates within this many series-VARIABLE units (°C, time) are called 'consistent' (default 15). RAISE for a slow ramp / coarse frame spacing; LOWER for a fine scan. A larger gap is flagged DIVERGENT (investigate: mis-tracked peaks, a mid-series false ID, or a genuine two-step process the single-crossover model misses)."},
+        "regime_window_frac": {"type": "float", "description": "Fraction of frames at EACH end used to classify which reflections belong to the start- vs end-phase family (default 0.33 = first/last third). LOWER (e.g. 0.15) when the endpoint frames are pure; RAISE toward 0.5 for a gradual transformation whose extremes barely differ."},
+        "crossover_threshold": {"type": "float", "description": "End-phase area-share level that defines the transition (default 0.5 = ~50% conversion). Change only to mark the transition at a different conversion fraction."},
         "output_figure": {"type": "str", "description": "Optional path to save the reconciled figure (phase-labeled peak-area evolution + both transition estimates). None skips plotting."},
     },
     required=["frames", "phase_ids"],
@@ -86,7 +90,7 @@ TOOL_SPEC = ToolSpec(
         "its establishing frames (xrd) — to produce the combined view: "
         "phase-labeled structural-evolution trends with a cross-validated "
         "transition. The recommended in-situ deliverable when both a database "
-        "match and model-free trends are wanted."
+        "match and database-independent profile-fit trends are wanted."
     ),
 )
 
@@ -107,6 +111,8 @@ def reconcile_series_phases(
     tol_deg: float = 0.25,
     min_presence_frac: float = 0.2,
     agreement_deg: float = 15.0,
+    regime_window_frac: float = 0.33,
+    crossover_threshold: float = 0.5,
     output_figure: Optional[str] = None,
 ) -> dict[str, Any]:
     """Join a profile-fit series with an identification series. See ``TOOL_SPEC``.
@@ -115,7 +121,7 @@ def reconcile_series_phases(
     ``scilink.skills._shared._reconcile``: maps 2θ peaks → features and
     phases → labels, adds the XRD figure and vocabulary. The tracking /
     regime-split / attribution / transition-cross-check math is the shared
-    core, reused by any spectroscopy that has a model-free and an
+    core, reused by any spectroscopy that has a profile-fitting and an
     identification pass over a series."""
     from ..._shared._reconcile import reconcile_series as _core
 
@@ -127,13 +133,15 @@ def reconcile_series_phases(
     label_frames = [{"value": p.get("value"), "label": p.get("phase")}
                     for p in phase_ids]
     r = _core(feature_frames, label_frames, tol=tol_deg,
-              min_presence_frac=min_presence_frac, agreement_units=agreement_deg)
+              min_presence_frac=min_presence_frac, agreement_units=agreement_deg,
+              regime_window_frac=regime_window_frac,
+              crossover_threshold=crossover_threshold)
 
     T = np.array(r["values"])
     weight = np.array(r["_weight"])
     low_t, high_t = np.array(r["_low_idx"], int), np.array(r["_high_idx"], int)
     lo_phase, hi_phase = r["low_regime_label"], r["high_regime_label"]
-    t_profile, t_id = r["transition_model_free"], r["transition_identification"]
+    t_profile, t_id = r["transition_profile"], r["transition_identification"]
 
     fig_path = None
     if output_figure:
@@ -161,7 +169,8 @@ def reconcile_series_phases(
         "agreement": agree,
         "figure": fig_path,
         "note": (
-            "profile trends are model-free (database-independent); the phase "
+            "profile-fit trends are database-independent (they fit peak "
+            "shapes but need no reference); the phase "
             "labels come from identification and are only as good as the "
             "database coverage. A null low/high phase means that regime's "
             "phase is NOT in the searched database (common for organics / "

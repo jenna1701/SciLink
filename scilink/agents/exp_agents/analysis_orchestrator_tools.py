@@ -3399,22 +3399,26 @@ class AnalysisOrchestratorTools:
         )
 
         # =====================================================================
-        # 10a2. RECONCILE SERIES — couple a model-free pass with an ID pass
+        # 10a2. RECONCILE SERIES — couple a profile-fitting pass with an ID pass
         # =====================================================================
-        def reconcile_series(model_free_analysis: int = None,
+        def reconcile_series(profile_analysis: int = None,
                              identification_analysis: int = None,
-                             model_free_id: str = None,
+                             profile_id: str = None,
                              identification_id: str = None,
-                             tol: float = 0.25) -> str:
+                             tol: float = None,
+                             regime_window_frac: float = 0.33,
+                             crossover_threshold: float = 0.5) -> str:
             """Reconcile two PRIOR series analyses of the same frames: a
-            model-free pass (profile/peak fitting — HOW the structure evolves,
-            database-independent) and an identification pass (WHICH phases).
-            Attributes the model-free feature-evolution trends to the
-            identified labels and cross-checks the transition the two find
-            independently. Technique-agnostic — works for any series where one
-            pass fits peaks and the other identifies. Reference each prior
-            analysis by index (position in history) or analysis_id."""
-            print("  ⚡ Tool: Reconciling model-free + identification series...")
+            profile-fitting pass (peak/line fitting — HOW the structure
+            evolves; fits a lineshape model but is database-independent, it
+            needs no reference) and an identification pass (WHICH phases, by
+            reference matching). Attributes the fitted feature-evolution
+            trends to the identified labels and cross-checks the transition
+            the two find independently. Technique-agnostic — works for any
+            series where one pass fits peaks and the other identifies.
+            Reference each prior analysis by index (position in history) or
+            analysis_id."""
+            print("  ⚡ Tool: Reconciling profile-fit + identification series...")
             from scilink.skills._shared._reconcile import reconcile_analysis_dirs
 
             def _find(idx, aid, role):
@@ -3431,15 +3435,18 @@ class AnalysisOrchestratorTools:
             if not self.orch.analysis_results:
                 return json.dumps({"status": "error",
                                    "message": "No analyses yet. Run the "
-                                   "model-free (profile) and identification "
-                                   "passes first, then reconcile."})
+                                   "profile-fitting and identification passes "
+                                   "first, then reconcile."})
             try:
-                mf = _find(model_free_analysis, model_free_id, "model_free")
+                prof = _find(profile_analysis, profile_id, "profile")
                 idr = _find(identification_analysis, identification_id, "identification")
                 fig = str(self.orch.results_dir / "reconciled_series.png")
                 r = reconcile_analysis_dirs(
-                    mf.get("output_directory"), idr.get("output_directory"),
-                    output_figure=fig, tol=float(tol))
+                    prof.get("output_directory"), idr.get("output_directory"),
+                    output_figure=fig,
+                    tol=(float(tol) if tol is not None else None),
+                    regime_window_frac=float(regime_window_frac),
+                    crossover_threshold=float(crossover_threshold))
                 r["status"] = "success"
                 return json.dumps(r, default=str)
             except Exception as e:
@@ -3450,12 +3457,12 @@ class AnalysisOrchestratorTools:
             name="reconcile_series",
             description=(
                 "Couple two PRIOR series analyses of the same frames — a "
-                "model-free pass (profile/peak fitting) and an identification "
+                "profile-fitting pass (peak/line fitting) and an identification "
                 "pass — into the combined view: phase/species-labeled "
                 "feature-evolution trends with a cross-validated transition. "
-                "Run BOTH passes first (run_analysis with the model-free skill, "
-                "then with the identification skill), then call this. The "
-                "model-free trends are database-independent (they work even "
+                "Run BOTH passes first (run_analysis with the profile-fitting "
+                "skill, then with the identification skill), then call this. "
+                "The fitted trends are database-independent (they work even "
                 "where identification cannot name a phase — organics, novel "
                 "products); a regime the ID pass could not name stays honestly "
                 "'unidentified'. Agreement of the two transitions is "
@@ -3463,11 +3470,13 @@ class AnalysisOrchestratorTools:
                 "by index or analysis_id."
             ),
             parameters={
-                "model_free_analysis": {"type": "integer", "description": "History index of the model-free (profile/peak-fit) pass."},
+                "profile_analysis": {"type": "integer", "description": "History index of the profile-fitting (peak/line-fit) pass."},
                 "identification_analysis": {"type": "integer", "description": "History index of the identification pass."},
-                "model_free_id": {"type": "string", "description": "analysis_id of the model-free pass (alternative to index)."},
+                "profile_id": {"type": "string", "description": "analysis_id of the profile-fitting pass (alternative to index)."},
                 "identification_id": {"type": "string", "description": "analysis_id of the identification pass (alternative to index)."},
-                "tol": {"type": "number", "description": "Feature-tracking position tolerance in the data's x-units (default 0.25). RAISE for features that drift a lot across the series."},
+                "tol": {"type": "number", "description": "Feature-tracking position tolerance in the data's x-units (2θ° / ppm / eV). Omit to auto-scale from the peak spacing (recommended — no technique-specific default). Set explicitly to RAISE for features that drift a lot across the series, or LOWER to keep close features apart."},
+                "regime_window_frac": {"type": "number", "description": "Fraction of frames at each end used to classify start- vs end-phase features (default 0.33). LOWER when endpoint frames are pure; RAISE toward 0.5 for a gradual transformation."},
+                "crossover_threshold": {"type": "number", "description": "End-phase weight-share level defining the transition (default 0.5 ≈ 50% conversion). Change only to mark a different conversion fraction."},
             },
             required=[]
         )

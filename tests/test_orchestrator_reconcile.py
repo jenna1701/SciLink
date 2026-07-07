@@ -2,7 +2,7 @@
 
 Drives the registered orchestrator tool against a minimal fake orchestrator
 whose analysis_results point at two synthetic series-analysis output dirs (a
-model-free/profile pass and an identification pass), proving the wiring:
+profile-fitting pass and an identification pass), proving the wiring:
 lookup by index/id -> extract from output dirs -> reconcile. Technique
 vocabulary is kept generic (not XRD) so this also exercises the shared core.
 """
@@ -69,7 +69,7 @@ def test_reconcile_by_index(two_runs, tmp_path):
     mf, idr = two_runs
     tools = _make_tools(tmp_path, mf, idr)
     out = json.loads(tools.functions_map["reconcile_series"](
-        model_free_analysis=0, identification_analysis=1))
+        profile_analysis=0, identification_analysis=1))
     assert out["status"] == "success"
     assert out["low_regime_label"] == "PhaseA"
     assert out["high_regime_label"] == "PhaseB"
@@ -81,7 +81,7 @@ def test_reconcile_by_id(two_runs, tmp_path):
     mf, idr = two_runs
     tools = _make_tools(tmp_path, mf, idr)
     out = json.loads(tools.functions_map["reconcile_series"](
-        model_free_id="prof-1", identification_id="id-1"))
+        profile_id="prof-1", identification_id="id-1"))
     assert out["status"] == "success"
     assert out["low_regime_label"] == "PhaseA"
 
@@ -89,8 +89,8 @@ def test_reconcile_by_id(two_runs, tmp_path):
 def test_reconcile_errors_gracefully(two_runs, tmp_path):
     mf, idr = two_runs
     tools = _make_tools(tmp_path, mf, idr)
-    # swapped: identification dir as the model-free pass -> no fitted peaks
+    # swapped: identification dir as the profile-fitting pass -> no fitted peaks
     out = json.loads(tools.functions_map["reconcile_series"](
-        model_free_analysis=1, identification_analysis=0))
+        profile_analysis=1, identification_analysis=0))
     assert out["status"] == "error"
     assert "peak" in out["message"].lower()
