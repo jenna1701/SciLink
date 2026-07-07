@@ -86,6 +86,21 @@ The skill ships five tools the analysis script chains together:
   confirmation leaves peaks unmatched, re-examine them (chemistry
   plausibility, targeted `score_xrd_match_robust` against a suspected
   phase) before reporting.
+- `quantify_phases_nnls` — **fast quantitative fractions** over a candidate
+  SHORTLIST by non-negative least squares. Fits the continuous pattern as
+  `y ≈ Σ cᵢ·patternᵢ`, `cᵢ ≥ 0`, so overlapping reflections are deconvolved in
+  ONE joint fit — the complement to `identify_mixture`'s greedy peel-and-
+  subtract. The light rung of the quantification ladder: `identify_mixture`
+  (WHICH phases) → `quantify_phases_nnls` (fast fractions, screening) →
+  `refine_rietveld_multiphase` (rigorous QPA with esds). Run it on the handful
+  of candidates `identify_mixture` confirmed (its `structure_path`s), NOT the
+  whole library. Returns per-phase `intensity_fraction` (a screening share,
+  like `intensity_share` but from a joint fit) plus a ZMV-corrected
+  `weight_fraction_est` (approximate — escalate to Rietveld for real QPA). NNLS
+  always returns *some* combination, so the tool checks the worst unexplained
+  residual against the noise and returns `reliable=False` when a phase is
+  missing / off-database (organics, novel products) — treat the fractions as
+  untrustworthy and add candidates or run `index_pattern` on the residual first.
 - `track_phase_series` — **in-situ / operando series tracking**. After the
   series' establishing frames are identified, one call runs a joint multi-phase MILP
   per frame against that fixed endmember set → per-frame phase shares,
