@@ -310,11 +310,24 @@ containing two elements with NO compound name (e.g. `["Si", "Ge"]`
 with note "suspected mixture" — the elements are distinct phases, not
 a compound). Blind (no chemistry): `identify_mixture` does the whole
 loop — candidate discovery, subtraction, joint confirmation — in one
-call. **When the objective asks for QUANTITATIVE weight fractions, the
-scorer is not the deliverable: once the phase set is confirmed (or given
-up front), run `refine_rietveld_multiphase` on the phases' structures —
-scorer coverages and RIR-style proxies are screening estimates, not
-quantification.** Choose each phase's structure by scoring candidate
+call. **When the objective asks HOW MUCH — quantitative fractions, "what
+proportion", or "screen which of these N candidates are present and in what
+amount" — quantification is a DISTINCT planned step (the scorer coverages /
+RIR proxies are only screening estimates). This decomposition step IS a fit
+— it is the one exception to the pattern-MATCHING-not-fitting framing above,
+which governs the identification stages only. Route it by cost:**
+- **FIRST `quantify_phases_nnls`** over the candidate CIF shortlist — a
+  fixed-library non-negative decomposition that fits ALL candidates against
+  the observed pattern at once, so absent candidates fall to ~0 weight and the
+  present ones get fractions in a single fast solve. This is the right first
+  pass for a many-candidate screen or per-frame series quantification, and it
+  returns `reliable=False` when a phase is missing / off-database (it does not
+  fabricate fractions). Plan it the moment the task supplies several candidate
+  structures and asks which are present / in what amount.
+- **THEN escalate to `refine_rietveld_multiphase`** for rigorous weight
+  fractions with esds, on the confirmed small (2–3) phase set NNLS screened in.
+- **Never force single-phase Rietveld on a mixture** — it collapses all
+  intensity into one phase and reports a fake 100 %. Choose each phase's structure by scoring candidate
 simulations against THAT phase's own matched peaks (within-phase relative
 intensities are fraction-independent) — never against the whole mixture,
 where a weak-scattering phase's candidates all look bad — and REQUIRE the
