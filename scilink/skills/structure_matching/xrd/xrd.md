@@ -646,6 +646,34 @@ corroboration; divergence is a flag to investigate. Identification alone
 (the establishing-frames workflow below) is the right lighter pass when you
 only need "which phases, how much" and the phases are known.
 
+**Quantifying "how much" — the fraction ladder.** Once `identify_mixture` (or a
+search-match shortlist) has given you the candidate phases, route the
+quantification by cost, and NEVER force a single-phase fit on a mixture (it
+collapses all intensity into one phase and reports a fake 100 %):
+1. `quantify_phases_nnls` — the FIRST-choice fast quantifier. Fits the whole
+   pattern as a non-negative sum of ALL candidate patterns at once, so absent
+   candidates fall to ~0 weight and the present ones get fractions in one solve.
+   Use it for a fast screen over MANY candidates, for per-frame series
+   quantification (Rietveld per frame is too slow), or any "roughly how much of
+   each" answer. It returns `reliable=False` when a phase is missing — honest.
+   This is the right tool the moment the task says *fractions / how much / screen
+   which of these are present* over more than one candidate. CALL THE TOOL — do
+   NOT hand-roll `scipy.optimize.nnls`; the tool builds the design matrix
+   (simulated + broadened patterns), handles background, returns weight-fraction
+   estimates, and does the missing-phase abstention you would otherwise skip:
+   ```python
+   from scilink.skills.structure_matching.xrd.quantify_nnls import quantify_phases_nnls
+   q = quantify_phases_nnls(two_theta, intensity, candidate_cif_paths,
+                            wavelength=lam, fwhm_deg=0.15, background='snip')
+   # q['phases']   -> [{'structure_path', 'intensity_fraction', 'weight_fraction_est'}, ...]
+   # q['reliable'] -> False when the candidates can't explain the pattern
+   #                  (a phase missing / off-database) -> report that, DON'T fake fractions.
+   ```
+2. `refine_rietveld_multiphase` — escalate to this only for RIGOROUS weight
+   fractions with esds on a small CONFIRMED phase set (typically 2–3 phases NNLS
+   already screened in). Do not run it as the first pass over a long candidate
+   list, and do not run single-phase Rietveld to "quantify" a mixture.
+
 **In-situ / series — identify at ESTABLISHING frames, then track.** A
 series is not N independent identifications. Identify each phase where it
 is PUREST, then score every frame against that fixed endmember set. For a
