@@ -338,7 +338,7 @@ def reconcile_analysis_dirs(profile_dir: str, identification_dir: str,
                          crossover_threshold=crossover_threshold)
     if output_figure:
         try:
-            _plot_generic(r, output_figure)
+            _plot_generic(r, output_figure, series_variable=series_variable)
             r["figure"] = output_figure
         except Exception:
             r["figure"] = None
@@ -483,11 +483,14 @@ single-crossover model does not capture. Transition detection uses the
     return out_html
 
 
-def _plot_generic(r, path):
+def _plot_generic(r, path, series_variable: str = None):
     import numpy as _np
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    # Label the x-axis with the actual series variable when the caller knows it
+    # (temperature / time / pH), else fall back to the generic term.
+    xlabel = series_variable or r.get("series_variable") or "series variable"
     V = _np.array(r["values"]); w = _np.array(r["_weight"])
     low, high = r["_low_idx"], r["_high_idx"]
     fig, ax = plt.subplots(2, 1, figsize=(11, 9), sharex=True,
@@ -512,6 +515,6 @@ def _plot_generic(r, path):
     if r["transition_identification"] is not None:
         ax[1].axvline(r["transition_identification"], color="tab:green", ls=":",
                       label=f"identification transition ≈ {r['transition_identification']:.3g}")
-    ax[1].set_xlabel("series variable"); ax[1].set_ylabel("weight share")
+    ax[1].set_xlabel(xlabel); ax[1].set_ylabel("weight share")
     ax[1].legend(fontsize=9)
     fig.tight_layout(); fig.savefig(path, dpi=150); plt.close(fig)
