@@ -3260,8 +3260,12 @@ Your guidance: '''
                 # the saved fit is genuinely better than the script claimed. A
                 # *lower* recompute is left alone: it usually means a deliberate
                 # windowed/partial fit, where the script's own (windowed) number
-                # is the meaningful one. None (length mismatch / no signal) also
-                # keeps the self-report.
+                # is the meaningful one — but it can ALSO mean space-broken saved
+                # artifacts (e.g. a peaks-only fit saved against raw data after a
+                # baseline subtraction); the skills' output-space contract is the
+                # guard for that case, since this heuristic cannot distinguish
+                # the two. None (length mismatch / no signal) also keeps the
+                # self-report.
                 recomputed_r2 = _canonical_r2(yy, fit_arr)
                 self_r2 = fit_quality.get("r_squared")
                 if recomputed_r2 is not None:

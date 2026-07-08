@@ -54,7 +54,8 @@ with a matching-space fit, or raw data with a fit that includes the
 baseline term). Mixed spaces make the fit appear offset from the data and
 invalidate the reported R². **The reported R² must be computed from exactly
 the arrays you save** — any stricter alternative metric is reported
-separately, clearly labeled.
+separately, clearly labeled (a user-requested fit window is the exception:
+report the windowed R², labeled as windowed).
 
 **Asymmetric bands.** A dispersive (S-shaped) residual across a single
 band that persists after a symmetric refit indicates real asymmetry

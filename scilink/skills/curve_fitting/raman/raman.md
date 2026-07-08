@@ -90,9 +90,11 @@ reported R² disagrees with R² recomputed from the saved arrays.
 
 **The reported R² MUST be computed from exactly the two arrays you save**
 (the saved data array vs the saved fit array) — not from the corrected
-signal, not from a fit window, not from any intermediate. If you also want
-a stricter corrected-space or peak-region metric, report it as a separate,
-clearly-labeled number; the primary R² is the saved-array one.
+signal, not from any intermediate. If you also want a stricter
+corrected-space or peak-region metric, report it as a separate,
+clearly-labeled number; the primary R² is the saved-array one. The one
+exception: when the user explicitly requested a fit window, the windowed
+R² is the meaningful primary metric — report it labeled as windowed.
 
 **The model must explain the peaks, not the ramp.** After fitting, check
 where the model's variance lives: if the fitted curve with all peak
