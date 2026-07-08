@@ -356,8 +356,8 @@ def lattice_discontinuity_map(image, pixel_size_nm=None, params=None):
         ax[1, 1].plot(*b["centroid_px"], "c+", ms=14, mew=2)
     ax[1, 1].set_title(f"Boundary overlay (frac={boundary_fraction:.2f})\n{note[:60]}")
     ax[1, 1].axis("off")
-    plt.tight_layout()
-    buf = io.BytesIO(); plt.savefig(buf, format="png", dpi=120); plt.close(fig)
+    fig.tight_layout()
+    buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=120); plt.close(fig)
 
     metrics = {
         "boundary_fraction": round(boundary_fraction, 3),

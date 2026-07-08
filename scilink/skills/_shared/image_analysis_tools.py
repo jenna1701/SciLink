@@ -253,9 +253,9 @@ def image_to_thumbnail_bytes(
             axes[c].imshow(np.nan_to_num(ch, nan=0), cmap="gray", aspect="equal")
             axes[c].set_title(f"Channel {c}", fontsize=10)
             axes[c].axis("off")
-        plt.tight_layout()
+        fig.tight_layout()
         buf = BytesIO()
-        plt.savefig(buf, format="jpeg", dpi=150, bbox_inches="tight")
+        fig.savefig(buf, format="jpeg", dpi=150, bbox_inches="tight")
         plt.close(fig)
         buf.seek(0)
         return buf.getvalue()
@@ -347,9 +347,9 @@ def create_image_montage(
     for i in range(n, len(axes)):
         axes[i].axis("off")
 
-    plt.tight_layout()
+    fig.tight_layout()
     buf = BytesIO()
-    plt.savefig(buf, format="jpeg", dpi=150, bbox_inches="tight")
+    fig.savefig(buf, format="jpeg", dpi=150, bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
     return buf.getvalue()
