@@ -3329,6 +3329,13 @@ class AnalysisOrchestratorTools:
                 
                 # Get the stored analysis result
                 full_result = record.get("full_result")
+                # Prefer the latest literature-refined interpretation when one
+                # exists (refine_interpretation, issue #323) — append-only on
+                # the record, so swap into a copy rather than mutating.
+                revisions = record.get("interpretation_revisions") or []
+                if full_result is not None and revisions:
+                    full_result = dict(full_result)
+                    full_result["detailed_analysis"] = revisions[-1]["revised_analysis"]
                 if full_result is None:
                     return json.dumps({
                         "status": "error",
@@ -3674,6 +3681,190 @@ class AnalysisOrchestratorTools:
                 }
             },
             required=["query"]
+        )
+
+
+        # =====================================================================
+        # REFINE INTERPRETATION (issue #323 — Channel B, curve fitting v1)
+        # =====================================================================
+        def refine_interpretation(analysis_id: str = None, analysis_index: int = -1,
+                                  focus: str = None) -> str:
+            """
+            Post-analysis, feature-conditioned literature refinement (Channel B).
+            Searches the literature FROM the fitted features (peak positions,
+            trends) of a completed analysis and revises its interpretation
+            against what is published. Append-only: the original interpretation
+            is preserved; revisions accumulate on the analysis record.
+            """
+            print(f"  ⚡ Tool: Refining interpretation against feature-conditioned literature...")
+
+            if not self.orch.futurehouse_api_key:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No FutureHouse/Edison API Key provided in Orchestrator initialization."
+                })
+
+            # 1. Retrieve the analysis record (same contract as assess_novelty).
+            record = None
+            record_index = None
+            if analysis_id:
+                for i, r in enumerate(self.orch.analysis_results):
+                    if r.get("analysis_id") == analysis_id:
+                        record, record_index = r, i
+                        break
+                if record is None:
+                    return json.dumps({"status": "error",
+                                       "message": f"Analysis ID not found: {analysis_id}"})
+            else:
+                if not self.orch.analysis_results:
+                    return json.dumps({"status": "error",
+                                       "message": "No analysis history available."})
+                record_index = (analysis_index if analysis_index >= 0
+                                else len(self.orch.analysis_results) + analysis_index)
+                record = self.orch.analysis_results[record_index]
+
+            full_result = record.get("full_result") or {}
+            detailed = (full_result.get("detailed_analysis")
+                        or full_result.get("full_analysis") or "")
+            if not detailed.strip():
+                return json.dumps({"status": "error",
+                                   "message": "Analysis record has no interpretation text to refine."})
+
+            # 2. Surface the measured features (curve modality).
+            # Series runs are trend-conditioned: once a parameter trend exists,
+            # static per-spectrum peaks barely matter (issue #323 §5.2).
+            features = {}
+            for key in ("model_type", "fit_quality"):
+                if full_result.get(key):
+                    features[key] = full_result[key]
+            trends = full_result.get("parameter_trends")
+            if trends:
+                features["parameter_trends"] = trends
+                if full_result.get("flagged_spectra_analysis"):
+                    features["flagged_spectra_analysis"] = full_result["flagged_spectra_analysis"]
+                locked = (full_result.get("summary") or {}).get("locked_model") if isinstance(full_result.get("summary"), dict) else None
+                if locked:
+                    features["locked_model"] = locked
+            elif full_result.get("fitting_parameters"):
+                features["fitting_parameters"] = full_result["fitting_parameters"]
+            if not features:
+                return json.dumps({"status": "error",
+                                   "message": "No fitted features surfaced on this record — nothing to condition the search on."})
+            features_text = json.dumps(features, default=str)[:4000]
+
+            # 3. Feature → query builder: an LLM micro-call, because feature
+            # MEANING is technique-dependent (peaks at 1349/1582 cm^-1 only
+            # read as D/G bands with domain context). Falls back to a plain
+            # template on any failure.
+            focus_line = f"\nUser focus: {focus}" if focus else ""
+            builder_prompt = (
+                "You are building ONE focused scientific-literature search query.\n"
+                "A spectral/curve fit produced these measured features:\n"
+                f"{features_text}\n"
+                f"Experimental context: {json.dumps(getattr(self.orch, 'current_metadata', None) or {}, default=str)[:800]}"
+                f"{focus_line}\n\n"
+                "Write a single natural-language query (<= 40 words) that asks what "
+                "materials/phases/processes are reported for these SPECIFIC measured "
+                "features (positions, widths, trends) — not a generic method query. "
+                "Return ONLY the query text."
+            )
+            try:
+                q_resp = self.orch.model.generate_content(contents=[builder_prompt])
+                query = (q_resp.text or "").strip().strip('"')
+                assert 10 < len(query) < 400
+            except Exception:
+                query = f"Interpretation of measured features: {features_text[:200]}"
+            print(f"  🔍 Feature-conditioned query: {query[:100]}")
+
+            # 4. Literature search (CROW backend — "what is reported for these
+            # features", not the novelty question).
+            try:
+                lit_agent = FittingModelLiteratureAgent(
+                    api_key=self.orch.futurehouse_api_key, max_wait_time=3000
+                )
+                result = lit_agent.query_for_models(query)
+            except Exception as e:
+                logging.error(f"refine_interpretation literature error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+            if result.get("status") != "success":
+                return json.dumps({"status": result.get("status", "error"),
+                                   "message": result.get("message", "Literature search did not succeed")})
+            content = result.get("formatted_answer", "") or ""
+
+            # Persist the search output (inspectable, same shape as search_literature).
+            query_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:8]
+            lit_path = self.orch.base_dir / f"interpretation_lit_{query_hash}.md"
+            with open(lit_path, "w") as f:
+                f.write(f"# Feature-Conditioned Literature (Channel B)\n\n"
+                        f"**Analysis:** {record.get('analysis_id')}\n"
+                        f"**Query:** {query}\n\n{content}")
+
+            # 5. Tier-A refinement: text-in/text-out — revise the existing
+            # interpretation against the literature. No pixel/state re-invoke.
+            refine_prompt = (
+                "You are revising the interpretation of a completed analysis "
+                "against literature that was searched from its MEASURED features.\n\n"
+                f"## Current interpretation\n{detailed[:6000]}\n\n"
+                f"## Measured features\n{features_text}\n\n"
+                f"## Feature-conditioned literature\n{content[:8000]}\n\n"
+                "Rewrite the interpretation: keep every conclusion the data still "
+                "supports, revise or qualify what the literature contradicts, and "
+                "add what it newly explains (cite the literature inline where used). "
+                "Where the literature identifies the material/phase from these "
+                "features, say so explicitly. Do not soften data-supported "
+                "conclusions merely because the literature is silent. Return ONLY "
+                "the revised interpretation text."
+            )
+            try:
+                r_resp = self.orch.model.generate_content(contents=[refine_prompt])
+                revised = (r_resp.text or "").strip()
+                if not revised:
+                    raise ValueError("empty refinement")
+            except Exception as e:
+                return json.dumps({"status": "error",
+                                   "message": f"Literature saved to {lit_path} but refinement failed: {e}"})
+
+            # 6. Append-only storage (mirrors novelty_assessment attach).
+            revision = {
+                "timestamp": datetime.now().isoformat(),
+                "query": query,
+                "literature_file": str(lit_path),
+                "revised_analysis": revised,
+            }
+            self.orch.analysis_results[record_index].setdefault(
+                "interpretation_revisions", []).append(revision)
+
+            print(f"  ✅ Interpretation refined ({len(revised)} chars). Literature: {lit_path.name}")
+            return json.dumps({
+                "status": "success",
+                "analysis_id": record.get("analysis_id"),
+                "query": query,
+                "literature_file": str(lit_path),
+                "revised_interpretation_preview": revised[:600],
+                "note": "Original interpretation preserved; revision appended to the record."
+            })
+
+        self._register_tool(
+            func=refine_interpretation,
+            name="refine_interpretation",
+            description=(
+                "Refine a completed analysis's interpretation against literature searched "
+                "from its FITTED features (peak positions/widths, parameter trends) — the "
+                "post-fit counterpart of search_literature. Call AFTER run_analysis when the "
+                "interpretation would materially benefit from published context. Strongly "
+                "recommended after identification-mode runs (they are literature-free in-run; "
+                "this step is what identifies the material from the fitted bands). Append-only: "
+                "the original interpretation is preserved."
+            ),
+            parameters={
+                "analysis_id": {"type": "string",
+                                "description": "ID of the completed analysis (default: most recent)."},
+                "analysis_index": {"type": "integer",
+                                   "description": "Alternative: index into the analysis history (default -1, most recent)."},
+                "focus": {"type": "string",
+                          "description": "Optional steer for the literature query (e.g., 'candidate phases for the 742 cm-1 band')."},
+            },
+            required=[]
         )
 
         # =====================================================================

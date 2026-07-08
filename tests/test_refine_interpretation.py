@@ -1,0 +1,78 @@
+"""Offline tests for issue #323 Channel B (curve-fitting scope).
+
+Covers the two load-bearing behaviors that need no API key:
+- the ID-mode literature gates in the curve-fitting controllers (D2), and
+- `refine_interpretation` registration + record plumbing (revision storage,
+  get_recommendations preferring the latest revision) via source inspection
+  and a stubbed orchestrator.
+"""
+
+import json
+import re
+from pathlib import Path
+
+import scilink.agents.exp_agents.controllers.curve_fitting_controllers as cc
+import scilink.agents.exp_agents.analysis_orchestrator_tools as tools_mod
+
+CTRL_SRC = Path(cc.__file__).read_text()
+TOOLS_SRC = Path(tools_mod.__file__).read_text()
+
+
+class TestIdModeLiteratureGates:
+    def test_all_literature_context_consumers_are_id_gated(self):
+        # Every site that injects literature_context into a prompt/context
+        # must carry the identification-mode gate (D2). Reads of the field
+        # for provenance/reporting are exempt.
+        lines = CTRL_SRC.split("\n")
+        injectors = [
+            i for i, l in enumerate(lines)
+            if re.search(r'if state\.get\("literature_context"\)', l)
+            # injection sites feed the value into a prompt/context on the next
+            # line; the in-pipeline search controller's skip guard does not
+            and re.search(r"append|extend", lines[i + 1])
+        ]
+        assert len(injectors) == 4, "expected planner x2 + script-gen + synthesis sites"
+        for i in injectors:
+            assert 'task_mode") != "identification"' in lines[i], (
+                f"ungated literature injection at line {i + 1}: {lines[i].strip()}"
+            )
+
+    def test_agent_docstring_no_longer_claims_stage2_consumption(self):
+        import scilink.agents.exp_agents.curve_fitting_agent as agent_mod
+        src = Path(agent_mod.__file__).read_text()
+        assert "Stage-2 candidate enumeration still consumes it" not in src
+
+
+class TestRefineInterpretationPlumbing:
+    def test_tool_is_registered(self):
+        assert 'name="refine_interpretation"' in TOOLS_SRC
+
+    def test_storage_is_append_only(self):
+        assert 'setdefault(\n                "interpretation_revisions", []).append' in TOOLS_SRC
+
+    def test_get_recommendations_prefers_latest_revision(self):
+        idx = TOOLS_SRC.index("def get_recommendations")
+        body = TOOLS_SRC[idx: idx + 4000]
+        assert "interpretation_revisions" in body
+        assert 'revisions[-1]["revised_analysis"]' in body
+
+    def test_series_features_are_trend_conditioned(self):
+        idx = TOOLS_SRC.index("def refine_interpretation")
+        body = TOOLS_SRC[idx: TOOLS_SRC.index("def assess_novelty")]
+        # series: trends preferred; single: fitting_parameters fallback
+        assert "parameter_trends" in body
+        assert "fitting_parameters" in body
+        assert body.index("parameter_trends") < body.index('elif full_result.get("fitting_parameters")')
+
+
+class TestOrchestratorSurface:
+    def test_followups_suggest_refinement(self):
+        import scilink.agents.exp_agents.analysis_orchestrator as orch_mod
+        src = Path(orch_mod.__file__).read_text()
+        assert "refine_interpretation" in src
+        assert "interpretation_revisions" in src
+
+    def test_id_mode_exception_in_both_literature_offers(self):
+        import scilink.agents.exp_agents.analysis_orchestrator as orch_mod
+        src = Path(orch_mod.__file__).read_text()
+        assert src.count("refine_interpretation") >= 3  # copilot + autonomous offers + followup

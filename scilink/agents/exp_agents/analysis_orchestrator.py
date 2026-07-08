@@ -396,6 +396,10 @@ answer — do NOT call `run_analysis` in the same turn as the question.
 - On no: call `run_analysis` normally.
 - Ask once per dataset; do not re-offer on follow-up `run_analysis` calls
   for the same data.
+- EXCEPTION — identification-mode runs (`task_mode="identification"`): do NOT
+  offer or run a pre-fit search; the fit must stay literature-blind. After the
+  fit completes, call `refine_interpretation` instead — it searches from the
+  fitted features.
 
 {_LIT_TOOL_BLURB}
 """
@@ -410,6 +414,10 @@ interpretation). If so, call `search_literature(query=...)` and pass the
 returned `file_path` to `run_analysis` as `literature_file`; otherwise call
 `run_analysis` directly. Do NOT ask the user — decide from the data and
 objective. Decide once per dataset.
+EXCEPTION — identification-mode runs (`task_mode="identification"`): never
+pre-fit-search; the fit must stay literature-blind. Call
+`refine_interpretation` after the fit instead — it searches from the fitted
+features, which is what finally identifies the material.
 
 {_LIT_TOOL_BLURB}
 """
@@ -1451,6 +1459,17 @@ class AnalysisOrchestratorAgent:
                 suggested_followups.append(
                     f"Assess novelty / get recommendations for analysis "
                     f"{rec.get('analysis_id')}."
+                )
+        # A successful analysis whose interpretation has not been literature-
+        # refined yet is the other natural follow-up: `refine_interpretation`
+        # searches from the FITTED features (issue #323 Channel B). Strongest
+        # prior for identification-mode runs, which are literature-free in-run.
+        for rec in new_analyses:
+            if rec.get("status") == "success" and not rec.get("interpretation_revisions"):
+                suggested_followups.append(
+                    f"Refine interpretation of analysis {rec.get('analysis_id')} "
+                    f"against literature searched from its fitted features "
+                    f"(refine_interpretation)."
                 )
 
         warnings: List[str] = []
