@@ -397,7 +397,9 @@ answer — do NOT call `run_analysis` in the same turn as the question.
 - Ask once per dataset; do not re-offer on follow-up `run_analysis` calls
   for the same data.
 - EXCEPTION — identification-mode runs (`task_mode="identification"`): do NOT
-  offer or run a pre-fit search; the fit must stay literature-blind. After the
+  offer or run a pre-fit search; the fit must stay literature-blind. An
+  unknown-identity sample belongs in identification mode even when its
+  elements are known. After the
   fit completes, call `refine_interpretation` instead — it searches from the
   fitted features.
 
@@ -415,7 +417,8 @@ returned `file_path` to `run_analysis` as `literature_file`; otherwise call
 `run_analysis` directly. Do NOT ask the user — decide from the data and
 objective. Decide once per dataset.
 EXCEPTION — identification-mode runs (`task_mode="identification"`): never
-pre-fit-search; the fit must stay literature-blind. Call
+pre-fit-search; the fit must stay literature-blind. An unknown-identity
+sample belongs in identification mode even when its elements are known. Call
 `refine_interpretation` after the fit instead — it searches from the fitted
 features, which is what finally identifies the material.
 
