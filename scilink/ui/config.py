@@ -15,6 +15,12 @@ MODEL_OPTIONS = [
     # the ``us.`` prefix. For EU/JP/AU keys swap the prefix:
     # ``eu.``/``jp.``/``au.``. (Base model ID: anthropic.claude-opus-4-8.)
     "bedrock/us.anthropic.claude-opus-4-8",
+    # Claude Sonnet 5 on Bedrock, same US inference-profile convention. Faster
+    # per call and cheaper per token than Opus 4.8; on the curve-fitting
+    # benchmarks it matches Opus on skill-protocol compliance but hedges more
+    # on judgment calls and converges slower end-to-end — a cost/latency
+    # option, not the default.
+    "bedrock/us.anthropic.claude-sonnet-5",
 ]
 
 EMBEDDING_MODEL_OPTIONS = [
