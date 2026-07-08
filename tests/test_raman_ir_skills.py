@@ -50,3 +50,12 @@ def test_ir_carries_orientation_and_range_rules():
     skill = load_skill("ir")
     assert "transmittance" in skill["overview"].lower()
     assert "full measured range" in skill["planning"].lower()
+
+
+def test_both_skills_pin_the_output_space_contract():
+    # A peaks-only fit saved against raw data after baseline subtraction
+    # breaks verification (fit offset by the whole continuum) and makes
+    # self-reported R² disagree with R² recomputed from saved arrays.
+    for name in ("raman", "ir"):
+        impl = load_skill(name)["implementation"].lower()
+        assert "one consistent space" in impl, name
