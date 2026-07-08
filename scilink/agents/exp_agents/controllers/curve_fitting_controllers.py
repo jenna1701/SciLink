@@ -1786,9 +1786,19 @@ class GenerateCurveFittingReportController:
 # UNIFIED CONTROLLERS (for series analysis support)
 # ============================================================================
 
-class HumanFeedbackRefinementController:
+class CurveFittingPlanningController:
     """
-    Facilitates human-in-the-loop parameter refinement for the first spectrum.
+    Plans the fitting analysis for the first spectrum: drafts the plan (one
+    large model call over the plot + metadata + skill guidance), validates it
+    against the data and any mandatory skill rules (revising if needed), and
+    optionally runs a human-in-the-loop refinement gate before locking.
+
+    Renamed from ``HumanFeedbackRefinementController`` (kept as an alias) —
+    the old name described only the optional gate, not the planning work
+    that dominates the step.
+
+    Original description: facilitates human-in-the-loop parameter refinement
+    for the first spectrum.
     
     Works identically for single spectra and series:
     - Single spectrum: Refine fitting, then process that one spectrum
@@ -1940,6 +1950,10 @@ class HumanFeedbackRefinementController:
         )
 
     def _plan_analysis(self, state: dict) -> dict:
+        self.logger.info(
+            "  ⏳ Drafting fitting plan — one large model call over the plot, "
+            "statistics and domain guidance (typically ~1 min; longer for "
+            "crowded spectra)...")
         prompt = [
             self.instructions,
             "\n## Data Plot",
@@ -2070,6 +2084,7 @@ class HumanFeedbackRefinementController:
         _append_structure_zoom(prompt_parts, state)
 
         try:
+            self.logger.info("  ⏳ Validating plan against the data and skill rules (second model call)...")
             response = self.model.generate_content(
                 prompt_parts, generation_config=self.generation_config,
             )
@@ -2524,6 +2539,10 @@ def _write_series_fit_results(output_dir, state, series_results, quality_setting
         json.dump(payload, f, indent=2, default=str)
     return str(results_path)
 
+
+
+# Backwards-compatible alias (pre-rename import path).
+HumanFeedbackRefinementController = CurveFittingPlanningController
 
 class UnifiedSeriesProcessingController:
     """
