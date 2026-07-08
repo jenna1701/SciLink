@@ -102,3 +102,30 @@ class TestOrchestratorSurface:
         import scilink.agents.exp_agents.analysis_orchestrator as orch_mod
         src = Path(orch_mod.__file__).read_text()
         assert src.count("refine_interpretation") >= 3  # copilot + autonomous offers + followup
+
+
+class TestNoveltyRipple:
+    def _refine_body(self):
+        idx = TOOLS_SRC.index("def refine_interpretation")
+        return TOOLS_SRC[idx: TOOLS_SRC.index("def assess_novelty")]
+
+    def test_revision_stales_prior_novelty_assessment(self):
+        body = self._refine_body()
+        assert 'prior_novelty["stale"] = True' in body
+        assert "staled_by_revision" in body
+
+    def test_revision_optionally_revises_claims(self):
+        body = self._refine_body()
+        assert "revised_claims" in body
+        assert "has_anyone_question" in body  # same claim schema demanded
+
+    def test_assess_novelty_prefers_revised_claims_and_stamps_coverage(self):
+        idx = TOOLS_SRC.index("def assess_novelty")
+        body = TOOLS_SRC[idx: idx + 6000]
+        assert 'rev.get("revised_claims")' in body
+        assert "assessed_at_revision" in body
+        assert "claims_source" in body
+
+    def test_staleness_is_visible_to_the_agent(self):
+        # list_results + get_recommendations both surface the stale flag
+        assert TOOLS_SRC.count("novelty_assessment_stale") >= 2

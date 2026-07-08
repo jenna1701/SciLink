@@ -3152,7 +3152,8 @@ class AnalysisOrchestratorTools:
                         # discoverability: downstream consumers already prefer
                         # the latest revision; this flag lets the agent SEE
                         # that a literature-refined interpretation exists
-                        "interpretation_revisions": len(r.get("interpretation_revisions") or [])
+                        "interpretation_revisions": len(r.get("interpretation_revisions") or []),
+                        "novelty_assessment_stale": bool((r.get("novelty_assessment") or {}).get("stale"))
                     }
                     for r in self.orch.analysis_results
                 ]
@@ -3373,7 +3374,8 @@ class AnalysisOrchestratorTools:
                     "analysis_id": record.get("analysis_id"),
                     "recommendations": result.get("measurement_recommendations", []),
                     "analysis_integration": result.get("analysis_integration", ""),
-                    "novelty_informed": novelty_assessment is not None
+                    "novelty_informed": novelty_assessment is not None,
+                    "novelty_assessment_stale": bool((novelty_assessment or {}).get("stale"))
                 }
                 
                 # Add novelty-specific recommendations if available
@@ -3867,6 +3869,34 @@ class AnalysisOrchestratorTools:
                     logging.warning(f"Companion revision HTML failed: {e}")
                     report_html = None
 
+            # Revise the scientific claims to match the new interpretation
+            # (optional per plan — skipped on any parse failure). Without
+            # this, a post-revision novelty re-run would re-assess claims
+            # anchored to the superseded reading.
+            revised_claims = None
+            orig_claims = full_result.get("scientific_claims") or []
+            if orig_claims:
+                claims_prompt = (
+                    "An analysis interpretation was revised against literature. "
+                    "Update its scientific claims to match the REVISED interpretation: "
+                    "keep claims still supported, revise ones the new reading changes, "
+                    "drop invalidated ones, add clearly warranted new ones.\n\n"
+                    f"## Revised interpretation\n{revised[:6000]}\n\n"
+                    f"## Original claims (JSON)\n{json.dumps(orig_claims)[:4000]}\n\n"
+                    "Return ONLY a JSON array with the SAME schema per claim "
+                    "(claim, has_anyone_question, keywords, scientific_impact)."
+                )
+                try:
+                    c_resp = self.orch.model.generate_content(contents=[claims_prompt])
+                    raw = (c_resp.text or "").strip()
+                    m = re.search(r"\[.*\]", raw, re.DOTALL)
+                    parsed = json.loads(m.group(0)) if m else None
+                    if (isinstance(parsed, list) and parsed
+                            and all(isinstance(c, dict) and c.get("claim") for c in parsed)):
+                        revised_claims = parsed
+                except Exception as e:
+                    logging.warning(f"Claims revision skipped (parse failure): {e}")
+
             # 6. Append-only storage (mirrors novelty_assessment attach).
             revision = {
                 "timestamp": datetime.now().isoformat(),
@@ -3874,10 +3904,22 @@ class AnalysisOrchestratorTools:
                 "literature_file": str(lit_path),
                 "revised_analysis": revised,
             }
+            if revised_claims:
+                revision["revised_claims"] = revised_claims
             if report_html:
                 revision["report_html"] = str(report_html)
             self.orch.analysis_results[record_index].setdefault(
                 "interpretation_revisions", []).append(revision)
+
+            # Ripple: a prior novelty assessment was made against claims that
+            # predate this revision — mark it stale so consumers and the agent
+            # know it needs a re-run to be current.
+            novelty_stale = False
+            prior_novelty = self.orch.analysis_results[record_index].get("novelty_assessment")
+            if prior_novelty:
+                prior_novelty["stale"] = True
+                prior_novelty["staled_by_revision"] = revision["timestamp"]
+                novelty_stale = True
 
             print(f"  ✅ Interpretation refined ({len(revised)} chars). Literature: {lit_path.name}")
             return json.dumps({
@@ -3887,7 +3929,11 @@ class AnalysisOrchestratorTools:
                 "literature_file": str(lit_path),
                 "revised_interpretation_preview": revised[:600],
                 "report_html": str(report_html) if report_html else None,
+                "claims_revised": bool(revised_claims),
+                "prior_novelty_assessment_stale": novelty_stale,
                 "note": "Original interpretation preserved; revision appended to the record."
+                        + (" A prior novelty assessment predates this revision — "
+                           "re-run assess_novelty to update it." if novelty_stale else "")
             })
 
         self._register_tool(
@@ -3950,9 +3996,17 @@ class AnalysisOrchestratorTools:
                 record_index = analysis_index if analysis_index >= 0 else len(self.orch.analysis_results) + analysis_index
                 record = self.orch.analysis_results[record_index]
 
-            # 2. Extract Claims
+            # 2. Extract Claims — prefer the latest revision's revised claims
+            # (refine_interpretation, issue #323): assessing superseded claims
+            # would produce verdicts about assertions the analysis no longer
+            # makes.
             full_result = record.get("full_result", {})
-            claims = full_result.get("scientific_claims", [])
+            revisions = record.get("interpretation_revisions") or []
+            claims, claims_source = full_result.get("scientific_claims", []), "original"
+            for rev in reversed(revisions):
+                if rev.get("revised_claims"):
+                    claims, claims_source = rev["revised_claims"], "latest_revision"
+                    break
             
             if not claims:
                 return json.dumps({
@@ -4031,6 +4085,9 @@ class AnalysisOrchestratorTools:
             # 5. Build novelty assessment object
             novelty_assessment = {
                 "timestamp": datetime.now().isoformat(),
+                # ripple bookkeeping: which revision state these verdicts cover
+                "assessed_at_revision": len(record.get("interpretation_revisions") or []),
+                "claims_source": claims_source,
                 "assessments": scored_results,
                 "high_novelty_claims": high_novelty_claims,
                 "summary_stats": {
