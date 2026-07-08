@@ -50,11 +50,26 @@ class TestRefineInterpretationPlumbing:
     def test_storage_is_append_only(self):
         assert 'setdefault(\n                "interpretation_revisions", []).append' in TOOLS_SRC
 
-    def test_get_recommendations_prefers_latest_revision(self):
-        idx = TOOLS_SRC.index("def get_recommendations")
-        body = TOOLS_SRC[idx: idx + 4000]
-        assert "interpretation_revisions" in body
-        assert 'revisions[-1]["revised_analysis"]' in body
+    def test_effective_full_result_helper(self):
+        from scilink.agents.exp_agents.analysis_orchestrator_tools import _effective_full_result
+        rec = {"full_result": {"detailed_analysis": "original", "x": 1},
+               "interpretation_revisions": [{"revised_analysis": "v1"},
+                                            {"revised_analysis": "v2"}]}
+        eff = _effective_full_result(rec)
+        assert eff["detailed_analysis"] == "v2" and eff["x"] == 1
+        assert rec["full_result"]["detailed_analysis"] == "original"  # no mutation
+        assert _effective_full_result({"full_result": {"detailed_analysis": "o"}})[
+            "detailed_analysis"] == "o"  # no revisions -> unchanged
+
+    def test_all_record_consumers_prefer_latest_revision(self):
+        # every downstream consumer of a record's interpretation must go
+        # through the helper: recommendations, DFT recommendations, and the
+        # multi-source context builder. (The post-run summary preview reads
+        # the fresh analyze() return, where no revision can exist yet.)
+        for func in ("def get_recommendations", "def recommend_dft_structures"):
+            idx = TOOLS_SRC.index(func)
+            assert "_effective_full_result" in TOOLS_SRC[idx: idx + 4000], func
+        assert TOOLS_SRC.count("_effective_full_result(record)") >= 3
 
     def test_series_features_are_trend_conditioned(self):
         idx = TOOLS_SRC.index("def refine_interpretation")

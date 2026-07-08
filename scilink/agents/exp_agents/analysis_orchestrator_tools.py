@@ -611,6 +611,18 @@ def _extract_series_from_sidecars(
     return series_meta, per_file_meta
 
 
+
+def _effective_full_result(record: dict) -> dict:
+    """The record's full_result with the latest literature-refined
+    interpretation swapped in when one exists (refine_interpretation,
+    issue #323). Returns a copy; the record is never mutated."""
+    full_result = record.get("full_result") or {}
+    revisions = record.get("interpretation_revisions") or []
+    if revisions and full_result:
+        full_result = dict(full_result)
+        full_result["detailed_analysis"] = revisions[-1]["revised_analysis"]
+    return full_result
+
 class AnalysisOrchestratorTools:
     """
     Manages tool definitions, schemas, and execution for the AnalysisOrchestratorAgent.
@@ -3329,13 +3341,8 @@ class AnalysisOrchestratorTools:
                 
                 # Get the stored analysis result
                 full_result = record.get("full_result")
-                # Prefer the latest literature-refined interpretation when one
-                # exists (refine_interpretation, issue #323) — append-only on
-                # the record, so swap into a copy rather than mutating.
-                revisions = record.get("interpretation_revisions") or []
-                if full_result is not None and revisions:
-                    full_result = dict(full_result)
-                    full_result["detailed_analysis"] = revisions[-1]["revised_analysis"]
+                if full_result is not None:
+                    full_result = _effective_full_result(record)
                 if full_result is None:
                     return json.dumps({
                         "status": "error",
@@ -4084,8 +4091,9 @@ class AnalysisOrchestratorTools:
                 record_index = analysis_index if analysis_index >= 0 else len(self.orch.analysis_results) + analysis_index
                 record = self.orch.analysis_results[record_index]
 
-            # 2. Extract analysis text
-            full_result = record.get("full_result") or {}
+            # 2. Extract analysis text (latest literature-refined
+            # interpretation preferred — issue #323)
+            full_result = _effective_full_result(record)
             analysis_text = (
                 full_result.get("detailed_analysis")
                 or full_result.get("full_analysis")
@@ -4740,7 +4748,7 @@ class AnalysisOrchestratorTools:
             for aid in source_ids:
                 for record in self.orch.analysis_results:
                     if record.get("analysis_id") == aid:
-                        full_result = record.get("full_result", {})
+                        full_result = _effective_full_result(record)
                         parts = [f"### Analysis: {aid}"]
 
                         da = full_result.get("detailed_analysis", "")
