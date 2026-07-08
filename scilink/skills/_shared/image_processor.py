@@ -193,7 +193,7 @@ def calculate_global_fft(image_array: np.ndarray, save_path: str | None = None) 
                 # Ensure directory exists
                 os.makedirs(os.path.dirname(save_path), exist_ok=True)
                 
-                plt.savefig(save_path, dpi=150, bbox_inches='tight')
+                fig.savefig(save_path, dpi=150, bbox_inches='tight')
                 plt.close(fig)
                 logger.info(f"   (Tool Info: ✅ Saved Global FFT plot to: {save_path})")
                 
@@ -307,11 +307,11 @@ def create_multi_abundance_overlays(structure_image: np.ndarray,
     for i in range(total_plots, len(axes)):
         axes[i].axis('off')
     
-    plt.tight_layout()
+    fig.tight_layout()
     
     # Convert to bytes
     buf = BytesIO()
-    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
-    plt.close()
+    fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    plt.close(fig)
     buf.seek(0)
     return buf.getvalue()

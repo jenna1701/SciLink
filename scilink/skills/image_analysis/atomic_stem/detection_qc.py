@@ -235,9 +235,9 @@ def detection_quality_panels(image, positions, pixel_size_nm=None,
 
     metrics["flags"] = flags
     metrics["zoom_centers"] = [(round(c[0], 1), round(c[1], 1)) for c in centers]
-    plt.tight_layout()
+    fig.tight_layout()
     buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=130); plt.close(fig)
+    fig.savefig(buf, format="png", dpi=130); plt.close(fig)
     return {"figure_bytes": buf.getvalue(), "metrics": metrics, "flags": flags}
 
 
