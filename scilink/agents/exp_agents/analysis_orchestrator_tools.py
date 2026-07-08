@@ -3854,17 +3854,35 @@ class AnalysisOrchestratorTools:
                     report_html = Path(out_dir) / f"Interpretation_Revision_{ts}.html"
                     paras = "".join(f"<p>{_html.escape(x)}</p>"
                                     for x in revised.split("\n\n") if x.strip())
+                    # Same fixed palette as the agent's CurveFitting report so
+                    # the two render identically in the UI's light AND dark
+                    # modes (the report theme is deliberately self-contained,
+                    # not inherited from the embedder).
                     report_html.write_text(
-                        "<!doctype html><meta charset='utf-8'>"
-                        "<title>Literature-Refined Interpretation</title>"
-                        "<body style='font-family:sans-serif;max-width:800px;margin:2em auto'>"
-                        f"<h1>Literature-Refined Interpretation</h1>"
-                        f"<p><b>Analysis:</b> {_html.escape(str(record.get('analysis_id')))}<br>"
+                        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                        "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                        "<title>Literature-Refined Interpretation</title><style>"
+                        "body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;"
+                        " line-height: 1.6; color: #333; max-width: 1400px; margin: 0 auto;"
+                        " padding: 20px; background-color: #f4f4f9; }"
+                        ".container { background-color: #fff; padding: 40px; border-radius: 8px;"
+                        " box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
+                        "h1 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }"
+                        ".metadata-box { background-color: #ecf0f1; padding: 15px; border-radius: 5px;"
+                        " border-left: 5px solid #3498db; margin-bottom: 20px; }"
+                        ".analysis-text { white-space: pre-wrap; background-color: #fafafa;"
+                        " padding: 20px; border-radius: 5px; border: 1px solid #eee; margin-top: 15px; }"
+                        ".footer { margin-top: 50px; text-align: center; color: #7f8c8d; font-size: 0.8em; }"
+                        "</style></head><body><div class='container'>"
+                        "<h1>Literature-Refined Interpretation</h1>"
+                        "<div class='metadata-box'>"
+                        f"<b>Analysis:</b> {_html.escape(str(record.get('analysis_id')))}<br>"
                         f"<b>Query:</b> {_html.escape(query)}<br>"
-                        f"<b>Literature:</b> {_html.escape(lit_path.name)}</p><hr>"
-                        f"{paras}"
-                        "<hr><p><i>Post-fit revision (feature-conditioned literature); "
-                        "the original report is unchanged.</i></p></body>")
+                        f"<b>Literature:</b> {_html.escape(lit_path.name)}</div>"
+                        f"<div class='analysis-text'>{paras}</div>"
+                        "<div class='footer'>Post-fit revision (feature-conditioned "
+                        "literature); the original report is unchanged.</div>"
+                        "</div></body></html>")
                 except Exception as e:
                     logging.warning(f"Companion revision HTML failed: {e}")
                     report_html = None
