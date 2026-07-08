@@ -26,7 +26,7 @@ from ..controllers.curve_fitting_controllers import (
     LiteratureSearchController,
     GenerateCurveFittingReportController,
     # Unified controllers for series support
-    HumanFeedbackRefinementController,
+    CurveFittingPlanningController,
     UnifiedSeriesProcessingController,
     AdaptiveRefitController,
     ConditionalTrendAnalysisController,
@@ -163,7 +163,7 @@ def create_unified_curve_fitting_pipeline(
         )
 
     # Step 2: Human feedback refinement on fitting approach
-    planning_controller = HumanFeedbackRefinementController(
+    planning_controller = CurveFittingPlanningController(
         model=model,
         logger=logger,
         generation_config=generation_config,
