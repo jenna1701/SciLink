@@ -611,6 +611,18 @@ def _extract_series_from_sidecars(
     return series_meta, per_file_meta
 
 
+
+def _effective_full_result(record: dict) -> dict:
+    """The record's full_result with the latest literature-refined
+    interpretation swapped in when one exists (refine_interpretation,
+    issue #323). Returns a copy; the record is never mutated."""
+    full_result = record.get("full_result") or {}
+    revisions = record.get("interpretation_revisions") or []
+    if revisions and full_result:
+        full_result = dict(full_result)
+        full_result["detailed_analysis"] = revisions[-1]["revised_analysis"]
+    return full_result
+
 class AnalysisOrchestratorTools:
     """
     Manages tool definitions, schemas, and execution for the AnalysisOrchestratorAgent.
@@ -3136,7 +3148,12 @@ class AnalysisOrchestratorTools:
                         "agent_name": r.get("agent_name"),
                         "status": r.get("status"),
                         "output_directory": r.get("output_directory"),
-                        "has_novelty_assessment": r.get("novelty_assessment") is not None
+                        "has_novelty_assessment": r.get("novelty_assessment") is not None,
+                        # discoverability: downstream consumers already prefer
+                        # the latest revision; this flag lets the agent SEE
+                        # that a literature-refined interpretation exists
+                        "interpretation_revisions": len(r.get("interpretation_revisions") or []),
+                        "novelty_assessment_stale": bool((r.get("novelty_assessment") or {}).get("stale"))
                     }
                     for r in self.orch.analysis_results
                 ]
@@ -3329,6 +3346,8 @@ class AnalysisOrchestratorTools:
                 
                 # Get the stored analysis result
                 full_result = record.get("full_result")
+                if full_result is not None:
+                    full_result = _effective_full_result(record)
                 if full_result is None:
                     return json.dumps({
                         "status": "error",
@@ -3355,7 +3374,8 @@ class AnalysisOrchestratorTools:
                     "analysis_id": record.get("analysis_id"),
                     "recommendations": result.get("measurement_recommendations", []),
                     "analysis_integration": result.get("analysis_integration", ""),
-                    "novelty_informed": novelty_assessment is not None
+                    "novelty_informed": novelty_assessment is not None,
+                    "novelty_assessment_stale": bool((novelty_assessment or {}).get("stale"))
                 }
                 
                 # Add novelty-specific recommendations if available
@@ -3676,6 +3696,269 @@ class AnalysisOrchestratorTools:
             required=["query"]
         )
 
+
+        # =====================================================================
+        # REFINE INTERPRETATION (issue #323 — Channel B, curve fitting v1)
+        # =====================================================================
+        def refine_interpretation(analysis_id: str = None, analysis_index: int = -1,
+                                  focus: str = None) -> str:
+            """
+            Post-analysis, feature-conditioned literature refinement (Channel B).
+            Searches the literature FROM the fitted features (peak positions,
+            trends) of a completed analysis and revises its interpretation
+            against what is published. Append-only: the original interpretation
+            is preserved; revisions accumulate on the analysis record.
+            """
+            print(f"  ⚡ Tool: Refining interpretation against feature-conditioned literature...")
+
+            if not self.orch.futurehouse_api_key:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No FutureHouse/Edison API Key provided in Orchestrator initialization."
+                })
+
+            # 1. Retrieve the analysis record (same contract as assess_novelty).
+            record = None
+            record_index = None
+            if analysis_id:
+                for i, r in enumerate(self.orch.analysis_results):
+                    if r.get("analysis_id") == analysis_id:
+                        record, record_index = r, i
+                        break
+                if record is None:
+                    return json.dumps({"status": "error",
+                                       "message": f"Analysis ID not found: {analysis_id}"})
+            else:
+                if not self.orch.analysis_results:
+                    return json.dumps({"status": "error",
+                                       "message": "No analysis history available."})
+                record_index = (analysis_index if analysis_index >= 0
+                                else len(self.orch.analysis_results) + analysis_index)
+                record = self.orch.analysis_results[record_index]
+
+            full_result = record.get("full_result") or {}
+            detailed = (full_result.get("detailed_analysis")
+                        or full_result.get("full_analysis") or "")
+            if not detailed.strip():
+                return json.dumps({"status": "error",
+                                   "message": "Analysis record has no interpretation text to refine."})
+
+            # 2. Surface the measured features (curve modality).
+            # Series runs are trend-conditioned: once a parameter trend exists,
+            # static per-spectrum peaks barely matter (issue #323 §5.2).
+            features = {}
+            for key in ("model_type", "fit_quality"):
+                if full_result.get(key):
+                    features[key] = full_result[key]
+            trends = full_result.get("parameter_trends")
+            if trends:
+                features["parameter_trends"] = trends
+                if full_result.get("flagged_spectra_analysis"):
+                    features["flagged_spectra_analysis"] = full_result["flagged_spectra_analysis"]
+                locked = (full_result.get("summary") or {}).get("locked_model") if isinstance(full_result.get("summary"), dict) else None
+                if locked:
+                    features["locked_model"] = locked
+            elif full_result.get("fitting_parameters"):
+                features["fitting_parameters"] = full_result["fitting_parameters"]
+            if not features:
+                return json.dumps({"status": "error",
+                                   "message": "No fitted features surfaced on this record — nothing to condition the search on."})
+            features_text = json.dumps(features, default=str)[:4000]
+
+            # 3. Feature → query builder: an LLM micro-call, because feature
+            # MEANING is technique-dependent (peaks at 1349/1582 cm^-1 only
+            # read as D/G bands with domain context). Falls back to a plain
+            # template on any failure.
+            focus_line = f"\nUser focus: {focus}" if focus else ""
+            builder_prompt = (
+                "You are building ONE focused scientific-literature search query.\n"
+                "A spectral/curve fit produced these measured features:\n"
+                f"{features_text}\n"
+                f"Experimental context: {json.dumps(getattr(self.orch, 'current_metadata', None) or {}, default=str)[:800]}"
+                f"{focus_line}\n\n"
+                "Write a single natural-language query (<= 40 words) that asks what "
+                "materials/phases/processes are reported for these SPECIFIC measured "
+                "features (positions, widths, trends) — not a generic method query. "
+                "Return ONLY the query text."
+            )
+            try:
+                q_resp = self.orch.model.generate_content(contents=[builder_prompt])
+                query = (q_resp.text or "").strip().strip('"')
+                assert 10 < len(query) < 400
+            except Exception:
+                query = f"Interpretation of measured features: {features_text[:200]}"
+            print(f"  🔍 Feature-conditioned query: {query[:100]}")
+
+            # 4. Literature search (CROW backend — "what is reported for these
+            # features", not the novelty question).
+            try:
+                lit_agent = FittingModelLiteratureAgent(
+                    api_key=self.orch.futurehouse_api_key, max_wait_time=3000
+                )
+                result = lit_agent.query_for_models(query)
+            except Exception as e:
+                logging.error(f"refine_interpretation literature error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+            if result.get("status") != "success":
+                return json.dumps({"status": result.get("status", "error"),
+                                   "message": result.get("message", "Literature search did not succeed")})
+            content = result.get("formatted_answer", "") or ""
+
+            # Persist the search output (inspectable, same shape as search_literature).
+            query_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:8]
+            lit_path = self.orch.base_dir / f"interpretation_lit_{query_hash}.md"
+            with open(lit_path, "w") as f:
+                f.write(f"# Feature-Conditioned Literature (Channel B)\n\n"
+                        f"**Analysis:** {record.get('analysis_id')}\n"
+                        f"**Query:** {query}\n\n{content}")
+
+            # 5. Tier-A refinement: text-in/text-out — revise the existing
+            # interpretation against the literature. No pixel/state re-invoke.
+            refine_prompt = (
+                "You are revising the interpretation of a completed analysis "
+                "against literature that was searched from its MEASURED features.\n\n"
+                f"## Current interpretation\n{detailed[:6000]}\n\n"
+                f"## Measured features\n{features_text}\n\n"
+                f"## Feature-conditioned literature\n{content[:8000]}\n\n"
+                "Rewrite the interpretation: keep every conclusion the data still "
+                "supports, revise or qualify what the literature contradicts, and "
+                "add what it newly explains (cite the literature inline where used). "
+                "Where the literature identifies the material/phase from these "
+                "features, say so explicitly. Do not soften data-supported "
+                "conclusions merely because the literature is silent. Return ONLY "
+                "the revised interpretation text."
+            )
+            try:
+                r_resp = self.orch.model.generate_content(contents=[refine_prompt])
+                revised = (r_resp.text or "").strip()
+                if not revised:
+                    raise ValueError("empty refinement")
+            except Exception as e:
+                return json.dumps({"status": "error",
+                                   "message": f"Literature saved to {lit_path} but refinement failed: {e}"})
+
+            # Append the revised interpretation to the same document so the
+            # revision is human-readable on disk, not only in session state.
+            with open(lit_path, "a") as f:
+                f.write("\n\n---\n\n## Literature-Refined Interpretation\n\n" + revised)
+
+            # Companion HTML next to the agent's original report (append-only:
+            # a separate document, mirroring how assess_novelty writes its own
+            # doc rather than rewriting the analysis). Best-effort.
+            report_html = None
+            out_dir = record.get("output_directory")
+            if out_dir and Path(out_dir).is_dir():
+                try:
+                    import html as _html
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    report_html = Path(out_dir) / f"Interpretation_Revision_{ts}.html"
+                    paras = "".join(f"<p>{_html.escape(x)}</p>"
+                                    for x in revised.split("\n\n") if x.strip())
+                    report_html.write_text(
+                        "<!doctype html><meta charset='utf-8'>"
+                        "<title>Literature-Refined Interpretation</title>"
+                        "<body style='font-family:sans-serif;max-width:800px;margin:2em auto'>"
+                        f"<h1>Literature-Refined Interpretation</h1>"
+                        f"<p><b>Analysis:</b> {_html.escape(str(record.get('analysis_id')))}<br>"
+                        f"<b>Query:</b> {_html.escape(query)}<br>"
+                        f"<b>Literature:</b> {_html.escape(lit_path.name)}</p><hr>"
+                        f"{paras}"
+                        "<hr><p><i>Post-fit revision (feature-conditioned literature); "
+                        "the original report is unchanged.</i></p></body>")
+                except Exception as e:
+                    logging.warning(f"Companion revision HTML failed: {e}")
+                    report_html = None
+
+            # Revise the scientific claims to match the new interpretation
+            # (optional per plan — skipped on any parse failure). Without
+            # this, a post-revision novelty re-run would re-assess claims
+            # anchored to the superseded reading.
+            revised_claims = None
+            orig_claims = full_result.get("scientific_claims") or []
+            if orig_claims:
+                claims_prompt = (
+                    "An analysis interpretation was revised against literature. "
+                    "Update its scientific claims to match the REVISED interpretation: "
+                    "keep claims still supported, revise ones the new reading changes, "
+                    "drop invalidated ones, add clearly warranted new ones.\n\n"
+                    f"## Revised interpretation\n{revised[:6000]}\n\n"
+                    f"## Original claims (JSON)\n{json.dumps(orig_claims)[:4000]}\n\n"
+                    "Return ONLY a JSON array with the SAME schema per claim "
+                    "(claim, has_anyone_question, keywords, scientific_impact)."
+                )
+                try:
+                    c_resp = self.orch.model.generate_content(contents=[claims_prompt])
+                    raw = (c_resp.text or "").strip()
+                    m = re.search(r"\[.*\]", raw, re.DOTALL)
+                    parsed = json.loads(m.group(0)) if m else None
+                    if (isinstance(parsed, list) and parsed
+                            and all(isinstance(c, dict) and c.get("claim") for c in parsed)):
+                        revised_claims = parsed
+                except Exception as e:
+                    logging.warning(f"Claims revision skipped (parse failure): {e}")
+
+            # 6. Append-only storage (mirrors novelty_assessment attach).
+            revision = {
+                "timestamp": datetime.now().isoformat(),
+                "query": query,
+                "literature_file": str(lit_path),
+                "revised_analysis": revised,
+            }
+            if revised_claims:
+                revision["revised_claims"] = revised_claims
+            if report_html:
+                revision["report_html"] = str(report_html)
+            self.orch.analysis_results[record_index].setdefault(
+                "interpretation_revisions", []).append(revision)
+
+            # Ripple: a prior novelty assessment was made against claims that
+            # predate this revision — mark it stale so consumers and the agent
+            # know it needs a re-run to be current.
+            novelty_stale = False
+            prior_novelty = self.orch.analysis_results[record_index].get("novelty_assessment")
+            if prior_novelty:
+                prior_novelty["stale"] = True
+                prior_novelty["staled_by_revision"] = revision["timestamp"]
+                novelty_stale = True
+
+            print(f"  ✅ Interpretation refined ({len(revised)} chars). Literature: {lit_path.name}")
+            return json.dumps({
+                "status": "success",
+                "analysis_id": record.get("analysis_id"),
+                "query": query,
+                "literature_file": str(lit_path),
+                "revised_interpretation_preview": revised[:600],
+                "report_html": str(report_html) if report_html else None,
+                "claims_revised": bool(revised_claims),
+                "prior_novelty_assessment_stale": novelty_stale,
+                "note": "Original interpretation preserved; revision appended to the record."
+                        + (" A prior novelty assessment predates this revision — "
+                           "re-run assess_novelty to update it." if novelty_stale else "")
+            })
+
+        self._register_tool(
+            func=refine_interpretation,
+            name="refine_interpretation",
+            description=(
+                "Refine a completed analysis's interpretation against literature searched "
+                "from its FITTED features (peak positions/widths, parameter trends) — the "
+                "post-fit counterpart of search_literature. Call AFTER run_analysis when the "
+                "interpretation would materially benefit from published context. Strongly "
+                "recommended after identification-mode runs (they are literature-free in-run; "
+                "this step is what identifies the material from the fitted bands). Append-only: "
+                "the original interpretation is preserved."
+            ),
+            parameters={
+                "analysis_id": {"type": "string",
+                                "description": "ID of the completed analysis (default: most recent)."},
+                "analysis_index": {"type": "integer",
+                                   "description": "Alternative: index into the analysis history (default -1, most recent)."},
+                "focus": {"type": "string",
+                          "description": "Optional steer for the literature query (e.g., 'candidate phases for the 742 cm-1 band')."},
+            },
+            required=[]
+        )
+
         # =====================================================================
         # 11. ASSESS NOVELTY
         # =====================================================================
@@ -3713,9 +3996,17 @@ class AnalysisOrchestratorTools:
                 record_index = analysis_index if analysis_index >= 0 else len(self.orch.analysis_results) + analysis_index
                 record = self.orch.analysis_results[record_index]
 
-            # 2. Extract Claims
+            # 2. Extract Claims — prefer the latest revision's revised claims
+            # (refine_interpretation, issue #323): assessing superseded claims
+            # would produce verdicts about assertions the analysis no longer
+            # makes.
             full_result = record.get("full_result", {})
-            claims = full_result.get("scientific_claims", [])
+            revisions = record.get("interpretation_revisions") or []
+            claims, claims_source = full_result.get("scientific_claims", []), "original"
+            for rev in reversed(revisions):
+                if rev.get("revised_claims"):
+                    claims, claims_source = rev["revised_claims"], "latest_revision"
+                    break
             
             if not claims:
                 return json.dumps({
@@ -3794,6 +4085,9 @@ class AnalysisOrchestratorTools:
             # 5. Build novelty assessment object
             novelty_assessment = {
                 "timestamp": datetime.now().isoformat(),
+                # ripple bookkeeping: which revision state these verdicts cover
+                "assessed_at_revision": len(record.get("interpretation_revisions") or []),
+                "claims_source": claims_source,
                 "assessments": scored_results,
                 "high_novelty_claims": high_novelty_claims,
                 "summary_stats": {
@@ -3893,8 +4187,9 @@ class AnalysisOrchestratorTools:
                 record_index = analysis_index if analysis_index >= 0 else len(self.orch.analysis_results) + analysis_index
                 record = self.orch.analysis_results[record_index]
 
-            # 2. Extract analysis text
-            full_result = record.get("full_result") or {}
+            # 2. Extract analysis text (latest literature-refined
+            # interpretation preferred — issue #323)
+            full_result = _effective_full_result(record)
             analysis_text = (
                 full_result.get("detailed_analysis")
                 or full_result.get("full_analysis")
@@ -4549,7 +4844,7 @@ class AnalysisOrchestratorTools:
             for aid in source_ids:
                 for record in self.orch.analysis_results:
                     if record.get("analysis_id") == aid:
-                        full_result = record.get("full_result", {})
+                        full_result = _effective_full_result(record)
                         parts = [f"### Analysis: {aid}"]
 
                         da = full_result.get("detailed_analysis", "")

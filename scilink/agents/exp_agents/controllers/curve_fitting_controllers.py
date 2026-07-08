@@ -2758,7 +2758,10 @@ Your guidance: '''
     ) -> str:
         config = state.get("locked_fitting_config", {})
         context_parts = []
-        if state.get("literature_context"):
+        # Identification mode is literature-free in-run (issue #323, D2):
+        # literature must not shape the code that writes the fit, matching
+        # the planner gates. Covers hand-supplied literature_file too.
+        if state.get("literature_context") and state.get("task_mode") != "identification":
             context_parts.append(state["literature_context"])
         # Codegen recipe from ALL co-active skills (not just the top-ranked):
         # with several skills active each may own a different pipeline stage,
@@ -7235,7 +7238,12 @@ same trend.
                 + json.dumps(series_results[0]["quality_history"], indent=2)
             )
 
-        if state.get("literature_context"):
+        # Opportunistic Channel-A reuse (issue #323, D1): inject planning
+        # literature into interpretation when it exists — free when absent.
+        # The authoritative interpretation literature is the post-fit
+        # feature-conditioned pass (`refine_interpretation`). Gated off in
+        # identification mode (D2): ID runs are literature-free in-run.
+        if state.get("literature_context") and state.get("task_mode") != "identification":
             prompt_parts.extend(["\n## Literature", state["literature_context"]])
 
         _append_objective_context(prompt_parts, state)

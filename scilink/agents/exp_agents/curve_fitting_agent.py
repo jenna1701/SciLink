@@ -776,9 +776,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         # Pre-populate literature context if a search file was supplied via
         # the orchestrator's `search_literature` tool. Skips the in-pipeline
-        # `LiteratureSearchController`. In identification mode the planner
-        # ignores it (see _build_planning_prompt) to preserve the unbiased
-        # fit, but Stage-2 candidate enumeration still consumes it.
+        # `LiteratureSearchController`. In identification mode the run is
+        # literature-free end to end (planner, script generation, and
+        # interpretation all gate it out — issue #323, D2); literature
+        # enters ID runs only post-fit via `refine_interpretation`.
         if literature_file:
             lit_p = Path(literature_file)
             if lit_p.is_file():
