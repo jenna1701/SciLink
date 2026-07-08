@@ -2895,7 +2895,11 @@ Your guidance: '''
                 "fit.npy save if present) verbatim; "
                 "only modify the model components, initial guesses, bounds, or "
                 "background treatment needed to address the issues. Do NOT "
-                "regenerate from scratch. If the RESIDUAL DIAGNOSTICS flagged a "
+                "regenerate from scratch. If an issue's fix departs from the "
+                "locked plan or a skill rule, implement it AND state the "
+                "justification explicitly in a script comment (deviations with "
+                "stated justification are acceptable; silent ones are flagged "
+                "as non-conformant). If the RESIDUAL DIAGNOSTICS flagged a "
                 "localized region with RMS far above noise and repeated "
                 "sign-changes, treat that as under-resolved real structure there "
                 "(add a physically-nameable component or fix the peak shape), not "
@@ -2969,7 +2973,10 @@ Your guidance: '''
                     rules_parts.append(f"### {stage.title()} rules\n{content}")
             if rules_parts:
                 skill_rules_text = (
-                    f"\n**MANDATORY Domain Skill Rules ({skill_name}):**\n"
+                    "\n" + self._SKILL_STRICTNESS_SCHEDULE[
+                        min(state.get("_annealing_level", 0),
+                            len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
+                    ].format(name=skill_name)
                     + "\n".join(rules_parts)
                     + "\n"
                 )
