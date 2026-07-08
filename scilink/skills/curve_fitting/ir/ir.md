@@ -46,6 +46,17 @@ baselines (ALS with low stiffness) on IR data with broad OH envelopes.
 Saturated strong bands: fit the flanks and report the apex as uncertain
 rather than forcing a narrow component through the flat top.
 
+**Output-space contract.** If the spectrum was transformed (transmittance
+to absorbance) or a baseline was subtracted, keep every saved output in
+ONE consistent space: the saved data array, the saved fit curve, and the
+reported R² must all refer to the same signal (transformed/corrected data
+with a matching-space fit, or raw data with a fit that includes the
+baseline term). Mixed spaces make the fit appear offset from the data and
+invalidate the reported R². **The reported R² must be computed from exactly
+the arrays you save** — any stricter alternative metric is reported
+separately, clearly labeled (a user-requested fit window is the exception:
+report the windowed R², labeled as windowed).
+
 **Asymmetric bands.** A dispersive (S-shaped) residual across a single
 band that persists after a symmetric refit indicates real asymmetry
 (particle-size/shape effects in powders, hydrogen-bonding distributions,

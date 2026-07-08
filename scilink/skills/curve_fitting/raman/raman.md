@@ -79,6 +79,23 @@ most a constant offset (the structured background is already gone — a
 sloped or polynomial residual baseline at this stage usually means the ALS
 parameters need adjusting, not that more baseline freedom is needed).
 
+**Output-space contract (critical when a baseline is subtracted).** All
+saved outputs must live in ONE consistent space: either (a) include the
+subtracted baseline in the saved fit curve so it overlays the RAW data, or
+(b) save the baseline-corrected signal as the data array next to a
+corrected-space fit. Never save a peaks-only fit against raw data — the
+verification overlay then shows the fit offset below the data by the
+entire continuum, every residual is background rather than misfit, and
+reported R² disagrees with R² recomputed from the saved arrays.
+
+**The reported R² MUST be computed from exactly the two arrays you save**
+(the saved data array vs the saved fit array) — not from the corrected
+signal, not from any intermediate. If you also want a stricter
+corrected-space or peak-region metric, report it as a separate,
+clearly-labeled number; the primary R² is the saved-array one. The one
+exception: when the user explicitly requested a fit window, the windowed
+R² is the meaningful primary metric — report it labeled as windowed.
+
 **The model must explain the peaks, not the ramp.** After fitting, check
 where the model's variance lives: if the fitted curve with all peak
 components removed still tracks most of the data (i.e., the "peaks" are
