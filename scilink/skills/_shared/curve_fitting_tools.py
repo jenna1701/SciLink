@@ -349,10 +349,14 @@ def plot_curve_to_bytes(curve_data: np.ndarray, system_info: dict, title_suffix:
     ax.set_ylabel(ylabel_text)
     
     ax.grid(True, linestyle='--')
-    plt.tight_layout()
-    
+    # Object API on purpose: plt.tight_layout()/plt.savefig() act on pyplot's
+    # CURRENT figure, which another thread (UI / meta / parallel workers) can
+    # swap between our subplots() and the save — intermittently producing a
+    # blank "Original Data" image in the report.
+    fig.tight_layout()
+
     buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=150)
+    fig.savefig(buf, format='png', dpi=150)
     buf.seek(0)
     image_bytes = buf.getvalue()
     plt.close(fig)
