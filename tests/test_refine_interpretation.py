@@ -80,6 +80,17 @@ class TestRefineInterpretationPlumbing:
         assert body.index("parameter_trends") < body.index('elif full_result.get("fitting_parameters")')
 
 
+    def test_revision_is_persisted_human_readably(self):
+        idx = TOOLS_SRC.index("def refine_interpretation")
+        body = TOOLS_SRC[idx: TOOLS_SRC.index("def assess_novelty")]
+        # revised text appended to the on-disk revision document...
+        assert "Literature-Refined Interpretation" in body
+        # ...and a companion HTML lands next to the original report when the
+        # record carries its output_directory (append-only: separate file)
+        assert "Interpretation_Revision_" in body
+        assert 'record.get("output_directory")' in body
+
+
 class TestOrchestratorSurface:
     def test_followups_suggest_refinement(self):
         import scilink.agents.exp_agents.analysis_orchestrator as orch_mod

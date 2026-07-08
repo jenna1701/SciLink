@@ -3148,7 +3148,11 @@ class AnalysisOrchestratorTools:
                         "agent_name": r.get("agent_name"),
                         "status": r.get("status"),
                         "output_directory": r.get("output_directory"),
-                        "has_novelty_assessment": r.get("novelty_assessment") is not None
+                        "has_novelty_assessment": r.get("novelty_assessment") is not None,
+                        # discoverability: downstream consumers already prefer
+                        # the latest revision; this flag lets the agent SEE
+                        # that a literature-refined interpretation exists
+                        "interpretation_revisions": len(r.get("interpretation_revisions") or [])
                     }
                     for r in self.orch.analysis_results
                 ]
@@ -3831,6 +3835,38 @@ class AnalysisOrchestratorTools:
                 return json.dumps({"status": "error",
                                    "message": f"Literature saved to {lit_path} but refinement failed: {e}"})
 
+            # Append the revised interpretation to the same document so the
+            # revision is human-readable on disk, not only in session state.
+            with open(lit_path, "a") as f:
+                f.write("\n\n---\n\n## Literature-Refined Interpretation\n\n" + revised)
+
+            # Companion HTML next to the agent's original report (append-only:
+            # a separate document, mirroring how assess_novelty writes its own
+            # doc rather than rewriting the analysis). Best-effort.
+            report_html = None
+            out_dir = record.get("output_directory")
+            if out_dir and Path(out_dir).is_dir():
+                try:
+                    import html as _html
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    report_html = Path(out_dir) / f"Interpretation_Revision_{ts}.html"
+                    paras = "".join(f"<p>{_html.escape(x)}</p>"
+                                    for x in revised.split("\n\n") if x.strip())
+                    report_html.write_text(
+                        "<!doctype html><meta charset='utf-8'>"
+                        "<title>Literature-Refined Interpretation</title>"
+                        "<body style='font-family:sans-serif;max-width:800px;margin:2em auto'>"
+                        f"<h1>Literature-Refined Interpretation</h1>"
+                        f"<p><b>Analysis:</b> {_html.escape(str(record.get('analysis_id')))}<br>"
+                        f"<b>Query:</b> {_html.escape(query)}<br>"
+                        f"<b>Literature:</b> {_html.escape(lit_path.name)}</p><hr>"
+                        f"{paras}"
+                        "<hr><p><i>Post-fit revision (feature-conditioned literature); "
+                        "the original report is unchanged.</i></p></body>")
+                except Exception as e:
+                    logging.warning(f"Companion revision HTML failed: {e}")
+                    report_html = None
+
             # 6. Append-only storage (mirrors novelty_assessment attach).
             revision = {
                 "timestamp": datetime.now().isoformat(),
@@ -3838,6 +3874,8 @@ class AnalysisOrchestratorTools:
                 "literature_file": str(lit_path),
                 "revised_analysis": revised,
             }
+            if report_html:
+                revision["report_html"] = str(report_html)
             self.orch.analysis_results[record_index].setdefault(
                 "interpretation_revisions", []).append(revision)
 
@@ -3848,6 +3886,7 @@ class AnalysisOrchestratorTools:
                 "query": query,
                 "literature_file": str(lit_path),
                 "revised_interpretation_preview": revised[:600],
+                "report_html": str(report_html) if report_html else None,
                 "note": "Original interpretation preserved; revision appended to the record."
             })
 
