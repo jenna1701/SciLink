@@ -23,19 +23,44 @@ from scilink.skills._shared._spec import ToolSpec
 # ---------------------------------------------------------------------------
 
 
+def _perp_heights(atoms) -> np.ndarray:
+    """Perpendicular distances between opposite faces for each cell direction.
+
+    For cell vectors a0, a1, a2 the perpendicular height in direction i is
+    h_i = |V| / |a_j × a_k|.  This equals the vector norm only for
+    orthogonal cells; for skewed cells it is strictly smaller, so using
+    vector norms would underestimate the number of supercell repeats needed
+    to enclose a sphere of given radius.
+    """
+    cell = atoms.cell.array
+    volume = abs(np.linalg.det(cell))
+    return np.array([
+        volume / np.linalg.norm(np.cross(cell[(i + 1) % 3], cell[(i + 2) % 3]))
+        for i in range(3)
+    ])
+
+
 def _check_distance(atoms, rmax: float) -> bool:
-    positions = atoms.get_positions()
-    min_distance = np.abs(
-        np.concatenate((positions.min(axis=0), positions.max(axis=0)))
-    ).min()
-    return min_distance > rmax
+    """Return True if a sphere of radius rmax fits inside the (wrapped) cell.
+
+    After wrapping positions to center=(0,0,0) the origin sits at the centre
+    of the supercell parallelepiped, so the inscribed-sphere radius is
+    min(perpendicular_height) / 2.  The old Cartesian bounding-box test was
+    incorrect for non-orthogonal cells.
+    """
+    return float(_perp_heights(atoms).min()) / 2.0 >= rmax
 
 
 def _supercell_repeats(atoms, rmax: float) -> list[int]:
-    cell_lengths = np.linalg.norm(atoms.cell.array, axis=1)
+    """Repeats along each cell direction needed to enclose a sphere of rmax.
+
+    Uses perpendicular face-to-face heights rather than lattice-vector norms
+    so that non-orthogonal cells (hexagonal, monoclinic, triclinic …) are
+    handled correctly.
+    """
     repeats = []
-    for length in cell_lengths:
-        repeat = max(3, int(np.ceil((2 * rmax) / length)))
+    for h in _perp_heights(atoms):
+        repeat = max(3, int(np.ceil((2 * rmax) / h)))
         if repeat % 2 == 0:
             repeat += 1
         repeats.append(repeat)
@@ -287,7 +312,14 @@ def average_chi(directory: str, savefile: str) -> dict[str, Any]:
     """Average chi.dat files from FEFF batch output.
 
     Scans all subdirectories of ``directory`` for chi.dat files, reads
-    their k and chi columns, and computes the mean chi(k).
+    their k and chi columns, interpolates every spectrum onto a shared
+    uniform k-grid, and computes the mean chi(k).
+
+    The common grid spans the intersection of all per-file k ranges
+    (k_min = max of all starting k; k_max = min of all ending k) with
+    spacing equal to the median per-file dk.  Each spectrum is linearly
+    interpolated onto this grid before averaging, so files with different
+    starting points, step sizes, or lengths are all handled correctly.
 
     Parameters
     ----------
@@ -303,8 +335,7 @@ def average_chi(directory: str, savefile: str) -> dict[str, Any]:
         skipped (int), output_file (str).
     """
     feff_dir = Path(directory)
-    k_all: list[list[float]] = []
-    chi_all: list[list[float]] = []
+    raw: list[tuple[np.ndarray, np.ndarray]] = []
     skipped = 0
 
     for sample_dir in sorted(feff_dir.iterdir()):
@@ -326,17 +357,16 @@ def average_chi(directory: str, savefile: str) -> dict[str, Any]:
             [tok for tok in line.split(" ") if tok != ""]
             for line in lines[index + 1:]
         ]
-        k = [float(row[0]) for row in split_lines]
-        chi = [float(row[1]) for row in split_lines]
+        k = np.array([float(row[0]) for row in split_lines])
+        chi = np.array([float(row[1]) for row in split_lines])
 
-        if k and k[0] == 0.05:
-            chi = [np.nan] + chi
-            k = [0.0] + k
+        if len(k) < 2:
+            skipped += 1
+            continue
 
-        k_all.append(k)
-        chi_all.append(chi)
+        raw.append((k, chi))
 
-    if not chi_all:
+    if not raw:
         return {
             "k": np.array([]),
             "chi_avg": np.array([]),
@@ -345,19 +375,27 @@ def average_chi(directory: str, savefile: str) -> dict[str, Any]:
             "output_file": "",
         }
 
-    k_arr = np.array(k_all)
-    chi_arr = np.array(chi_all)
-    chi_mean = np.nanmean(chi_arr, axis=0)
+    # Build a common grid over the intersection of all k ranges.
+    k_min = max(k[0] for k, _ in raw)
+    k_max = min(k[-1] for k, _ in raw)
+    dk = float(np.median([float(np.median(np.diff(k))) for k, _ in raw]))
+    k_common = np.arange(k_min, k_max + dk / 2, dk)
 
-    paired = np.vstack((k_arr[0], chi_mean)).T
+    # Interpolate each spectrum onto the common grid and stack.
+    chi_interp = np.array([
+        np.interp(k_common, k, chi) for k, chi in raw
+    ])
+    chi_mean = np.mean(chi_interp, axis=0)
+
+    paired = np.vstack((k_common, chi_mean)).T
     output_file = f"{savefile}-chi_avg.dat"
     with open(output_file, "w") as f:
         f.writelines([" ".join(row) + "\n" for row in paired.astype(str)])
 
     return {
-        "k": k_arr[0],
+        "k": k_common,
         "chi_avg": chi_mean,
-        "n_samples": len(chi_all),
+        "n_samples": len(raw),
         "skipped": skipped,
         "output_file": output_file,
     }
