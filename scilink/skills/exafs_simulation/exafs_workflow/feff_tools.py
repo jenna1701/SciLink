@@ -1,7 +1,8 @@
 """FEFF-specific tools for EXAFS simulation workflows.
 
 Provides carve_out (local environment extraction), batch FEFF input
-generation from MD trajectories, and chi(k) averaging across FEFF outputs.
+generation from MD trajectories, chi(k) averaging across FEFF outputs, and
+k-weighted spectrum plotting with the MD sampling band.
 """
 
 from __future__ import annotations
@@ -308,12 +309,32 @@ def generate_feff_inputs_from_trajectory(
     }
 
 
-def average_chi(directory: str, savefile: str) -> dict[str, Any]:
+def _frame_from_subdir(name: str) -> int | None:
+    """Parse the frame index from a FEFF output subdir name.
+
+    Subdirs are named ``{frame:0>6}_{target_atom}`` by
+    ``generate_feff_inputs_from_trajectory``. Returns None if the name does
+    not match that pattern.
+    """
+    head = name.split("_", 1)[0]
+    try:
+        return int(head)
+    except ValueError:
+        return None
+
+
+def average_chi(
+    directory: str,
+    savefile: str,
+    include_frames: "set[int] | list[int] | None" = None,
+) -> dict[str, Any]:
     """Average chi.dat files from FEFF batch output.
 
     Scans all subdirectories of ``directory`` for chi.dat files, reads
     their k and chi columns, interpolates every spectrum onto a shared
-    uniform k-grid, and computes the mean chi(k).
+    uniform k-grid, and computes the mean chi(k) plus a per-k spread band
+    (standard deviation and standard error of the mean across the averaged
+    frames).
 
     The common grid spans the intersection of all per-file k ranges
     (k_min = max of all starting k; k_max = min of all ending k) with
@@ -327,18 +348,38 @@ def average_chi(directory: str, savefile: str) -> dict[str, Any]:
         Directory containing FEFF output subdirectories with chi.dat files.
     savefile : str
         Base path for the output file (writes ``<savefile>-chi_avg.dat``).
+    include_frames : set/list of int, optional
+        If given, only frames whose index appears in this collection are
+        averaged. Use with :func:`select_frames_by_uq` (in ``uq_tools``) to
+        restrict the average to snapshots where the MLIP was reliable in the
+        absorber's neighborhood. When None (default), all frames are used.
 
     Returns
     -------
     dict
-        Keys: k (ndarray), chi_avg (ndarray), n_samples (int),
-        skipped (int), output_file (str).
+        Keys: k (ndarray), chi_avg (ndarray), chi_std (ndarray, per-k
+        standard deviation across frames), chi_sem (ndarray, per-k standard
+        error of the mean), n_samples (int), skipped (int),
+        excluded (int, frames dropped by ``include_frames``),
+        output_file (str). ``chi_std``/``chi_sem`` capture MD sampling
+        spread, not MLIP model error.
     """
     feff_dir = Path(directory)
+    include = set(include_frames) if include_frames is not None else None
     raw: list[tuple[np.ndarray, np.ndarray]] = []
     skipped = 0
+    excluded = 0
 
     for sample_dir in sorted(feff_dir.iterdir()):
+        if not sample_dir.is_dir():
+            continue
+
+        if include is not None:
+            frame = _frame_from_subdir(sample_dir.name)
+            if frame is None or frame not in include:
+                excluded += 1
+                continue
+
         chi_path = sample_dir / "chi.dat"
         if not chi_path.is_file():
             skipped += 1
@@ -370,8 +411,11 @@ def average_chi(directory: str, savefile: str) -> dict[str, Any]:
         return {
             "k": np.array([]),
             "chi_avg": np.array([]),
+            "chi_std": np.array([]),
+            "chi_sem": np.array([]),
             "n_samples": 0,
             "skipped": skipped,
+            "excluded": excluded,
             "output_file": "",
         }
 
@@ -386,18 +430,137 @@ def average_chi(directory: str, savefile: str) -> dict[str, Any]:
         np.interp(k_common, k, chi) for k, chi in raw
     ])
     chi_mean = np.mean(chi_interp, axis=0)
+    chi_std = np.std(chi_interp, axis=0)
+    chi_sem = chi_std / np.sqrt(chi_interp.shape[0])
 
-    paired = np.vstack((k_common, chi_mean)).T
+    paired = np.vstack((k_common, chi_mean, chi_std, chi_sem)).T
     output_file = f"{savefile}-chi_avg.dat"
     with open(output_file, "w") as f:
+        f.write("# k chi_avg chi_std chi_sem\n")
         f.writelines([" ".join(row) + "\n" for row in paired.astype(str)])
 
     return {
         "k": k_common,
         "chi_avg": chi_mean,
+        "chi_std": chi_std,
+        "chi_sem": chi_sem,
         "n_samples": len(raw),
         "skipped": skipped,
+        "excluded": excluded,
         "output_file": output_file,
+    }
+
+
+def plot_chi(
+    chi_file: str,
+    savefile: str,
+    k_weight: int = 2,
+    band: str = "sem",
+    n_sigma: float = 1.0,
+    n_samples: "int | None" = None,
+    title: "str | None" = None,
+) -> dict[str, Any]:
+    """Plot k-weighted chi(k) with the MD sampling band as a shaded region.
+
+    Reads the ``<savefile>-chi_avg.dat`` produced by :func:`average_chi`
+    (columns: k, chi_avg, chi_std, chi_sem) and renders k^n * chi(k) with a
+    shaded band around the mean.
+
+    Parameters
+    ----------
+    chi_file : str
+        Path to the averaged chi file written by ``average_chi``
+        (``*-chi_avg.dat``, 4 columns). A legacy 2-column file (k, chi) is
+        accepted too — it plots without a band.
+    savefile : str
+        Base path for the output figure (writes ``<savefile>.png``).
+    k_weight : int
+        k-weighting exponent n in k^n * chi(k) (default 2). Common: 1, 2, 3.
+    band : {"sem", "std", "none"}
+        Which spread to shade. "sem" (default) is the standard error of the
+        mean — the uncertainty on the *average* spectrum and the right choice
+        for "how converged is my mean". "std" shows snapshot-to-snapshot
+        dispersion. "none" plots the mean line only. This band is MD
+        *sampling* spread, NOT an MLIP model-error bar.
+    n_sigma : float
+        Band half-width in multiples of the chosen spread (default 1.0).
+    n_samples : int, optional
+        Number of frames averaged (from ``average_chi``'s ``n_samples``).
+        Annotated on the plot when given.
+    title : str, optional
+        Plot title. Defaults to a description of the k-weight and band.
+
+    Returns
+    -------
+    dict
+        Keys: output_file (str), k_weight (int), band (str), n_points (int).
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if band not in ("sem", "std", "none"):
+        raise ValueError("band must be 'sem', 'std', or 'none'")
+
+    data = np.loadtxt(chi_file, comments="#")
+    if data.ndim != 2 or data.shape[1] < 2:
+        raise ValueError(
+            f"{chi_file} does not look like a chi file (need >=2 columns)."
+        )
+
+    k = data[:, 0]
+    chi = data[:, 1]
+    chi_std = data[:, 2] if data.shape[1] > 2 else None
+    chi_sem = data[:, 3] if data.shape[1] > 3 else None
+
+    kw = k**k_weight
+    y = kw * chi
+
+    spread = None
+    band_label = None
+    if band == "sem" and chi_sem is not None:
+        spread = kw * chi_sem
+        band_label = f"±{n_sigma:g} SEM"
+    elif band == "std" and chi_std is not None:
+        spread = kw * chi_std
+        band_label = f"±{n_sigma:g} SD (snapshot spread)"
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    if spread is not None:
+        finite = np.isfinite(y) & np.isfinite(spread)
+        ax.fill_between(
+            k[finite],
+            (y - n_sigma * spread)[finite],
+            (y + n_sigma * spread)[finite],
+            alpha=0.25,
+            color="tab:blue",
+            label=band_label,
+            linewidth=0,
+        )
+    ax.plot(k, y, color="tab:blue", lw=1.5, label=r"$\langle\chi\rangle$")
+
+    ax.set_xlabel(r"$k$ ($\AA^{-1}$)")
+    ax.set_ylabel(rf"$k^{k_weight}\,\chi(k)$ ($\AA^{{-{k_weight}}}$)")
+    if title is None:
+        title = rf"EXAFS $k^{k_weight}\chi(k)$"
+        if n_samples is not None:
+            title += f" — {n_samples} frames"
+    ax.set_title(title)
+    ax.axhline(0.0, color="0.6", lw=0.6, zorder=0)
+    if spread is not None:
+        ax.legend(frameon=False, fontsize=9)
+    fig.tight_layout()
+
+    output_file = f"{savefile}.png"
+    fig.savefig(output_file, dpi=150)
+    plt.close(fig)
+
+    return {
+        "output_file": output_file,
+        "k_weight": k_weight,
+        "band": band if spread is not None else "none",
+        "n_points": int(len(k)),
     }
 
 
@@ -523,21 +686,101 @@ TOOL_SPECS = [
                 "type": "string",
                 "description": "Base path for the output averaged chi file.",
             },
+            "include_frames": {
+                "type": "array",
+                "description": (
+                    "Optional list of frame indices to restrict the average "
+                    "to (e.g. the UQ-passing frames from "
+                    "select_frames_by_uq). Omit to average all frames."
+                ),
+            },
         },
         required=["directory", "savefile"],
         import_line=(
             "from scilink.skills.exafs_simulation.exafs_workflow.feff_tools "
             "import average_chi"
         ),
-        signature="average_chi(directory: str, savefile: str) -> dict",
+        signature=(
+            "average_chi(directory: str, savefile: str, "
+            "include_frames=None) -> dict"
+        ),
         agents=["simulation"],
         when_to_use=(
             "After all FEFF jobs complete, to average chi(k) spectra across "
-            "MD snapshots for a converged EXAFS signal."
+            "MD snapshots for a converged EXAFS signal with a per-k sampling "
+            "band. Pass include_frames to average only UQ-reliable snapshots."
         ),
         returns=(
-            "Dict with k array, chi_avg array, n_samples averaged, skipped "
-            "count, and output file path."
+            "Dict with k array, chi_avg array, chi_std and chi_sem per-k "
+            "sampling bands, n_samples averaged, skipped and excluded counts, "
+            "and output file path."
+        ),
+    ),
+    ToolSpec(
+        name="plot_chi",
+        description=(
+            "Plot k-weighted chi(k) from an averaged chi file with the MD "
+            "sampling band shaded around the mean. The band is sampling "
+            "spread (SEM or SD), not an MLIP model-error bar."
+        ),
+        parameters={
+            "chi_file": {
+                "type": "string",
+                "description": (
+                    "Path to the averaged chi file from average_chi "
+                    "(*-chi_avg.dat, columns k chi_avg chi_std chi_sem)."
+                ),
+            },
+            "savefile": {
+                "type": "string",
+                "description": "Base path for the output figure (writes <savefile>.png).",
+            },
+            "k_weight": {
+                "type": "integer",
+                "description": (
+                    "k-weighting exponent n in k^n*chi(k). RAISE (2->3) to "
+                    "emphasize the high-k region; LOWER (->1) for low-k. "
+                    "Default 2."
+                ),
+            },
+            "band": {
+                "type": "string",
+                "description": (
+                    '"sem" (uncertainty on the mean, default), "std" '
+                    "(snapshot-to-snapshot spread), or \"none\" (mean only)."
+                ),
+            },
+            "n_sigma": {
+                "type": "number",
+                "description": "Band half-width in multiples of the spread (default 1.0).",
+            },
+            "n_samples": {
+                "type": "integer",
+                "description": "Number of frames averaged, annotated on the plot.",
+            },
+        },
+        required=["chi_file", "savefile"],
+        import_line=(
+            "from scilink.skills.exafs_simulation.exafs_workflow.feff_tools "
+            "import plot_chi"
+        ),
+        signature=(
+            "plot_chi(chi_file, savefile, k_weight=2, band='sem', "
+            "n_sigma=1.0, n_samples=None, title=None) -> dict"
+        ),
+        agents=["simulation"],
+        when_to_use=(
+            "After average_chi, to produce a publication-ready k-weighted "
+            "spectrum with a shaded sampling band."
+        ),
+        returns="Dict with output_file path, k_weight, band used, and n_points.",
+        example=(
+            "from scilink.skills.exafs_simulation.exafs_workflow.feff_tools "
+            "import average_chi, plot_chi\n\n"
+            "avg = average_chi(feff_dir, 'exafs_uq',\n"
+            "                  include_frames=sel['passing_frames'])\n"
+            "plot_chi(avg['output_file'], 'exafs_uq_k2',\n"
+            "         k_weight=2, band='sem', n_samples=avg['n_samples'])"
         ),
     ),
 ]

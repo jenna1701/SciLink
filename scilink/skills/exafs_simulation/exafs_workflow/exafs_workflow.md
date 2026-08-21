@@ -336,7 +336,7 @@ with ThreadPoolExecutor(max_workers=32) as pool:
     pool.map(run_feff, feff_dirs)
 ```
 
-### Step 6: Average and plot
+### Step 6: Average
 
 Use the `average_chi` tool:
 
@@ -348,8 +348,91 @@ result = average_chi(
     savefile="exafs_output",
 )
 # result["chi_avg"] contains the averaged spectrum
+# result["chi_std"] / result["chi_sem"] are per-k sampling bands (MD spread)
 # result["output_file"] is the path to the saved data
 ```
+
+`chi_std` / `chi_sem` capture the spread of χ(k) across MD snapshots — a
+thermal + structural *sampling* band, **not** a simulation-engine model-error
+bar. Plot `chi_avg ± chi_sem` (or `± chi_std`) as a shaded band to show
+convergence and snapshot dispersion.
+
+### Step 6b (OPTIONAL): Qualify frames by MLIP uncertainty
+
+This step is **entirely optional** and is skipped by default. The core
+pipeline (Steps 1–6, plot in Step 7) runs without it and without its extra
+dependency (`pandas`) or a trained UQ model. It applies **only when the MD was
+run with an MLIP engine** and a per-atom UQ model (UQ-MLIP) is available; it is
+not applicable to LAMMPS-classical or DFT-AIMD trajectories.
+
+When applicable, you can restrict the average to snapshots where the MLIP was
+reliable *in the absorber's neighborhood*, producing a confidence-qualified
+spectrum. The `select_frames_by_uq` tool imports `pandas` lazily, so it only
+requires it when actually invoked — if the UQ stack is not installed the rest
+of the workflow is unaffected.
+
+**What this is — and is not.** UQ-MLIP gives a per-atom uncertainty on the
+MLIP's *energy* prediction (a domain-validity diagnostic). There is no
+calibrated map from an energy interval (eV) to a positional error (Å), so this
+does **not** propagate the scattering atom's uncertainty into a rigorous error
+bar on χ(k). What it provides is a *gate*: drop frames whose absorber or
+scattering-shell atoms are outside the MLIP's reliable regime, so those
+untrustworthy geometries don't contaminate the average.
+
+Prerequisite: extract UQ embeddings on the **same** `md_trajectory.xyz` used
+for FEFF generation, with `--index ":"`, so UQ `sample_idx` equals the FEFF
+frame index. Then run UQ-MLIP's `run-gbm.py` to produce
+`UQ_md_trajectory.csv.gz`.
+
+```python
+from scilink.skills.exafs_simulation.exafs_workflow.uq_tools import (
+    select_frames_by_uq,
+)
+
+sel = select_frames_by_uq(
+    uq_csv="results/gbm_mace/UQ_md_trajectory.csv.gz",
+    trajectory_path="md_trajectory.xyz",
+    target_atom=0,          # same absorber index as FEFF generation
+    threshold=0.05,         # max shell uncertainty (UQ model units, ~eV/atom)
+    shell_radius=6.0,       # match FEFF RMAX
+    aggregate="max",        # conservative: one bad neighbor fails the frame
+)
+# sel["passing_frames"] -> reliable snapshots; sel["frame_uncertainty"] -> per-frame
+
+result = average_chi(
+    directory=result["output_dir"],
+    savefile="exafs_uq",
+    include_frames=sel["passing_frames"],
+)
+```
+
+Report both the retained-frame count (`n_samples` vs `excluded`) and the
+sampling band — e.g. "χ(k) averaged over N of M frames with absorber-shell UQ
+≤ threshold; shaded band is ±SEM across retained snapshots." That is a
+defensible confidence statement, not a first-principles χ(k) error bar.
+
+### Step 7: Plot the k-weighted spectrum with the sampling band
+
+Use the `plot_chi` tool to render k²χ(k) (or another k-weight) with the
+sampling band from Step 6 shaded around the mean:
+
+```python
+from scilink.skills.exafs_simulation.exafs_workflow.feff_tools import plot_chi
+
+plot_chi(
+    chi_file=result["output_file"],   # *-chi_avg.dat from average_chi
+    savefile="exafs_k2",
+    k_weight=2,          # 1, 2, or 3; higher emphasizes high-k
+    band="sem",          # "sem" (uncertainty on the mean), "std" (snapshot spread), "none"
+    n_samples=result["n_samples"],
+)
+# writes exafs_k2.png
+```
+
+Use `band="sem"` to show how well-converged the mean spectrum is, or
+`band="std"` to show snapshot-to-snapshot dispersion. Remember this band is MD
+*sampling* spread, not a model-error bar. When frames were UQ-gated in Step 6b,
+pair the plot caption with the retained-frame statement above.
 
 
 ## interpretation
